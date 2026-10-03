@@ -31,7 +31,7 @@ The importable [Slack manifest JSON](slack-manifest.json) includes all seven com
 
 The bot's leatherbound grimoire icon is included at [512 × 512](icons/ledger-bot-512.png) for Slack upload and [36 × 36](icons/ledger-bot-36.png) for mobile rendering. See [icon assets and installation](icons/README.md) for the source illustration and generation prompt.
 
-AI narration uses [23 message-type JSON files](ledger/prompts), each with three paired system/user prompt variations. The bot randomly chooses a voice and substitutes verified member/event details; delivery retries reuse the composed text. See the [rank-up example](ledger/prompts/rank_up.json) and [prompt authoring guide](docs/PROMPTS.md) for variables, audience settings, and admin preview/publication.
+AI narration uses [23 message-type JSON files](ledger/prompts), each with three paired system/user prompt variations. The bot avoids the last two voices before selecting randomly, using shared history for channel posts and separate history per DM recipient. It substitutes verified member/event details, and delivery retries reuse the composed text. See the [rank-up example](ledger/prompts/rank_up.json) and [prompt authoring guide](docs/PROMPTS.md) for variables, audience settings, and admin preview/publication.
 
 ## Member experience
 

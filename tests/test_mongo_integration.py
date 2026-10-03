@@ -8,6 +8,7 @@ from pymongo.errors import DuplicateKeyError
 
 from conftest import oid
 from ledger.domain import Ledger
+from ledger.messages import Composer
 from ledger.storage import connect
 
 
@@ -40,6 +41,17 @@ def test_real_transactions_and_concurrent_exactly_once_kudos(env):
         with pytest.raises(RuntimeError):
             store.atomic(fail)
         assert not store.get('ledger_evidence', 'must-rollback')
+        # Independent workers serialize prompt history through the same Mongo document.
+        composer = Composer(store, None, chooser=lambda candidates: candidates[0])
+        def reserve(_):
+            try:
+                return store.atomic(lambda s: composer.reserve(s, 'rank_up', 'shared', 'shared'))
+            except DuplicateKeyError:
+                return store.atomic(lambda s: composer.reserve(s, 'rank_up', 'shared', 'shared'))
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            selections = list(pool.map(reserve, range(3)))
+        assert len({s['template']['variations'][0]['id'] for s in selections}) == 3
+        assert len(store.get('ledger_context', 'prompt_history:shared')['recent']) == 2
     finally:
         assert database.startswith('ledger_test_') and len(database) == len('ledger_test_') + 32
         store.db.client.drop_database(database)

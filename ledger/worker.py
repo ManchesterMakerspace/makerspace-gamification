@@ -342,8 +342,22 @@ class Worker:
         current = self.store.get("ledger_outbox", job["_id"])
         if current.get("composed"):
             return current["composed"]
+        payload = job["payload"]
+        # Channel conversations use the same shared history as announcements,
+        # even though their conversational prompt uses the member audience.
+        shared = audience == "shared" or (job["kind"] == "conversation" and not payload["channel"].startswith("D"))
+        scope = "shared" if shared else "member:" + payload["member_id"]
+        def reserve(s):
+            saved = s.get("ledger_outbox", job["_id"])
+            if saved.get("lease") != job["lease"] or saved["status"] != "working":
+                raise Denied("Delivery was cancelled or its lease expired.")
+            if not saved.get("prompt_selection"):
+                saved["prompt_selection"] = self.composer.reserve(s, kind, audience, scope)
+                s.put("ledger_outbox", saved)
+            return saved["prompt_selection"]
+        selection = self.store.atomic(reserve)
         facts = self.prompt_facts(job["payload"].get("member_id"), kind, facts)
-        result = self.composer.compose(kind, audience, facts, conversation)
+        result = self.composer.compose(kind, audience, facts, conversation, selection=selection)
         def write(s):
             saved = s.get("ledger_outbox", job["_id"])
             if saved.get("lease") != job["lease"] or saved["status"] != "working":
