@@ -85,3 +85,7 @@ The adapter sends `chat_template_kwargs: {"enable_thinking": false}` with every 
 Finally exercise a DM, all commands, modal dropdowns/submissions, App Home, a public kudos, private-channel invitations/removals, and a file-backed skill tree in Slack. Stop only `ledger-ai` briefly during the staff pilot and confirm canned messages, unchanged accounting, and working opt-out cleanup, then restart it. A failed completion gets one attempt within the existing fifteen-second deadline; already composed fallback messages are reused on delivery retries.
 
 Local automated checks validate the API contract, signed callback dispatch, manifest coverage, and Compose structure. A successful GB10 model load, authenticated Cloudflare route, and real Slack workspace installation must be verified on the deployment host; they are not simulated by those tests.
+
+## Tools and staged engagement rollout
+
+Compose enables automatic tool choice with the `qwen3_coder` parser and retains non-thinking generation. Verify the deployed image accepts these flags and performs a real tool_call_id-correlated round-trip before activation. Interfaces/delegation/prompts ship first. Observation, deductions, novel public announcements, and welcomes are independently disabled by default; audit-only observation defaults on. The engagement worker is separate from accounting/channel cleanup. Update exact Mongo roles for volunteer_events/checkins/cards reads and quest indexes. See [switches and live acceptance checks](ENGAGEMENT_QUESTS.md).

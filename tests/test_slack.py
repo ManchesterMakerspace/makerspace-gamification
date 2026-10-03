@@ -163,3 +163,77 @@ def test_slow_successful_callback_is_visible_in_logs(joined, caplog):
     with patch('ledger.http.time.monotonic', side_effect=[10, 12.6]):
         assert request(app, payload)[0] == 200
     assert 'path=/slack/events status=200 duration_ms=2600' in caplog.text
+
+
+def test_join_remembers_consent_and_displays_saved_state(env):
+    ledger, store, _, composer, _, slack = env
+    ui = SlackUI(ledger, composer)
+    command = {'user_id': 'U1', 'command': '/ledger', 'text': 'join', 'trigger_id': 't1'}
+    ui.command(command, slack)
+    consent = slack.views_open.call_args.kwargs['view']
+    assert consent['callback_id'] == 'consent'
+    reply = ui.submission(form(consent, {'agree': True}), slack)
+    assert reply['response_action'] == 'update'
+    assert reply['view']['title']['text'] == 'Opt-in saved'
+    assert 'history import is queued' in json.dumps(reply)
+    before = ledger.participant(str(oid(1)))
+    queued = store.select('ledger_outbox')
+    ui.command(command, slack)
+    view = slack.views_open.call_args.kwargs['view']
+    assert view['callback_id'] == 'dismiss'
+    assert view['title']['text'] == 'Already opted in'
+    assert 'Newbie' in json.dumps(view)
+    ui.action({'user': {'id': 'U1'}, 'trigger_id': 't2', 'actions': [{'action_id': 'join', 'value': ''}]}, slack)
+    assert slack.views_open.call_args.kwargs['view']['callback_id'] == 'dismiss'
+    assert ledger.participant(str(oid(1))) == before
+    assert store.select('ledger_outbox') == queued
+    # Retried submissions keep consent, pinned rules, and invitations unchanged.
+    ui.submission(form(consent, {'agree': True}), slack)
+    assert ledger.participant(str(oid(1))) == before
+    assert store.select('ledger_outbox') == queued
+    ledger.leave(str(oid(1)))
+    ui.command(command, slack)
+    assert slack.views_open.call_args.kwargs['view']['callback_id'] == 'consent'
+
+
+def test_signed_consent_submission_saves_before_success_response(env):
+    ledger, store, _, composer, *_ = env
+    ui = SlackUI(ledger, composer)
+    app = HTTPApp(build_app(ui, 'xoxb-test', 'test-signing-secret', 'T1', 'UBOT', WebClient(token='xoxb-test')), store)
+    payload = {**form(views.consent(), {'agree': True}), 'type': 'view_submission', 'team': {'id': 'T1'}}
+    with patch.object(WebClient, 'users_info', return_value={'user': {'id': 'U1', 'deleted': False, 'is_bot': False}}):
+        status, body = request(app, {'payload': json.dumps(payload)}, 'application/x-www-form-urlencoded', path='/slack/interactions')
+    assert status == 200
+    assert json.loads(body)['view']['title']['text'] == 'Opt-in saved'
+    assert ledger.participant(str(oid(1)))['opted_in'] is True
+    assert store.select('ledger_evidence', {'kind': 'consent'})
+
+
+@pytest.mark.parametrize('channel,event_type,text,outcome', [
+    ('DU1', 'message', 'Help me choose a first build', 'reply_queued'),
+    ('CCHAT', 'app_mention', '<@UBOT> Help me choose a first build', 'reply_queued'),
+    ('CCHAT', 'message', 'Chatting with another maker', 'ignored_unaddressed_channel_message'),
+    ('COTHER', 'app_mention', '<@UBOT> Hello', 'ignored_unregistered_channel'),
+])
+def test_signed_chat_flows_through_accounting_and_delivery(joined, caplog, channel, event_type, text, outcome):
+    from ledger.worker import Worker
+    ledger, store, _, composer, api, slack = joined
+    app = HTTPApp(build_app(SlackUI(ledger, composer), 'xoxb-test', 'test-signing-secret', 'T1', 'UBOT', WebClient(token='xoxb-test')), store)
+    payload = {'type': 'event_callback', 'team_id': 'T1', 'event_id': 'EvChat', 'event': {
+        'type': event_type, 'user': 'U1', 'channel': channel, 'text': text, 'ts': '100.001'}}
+    assert request(app, payload)[0] == 200
+    # HTTP receipt alone does not process or deliver a reply.
+    api.complete.assert_not_called()
+    slack.chat_postMessage.assert_not_called()
+    assert store.get('ledger_inbox', 'slack:EvChat')['status'] == 'pending'
+    worker = Worker(ledger, composer, slack, bot_id='UBOT')
+    with caplog.at_level('INFO', logger='ledger.worker'):
+        assert worker.step('ledger_inbox', kinds=['slack_event'])
+    assert f'outcome={outcome}' in caplog.text
+    assert text not in caplog.text
+    assert worker.step('ledger_outbox', kinds=['conversation']) == (outcome == 'reply_queued')
+    if outcome == 'reply_queued':
+        assert slack.chat_postMessage.call_args.kwargs['channel'] == channel
+        assert store.get('ledger_outbox', f'reply:{channel}:100.001')['status'] == 'done'
+    else:
+        slack.chat_postMessage.assert_not_called()

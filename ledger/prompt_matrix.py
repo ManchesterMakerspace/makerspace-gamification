@@ -13,19 +13,19 @@ import time
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
 
-MAX_MATRIX_BYTES = 16384
+MAX_MATRIX_BYTES = 24576
 MATRIX_FILE = "prompt_matrix.xml.md"
 REQUIRED_SECTIONS = {"identity", "authority", "roles", "consent", "channels", "progression", "economy",
                      "kudos", "community", "privacy", "response", "examples"}
 REQUIRED_ROLES = {"ledger", "member", "participant", "nonparticipant", "sponsor", "success_buddy", "mentor",
                   "checkout_approver", "admin", "board_member", "resource_manager", "tool_captain",
-                  "workshop_instructor", "design_challenge_judge"}
+                  "workshop_instructor", "design_challenge_judge", "quest_author", "ai_observer", "delegated_reviewer"}
 log = logging.getLogger(__name__)
 
 
 def validate_matrix(text, source="bundled"):
     if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_MATRIX_BYTES:
-        raise ValueError("Prompt matrix must be UTF-8 text no larger than 16 KiB")
+        raise ValueError("Prompt matrix must be UTF-8 text no larger than 24 KiB")
     text = text.lstrip("\ufeff").strip().replace("\r\n", "\n")
     if re.search(r"<!\s*(DOCTYPE|ENTITY)\b", text, re.I):
         raise ValueError("DTD/entity declarations are not allowed")
@@ -124,7 +124,7 @@ def fetch_google_doc(url, access_token="", deadline=15):
                     break
                 size += len(chunk)
                 if size > MAX_MATRIX_BYTES:
-                    raise ValueError("Document export exceeds 16 KiB")
+                    raise ValueError("Document export exceeds 24 KiB")
                 chunks.append(chunk)
             return b"".join(chunks).decode("utf-8-sig")
         finally:

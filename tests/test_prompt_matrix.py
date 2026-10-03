@@ -21,7 +21,8 @@ DOC = 'https://docs.google.com/document/d/example_document_id/edit?usp=sharing#h
 
 
 def policy(version='1'):
-    return bundled_matrix()['text'].replace('id="the-ledger" version="1"', f'id="the-ledger" version="{version}"')
+    matrix = bundled_matrix()
+    return matrix['text'].replace(f'id="the-ledger" version="{matrix["version"]}"', f'id="the-ledger" version="{version}"')
 
 
 def fake_connection(raw, *, status=200, content_type='text/plain; charset=utf-8', location=None):
@@ -39,6 +40,7 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     root = ElementTree.fromstring(matrix['text'])
     assert len(matrix['text'].encode()) <= MAX_MATRIX_BYTES
     assert {r.get('id') for r in root.find('roles')} == REQUIRED_ROLES
+    assert 'Repeated join requests show saved participation' in root.find('consent').text
     for i, (name, _, floor, _) in enumerate(RANKS, 1):
         assert f'| {i} | {name} | {floor if floor is not None else "Inactive"} |' in root.find('progression').text
     for rate in XP.values():
@@ -53,6 +55,17 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
                     for comparison in node.comparators:
                         found.update(n.value for n in ast.walk(comparison) if isinstance(n, ast.Constant) and isinstance(n.value, str))
     assert {'admin', 'board_member', 'resource_manager'} <= found <= REQUIRED_ROLES
+
+
+@pytest.mark.parametrize('role', ['quest_author', 'ai_observer', 'delegated_reviewer'])
+def test_missing_new_required_remote_role_retains_current_policy(role):
+    import re
+    matrix = PromptMatrix(DOC)
+    before = matrix.snapshot()
+    incomplete = re.sub(r'<role id="' + role + r'">.*?</role>', '', before['text'], flags=re.S)
+    with patch('ledger.prompt_matrix.fetch_google_doc', return_value=incomplete):
+        assert matrix.refresh('missing-role')['outcome'] == 'bundled_fallback'
+    assert matrix.snapshot() == before
 
 
 @pytest.mark.parametrize('transform', [

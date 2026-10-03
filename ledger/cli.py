@@ -56,15 +56,25 @@ def broker(store, subscribe=True):
     if os.environ.get("MQTT_TLS", "false").lower() == "true":
         client.tls_set()
     def on_connect(c, userdata, flags, reason_code, properties):
+        if reason_code.is_failure:
+            logging.warning("MQTT connection rejected; background reconnect continues")
+            return
+        logging.info("MQTT connected source_subscription=%s", subscribe)
         if subscribe and not reason_code.is_failure:
-            c.subscribe([(f"{collection}/+", 1) for collection in FIELDS])
+            c.subscribe([(f"{collection}/+", 1) for collection in FIELDS if collection not in ("checkins", "cards")] + [("checkins/insert", 1)])
+    def on_connect_fail(c, userdata):
+        logging.warning("MQTT unavailable; reconnecting in background while Slack queues continue")
     def on_message(c, userdata, msg):
         try:
-            ingest_mqtt(store, msg.topic, msg.payload)
+            ingest_mqtt(store, msg.topic, msg.payload, retained=bool(msg.retain))
         except Exception as exc:
             logging.warning("MQTT trigger not persisted: %s; periodic reconciliation will recover", type(exc).__name__)
     client.on_connect, client.on_message = on_connect, on_message
-    client.connect(os.environ["MQTT_HOST"], int(os.environ.get("MQTT_PORT", "1883")), 60)
+    client.on_connect_fail = on_connect_fail
+    client.reconnect_delay_set(min_delay=1, max_delay=60)
+    # loop_start retries even the first connection on its network thread.
+    # An unavailable broker must not prevent durable Slack queues from starting.
+    client.connect_async(os.environ["MQTT_HOST"], int(os.environ.get("MQTT_PORT", "1883")), 60)
     client.loop_start()
     return client
 
@@ -97,7 +107,7 @@ def main():
     parser = argparse.ArgumentParser(description="The Ledger")
     parser.add_argument("action", choices=["init", "bootstrap", "serve", "worker", "reconcile", "dry-run", "prompt-matrix"])
     parser.add_argument("--port", type=int, default=3000)
-    parser.add_argument("--queue", choices=["all", "inbox", "outbox", "channels"], default="all")
+    parser.add_argument("--queue", choices=["all", "inbox", "outbox", "channels", "engagement"], default="all")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if args.action == "prompt-matrix":
@@ -128,7 +138,7 @@ def main():
     elif args.action == "reconcile":
         ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"manual:{time.time_ns()}", "reconcile", {}))
     elif args.action == "worker":
-        connection = broker(ledger.store, subscribe=args.queue in ("all", "inbox")) if args.queue != "channels" else None
+        connection = broker(ledger.store, subscribe=args.queue in ("all", "inbox")) if args.queue not in ("channels", "engagement") else None
         worker = Worker(ledger, composer, client, connection, os.environ["SLACK_BOT_USER_ID"])
         stop = Event()
         def run(queue):
@@ -139,7 +149,7 @@ def main():
                     if queue == "inbox" and time.monotonic() - last >= 300:
                         ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"periodic:{int(time.time() // 300)}", "reconcile", {}))
                         last = time.monotonic()
-                    worked = worker.step("ledger_inbox") if queue == "inbox" else worker.step(
+                    worked = worker.step("ledger_inbox", exclude=["engagement"]) if queue == "inbox" else worker.step("ledger_inbox", kinds=["engagement"]) if queue == "engagement" else worker.step(
                         "ledger_outbox", kinds=channel_kinds if queue == "channels" else None,
                         exclude=channel_kinds if queue == "outbox" else None)
                     if not worked:
@@ -147,10 +157,11 @@ def main():
                 except Exception as exc:
                     logging.warning("Worker queue %s unavailable: %s", queue, type(exc).__name__)
                     stop.wait(2)
-        queues = ["inbox", "outbox", "channels"] if args.queue == "all" else [args.queue]
+        queues = ["inbox", "outbox", "channels", "engagement"] if args.queue == "all" else [args.queue]
         threads = [Thread(target=run, args=(q,), name=q, daemon=True) for q in queues]
         for thread in threads:
             thread.start()
+        logging.info("Ledger worker started queues=%s", ",".join(queues))
         try:
             if args.queue != "channels":
                 # The independent channel thread is already running, even if Docs is unavailable.
