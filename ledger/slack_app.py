@@ -300,6 +300,15 @@ def build_app(ui, token, signing_secret, team_id, bot_id, client=None):
     app = App(token=token, signing_secret=signing_secret, client=client, authorize=authorize,
               process_before_response=True, token_verification_enabled=False)
 
+    @app.error
+    def listener_error(error, logger):
+        # Keep Bolt's failure status: an unpersisted request was not accepted.
+        # Log only exception class and numeric Mongo code, never the payload,
+        # response_url, connection string, or database error message.
+        code = getattr(error, "code", None)
+        logger.error("Slack listener failed error_type=%s code=%s", type(error).__name__,
+                     code if isinstance(code, int) else "none")
+
     @app.middleware
     def workspace(body, next):
         actual = body.get("team_id") or (body.get("team") or {}).get("id")

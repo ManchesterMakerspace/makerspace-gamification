@@ -32,6 +32,39 @@ The manifest enables App Home and writable app messages. All seven commands have
 
 All modals, buttons, checkboxes, and external shop/tool/member dropdowns use the interaction endpoint. They are interaction payloads, not additional event subscriptions or commands.
 
+## Troubleshooting "the app did not respond"
+
+Slack needs an HTTP acknowledgment within three seconds of invoking a command ([Slack's command guide](https://docs.slack.dev/interactivity/implementing-slash-commands/)). Healthy `/health` and `/ready` responses do not verify this path: readiness checks Mongo connectivity and Ledger replica-set topology, not collection read/write authorization, callback reachability, or worker delivery.
+
+1. In the Slack app's **Slash Commands**, check each command's Request URL is exactly `https://YOUR_HOST/slack/commands`. Event subscriptions and interactivity have their own URLs above. Leave Socket Mode disabled. Editing the repository manifest alone does not update an installed Slack app.
+2. Send an **unsigned** probe through the public hostname (replace `YOUR_HOST`):
+
+   ```sh
+   curl -i --max-time 5 -X POST 'https://YOUR_HOST/slack/commands' \
+     -H 'Content-Type: application/x-www-form-urlencoded' --data 'command=%2Fledger'
+   ```
+
+   Expect **401** from Bolt; this request cannot run a command. A redirect/login, challenge, 404, or gateway error indicates a routing/access issue. Cloudflared's origin is `http://ledger-web:3000`, with paths preserved; Slack must reach callback paths without an Access login or browser challenge. A 401 proves unsigned traffic reaches verification, not that Slack's signing secret is correct.
+3. Reproduce one real `/ledger` invocation while watching:
+
+   ```sh
+   docker compose logs --follow --since=5m ledger-web cloudflared
+   ```
+
+   The supplied image logs method, path, HTTP status, and duration, without query strings, headers, or bodies. Callback failures and responses taking at least 2.5 seconds also produce a warning. Listener errors record exception class and numeric Mongo error code without the potentially sensitive exception text. To install these diagnostics from an older image, run `docker compose up -d --build --no-deps ledger-web` first.
+
+   | Result for the real Slack request | Next check |
+   | --- | --- |
+   | No web access-log entry | Slack Request URL, Socket Mode, Cloudflare route/Access/WAF; ensure the image includes access logging |
+   | 401 | `SLACK_SIGNING_SECRET` from this app's Basic Information, host clock, and unmodified request body |
+   | 403 with `Workspace not allowed` | `SLACK_TEAM_ID` must match the installed workspace's `T...` ID |
+   | 404 | Exact callback path; remove trailing slash or unintended path prefix |
+   | 500/503 | Safe listener/ingress error record; `OperationFailure code=13` means Mongo authorization failed. Check source reads and Ledger writes using [the role examples](MONGODB_ACCESS.md), and complete initialization/bootstrap |
+   | 200 taking around three seconds or more | Database lookup/transaction latency or synchronous Slack modal API calls; AI generation is outside ingress |
+   | Prompt 200, but no later DM | Inspect `ledger-accounting` and `ledger-delivery` logs and the inbox/outbox; acknowledgment succeeded |
+
+After changing `.env`, recreate the affected containers with `docker compose up -d --no-deps ledger-web ledger-accounting ledger-delivery ledger-channels`; a plain restart does not apply changed Compose environment values. Do not disable signature verification or acknowledge failed persistence to hide the error. Share only redacted diagnostic lines; keep request payloads, signing secrets, tokens, Mongo URIs, and `response_url` private.
+
 ## Event subscriptions
 
 | Bot event | Handler purpose | Scope used |

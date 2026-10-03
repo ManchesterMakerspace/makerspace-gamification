@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from slack_sdk import WebClient
 from slack_sdk.signature import SignatureVerifier
+from pymongo.errors import OperationFailure
 
 from conftest import oid
 from ledger import views
@@ -126,3 +127,39 @@ def test_http_commands_ack_without_generation(joined):
     assert request(app, payload, 'application/x-www-form-urlencoded', path='/slack/commands')[0] == 200
     assert s.select('ledger_inbox', {'kind': 'command'})
     api.complete.assert_not_called()
+
+
+def test_command_database_failure_logs_safe_cause_without_acknowledging(joined, caplog):
+    l, s, _, comp, *_ = joined
+    ui = SlackUI(l, comp)
+    app = HTTPApp(build_app(ui, 'xoxb-test', 'test-signing-secret', 'T1', 'UBOT', WebClient(token='xoxb-test')), s)
+    payload = {'team_id': 'T1', 'user_id': 'U1', 'command': '/ledger', 'text': 'PRIVATE_COMMAND',
+               'trigger_id': 't1', 'response_url': 'https://example.invalid/SECRET_RESPONSE_URL'}
+    with patch.object(l.sources, 'identity', side_effect=OperationFailure('PRIVATE_DATABASE_ERROR', code=13)):
+        status, body = request(app, payload, 'application/x-www-form-urlencoded', path='/slack/commands')
+    assert status == 500
+    assert not s.select('ledger_inbox', {'kind': 'command'})
+    assert 'error_type=OperationFailure code=13' in caplog.text
+    assert 'path=/slack/commands status=500 duration_ms=' in caplog.text
+    for secret in ('PRIVATE_COMMAND', 'SECRET_RESPONSE_URL', 'PRIVATE_DATABASE_ERROR', 'test-signing-secret'):
+        assert secret not in caplog.text + body
+
+
+def test_http_adapter_logs_failures_without_exception_details(joined, caplog):
+    l, s, _, comp, *_ = joined
+    bolt = build_app(SlackUI(l, comp), 'xoxb-test', 'test-signing-secret', 'T1', 'UBOT', WebClient(token='xoxb-test'))
+    with patch.object(bolt, 'dispatch', side_effect=RuntimeError('PRIVATE_CONNECTION_STRING')):
+        status, body = request(HTTPApp(bolt, s), {})
+    assert status == 503
+    assert 'error_type=RuntimeError' in caplog.text
+    assert 'path=/slack/events status=503 duration_ms=' in caplog.text
+    assert 'PRIVATE_CONNECTION_STRING' not in caplog.text + body
+
+
+def test_slow_successful_callback_is_visible_in_logs(joined, caplog):
+    l, s, _, comp, *_ = joined
+    app = HTTPApp(build_app(SlackUI(l, comp), 'xoxb-test', 'test-signing-secret', 'T1', 'UBOT', WebClient(token='xoxb-test')), s)
+    payload = {'type': 'url_verification', 'challenge': 'test'}
+    with patch('ledger.http.time.monotonic', side_effect=[10, 12.6]):
+        assert request(app, payload)[0] == 200
+    assert 'path=/slack/events status=200 duration_ms=2600' in caplog.text
