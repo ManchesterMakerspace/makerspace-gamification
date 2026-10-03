@@ -12,6 +12,7 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install -e '.[test]'
       - run: python -m ledger.prompt_library
+      - run: python -m ledger.prompt_matrix
       - name: Verify prompt assets in wheel
         run: |
           python -m pip wheel --no-deps . --wheel-dir dist
@@ -20,10 +21,12 @@ jobs:
           from zipfile import ZipFile
           import json
           from ledger.prompt_library import TYPES
+          from ledger.prompt_matrix import validate_matrix
           with ZipFile(next(Path('dist').glob('makerspace_ledger-*.whl'))) as wheel:
               names = [name for name in wheel.namelist() if name.startswith('ledger/prompts/') and name.endswith('.json')]
               assert {Path(name).stem for name in names} == set(TYPES)
               assert all(len(json.loads(wheel.read(name))['variations']) >= 3 for name in names)
+              validate_matrix(wheel.read('ledger/prompts/prompt_matrix.xml.md').decode('utf-8'))
           PY
       - name: Validate Compose without starting services
         run: |

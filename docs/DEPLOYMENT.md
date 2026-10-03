@@ -15,7 +15,10 @@ Copy `.env.example` to `.env` and supply:
 | `MLAB_URI`, `LEDGER_URI` | Reachable Mongo URIs with separate [restricted database credentials](MONGODB_ACCESS.md) |
 | `SLACK_*` | Bot token, signing secret, workspace ID, and bot user ID from the installed app |
 | `MQTT_*` | Reachable existing broker and its credentials/TLS setting |
+| `LEDGER_WEB_PORT` | Host loopback port for the web service; defaults to `3000`, or choose a free port such as `3001` |
 | `LEDGER_LLM_BASE_URL` | `http://ledger-ai:8000/v1` for this Compose stack |
+| `LEDGER_PROMPT_MATRIX_DOC_URL` | Optional normal Google Doc URL containing the complete [XML/Markdown prompt matrix](PROMPT_MATRIX.md) |
+| `LEDGER_PROMPT_MATRIX_GOOGLE_ACCESS_TOKEN` | Optional OAuth bearer token for a private Doc; operators manage renewal |
 | `LEDGER_LLM_MODEL` | `nvidia/Qwen3.8-27B-NVFP4`; overrides rename the served API alias, not the model downloaded |
 | `LEDGER_LLM_API_KEY` | A strong shared secret; Compose supplies it to vLLM as `VLLM_API_KEY` and the bot as its bearer key |
 | `HF_TOKEN` | Optional Hugging Face token for model downloads, separate from the inference key |
@@ -25,6 +28,8 @@ Copy `.env.example` to `.env` and supply:
 Compose requires nonblank inference and tunnel secrets. It does not invent, print, or provision them. Use deployment secret management for production. The `huggingface-cache` named volume persists model downloads; initial download, kernel compilation, and model loading can take a while. The health check allows twenty minutes for startup. Workers deliberately do not depend on AI health, so fallback delivery and opt-out cleanup remain available throughout.
 
 `localhost` in `.env` refers to each container. Replace the local development Mongo/MQTT examples with addresses reachable from Docker. For a separate Python bot host, use the reachable vLLM `/v1` address and the same API key. Compose publishes no vLLM host port; exposing one for an external bot is a deliberate deployment override, kept off the Cloudflare Slack hostname.
+
+If another application uses host port 3000, set `LEDGER_WEB_PORT=3001` in `.env`. Apply a port change with `docker compose up -d --no-deps ledger-web`, then access the service at `http://127.0.0.1:3001`. The container listens on port 3000, so its health check and the Cloudflare Tunnel origin continue to use port 3000.
 
 ## Cloudflare public hostname
 
@@ -39,7 +44,7 @@ Configure a published application route:
 | Origin URL | `ledger-web:3000` (full service URL: `http://ledger-web:3000`) |
 | Path | Leave blank to forward the hostname's paths unchanged |
 
-Use this hostname in every URL in [slack-manifest.json](../slack-manifest.json), replacing `LEDGER_HOST`. The three callback URLs are `/slack/events`, `/slack/commands`, and `/slack/interactions`. Cloudflare terminates public HTTPS; the tunnel reaches Gunicorn on the Compose network. No inbound router port forwarding is needed. The bot's port 3000 is bound only to host loopback for local health checks.
+Use this hostname in every URL in [slack-manifest.json](../slack-manifest.json), replacing `LEDGER_HOST`. The three callback URLs are `/slack/events`, `/slack/commands`, and `/slack/interactions`. Cloudflare terminates public HTTPS; the tunnel reaches Gunicorn on the Compose network. No inbound router port forwarding is needed. The bot's configured host port (`LEDGER_WEB_PORT`, default 3000) is bound only to host loopback for local health checks.
 
 Slack callbacks must reach those paths without a Cloudflare Access login, JavaScript challenge, redirect, cache response, or body rewrite. Scope any necessary Cloudflare exceptions to the dedicated callback paths. Slack signature/timestamp verification remains enabled in Bolt and is the callback authentication boundary. Keep normal outbound connectivity for the tunnel, Slack, Mongo, MQTT, and model downloads. Never point this hostname at `ledger-ai`.
 
@@ -58,7 +63,7 @@ docker compose up -d ledger-web cloudflared
 docker compose run --rm --no-deps ledger-accounting ledger bootstrap
 docker compose up -d ledger-accounting ledger-delivery ledger-channels
 docker compose ps
-curl --fail http://127.0.0.1:3000/ready
+curl --fail "http://$(docker compose port ledger-web 3000)/ready"
 ```
 
 Review `docker compose logs ledger-ai` for model startup failures and `docker compose logs cloudflared` for tunnel connectivity. `/health` checks the web process; `/ready` also checks both Mongo connections. Neither proves GPU generation or Slack delivery. After `ledger-ai` is healthy, test a real completion from the delivery container (this uses the configured bearer key without printing it):

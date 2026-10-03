@@ -13,6 +13,7 @@ from slack_sdk import WebClient
 from .domain import Ledger
 from .http import HTTPApp
 from .messages import DEFAULT_MODEL, ChatAPI, Composer
+from .prompt_matrix import PromptMatrix
 from .slack_app import SlackUI, build_app
 from .sources import FIELDS, Sources
 from .storage import connect, connect_database, enqueue
@@ -32,7 +33,7 @@ def dependencies():
     sources = Sources(connect_database(source_uri, os.environ.get("MLAB_DATABASE") or legacy_database))
     ledger = Ledger(store, sources)
     api = ChatAPI(os.environ.get("LEDGER_LLM_BASE_URL", "http://localhost:8000/v1"), os.environ.get("LEDGER_LLM_MODEL", DEFAULT_MODEL), os.environ.get("LEDGER_LLM_API_KEY", ""))
-    composer = Composer(store, api)
+    composer = Composer(store, api, matrix=PromptMatrix.from_env())
     client = WebClient(token=os.environ["SLACK_BOT_TOKEN"], timeout=10, retry_handlers=[])
     return ledger, composer, client
 
@@ -94,11 +95,18 @@ def bootstrap(ledger, client):
 
 def main():
     parser = argparse.ArgumentParser(description="The Ledger")
-    parser.add_argument("action", choices=["init", "bootstrap", "serve", "worker", "reconcile", "dry-run"])
+    parser.add_argument("action", choices=["init", "bootstrap", "serve", "worker", "reconcile", "dry-run", "prompt-matrix"])
     parser.add_argument("--port", type=int, default=3000)
     parser.add_argument("--queue", choices=["all", "inbox", "outbox", "channels"], default="all")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    if args.action == "prompt-matrix":
+        matrix = PromptMatrix.from_env()
+        status = matrix.refresh()
+        print(json.dumps(status))
+        if status["outcome"] != "loaded":
+            raise SystemExit(1)
+        return
     if args.action == "serve":
         with make_server("0.0.0.0", args.port, make_app()) as server:
             server.serve_forever()
@@ -144,6 +152,9 @@ def main():
         for thread in threads:
             thread.start()
         try:
+            if args.queue != "channels":
+                # The independent channel thread is already running, even if Docs is unavailable.
+                composer.refresh_matrix()
             while not stop.wait(1):
                 pass
         except KeyboardInterrupt:

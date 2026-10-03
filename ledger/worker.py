@@ -283,8 +283,16 @@ class Worker:
             l.staff(actor)
         else:
             l.admin(actor)
-        summary = "Use /ledger-admin ranks, history, rollback <version>, template <type> <audience>, template-library <type> <audience>, template-history, template-rollback <id>, template-test <type> <audience>, catalog, quest, review, approve <id>, reject <id> <reason>, verify-quest <quest> @member, coverage @member <reason>, correct-rank @member <slot> <reason>, reconcile."
-        if args and args[0] == "history":
+        summary = "Use /ledger-admin ranks, history, rollback <version>, template <type> <audience>, template-library <type> <audience>, template-history, template-rollback <id>, template-test <type> <audience>, reload-prompts, catalog, quest, review, approve <id>, reject <id> <reason>, verify-quest <quest> @member, coverage @member <reason>, correct-rank @member <slot> <reason>, reconcile."
+        if args == ["reload-prompts"]:
+            # A stable command key makes retries idempotent. Every composing process
+            # observes the revision before its next unreserved message.
+            self.store.atomic(lambda s: s.put("ledger_catalog", {"_id": "prompt_matrix_reload",
+                "revision": key, "actor": actor, "at": now()}))
+            status = self.composer.refresh_matrix()
+            summary = (f"Prompt matrix reload requested. This worker: {status['outcome']}, {status['source']}, "
+                       f"version {status['version']}, SHA-256 {status['sha256']}. Other workers refresh before new compositions; reserved deliveries keep their policy.")
+        elif args and args[0] == "history":
             summary = "\n".join(f"{r['_id']} — {r.get('at', 'initial')}" for r in self.store.select("ledger_rulesets") if r["_id"] != "head")
         elif args and args[0] == "rollback" and len(args) == 2:
             r = l.rollback_ranks(actor, args[1])
@@ -342,6 +350,8 @@ class Worker:
         current = self.store.get("ledger_outbox", job["_id"])
         if current.get("composed"):
             return current["composed"]
+        if not current.get("prompt_selection"):
+            self.composer.refresh_matrix()
         payload = job["payload"]
         # Channel conversations use the same shared history as announcements,
         # even though their conversational prompt uses the member audience.
@@ -353,6 +363,10 @@ class Worker:
                 raise Denied("Delivery was cancelled or its lease expired.")
             if not saved.get("prompt_selection"):
                 saved["prompt_selection"] = self.composer.reserve(s, kind, audience, scope)
+                s.put("ledger_outbox", saved)
+            elif "matrix" not in saved["prompt_selection"]:
+                # Upgrade pre-matrix reservations once without rerolling their voice.
+                saved["prompt_selection"]["matrix"] = self.composer.matrix.snapshot()
                 s.put("ledger_outbox", saved)
             return saved["prompt_selection"]
         selection = self.store.atomic(reserve)
