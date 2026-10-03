@@ -57,6 +57,17 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert {'admin', 'board_member', 'resource_manager'} <= found <= REQUIRED_ROLES
 
 
+@pytest.mark.parametrize('role', ['quest_author', 'ai_observer', 'delegated_reviewer'])
+def test_missing_new_required_remote_role_retains_current_policy(role):
+    import re
+    matrix = PromptMatrix(DOC)
+    before = matrix.snapshot()
+    incomplete = re.sub(r'<role id="' + role + r'">.*?</role>', '', before['text'], flags=re.S)
+    with patch('ledger.prompt_matrix.fetch_google_doc', return_value=incomplete):
+        assert matrix.refresh('missing-role')['outcome'] == 'bundled_fallback'
+    assert matrix.snapshot() == before
+
+
 @pytest.mark.parametrize('transform', [
     lambda text: '<html>Sign in</html>',
     lambda text: text.replace('<role id="admin">', '<role id="unknown">'),

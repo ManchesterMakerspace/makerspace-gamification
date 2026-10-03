@@ -58,6 +58,12 @@ class Community:
             q = s.get("ledger_quests", quest_id)
             if not q:
                 raise ValueError("Quest not found.")
+            if q.get("kind") == "member_quest":
+                raise ValueError("Use the member quest acceptance and completion actions.")
+            if action == "verify" and actor in q["contributions"]:
+                raise Denied("Contributors cannot verify their own group quest.")
+            if action != "verify" and actor == q["creator"]:
+                raise Denied("Authors cannot contribute to their own quests.")
             if action == "join":
                 if q["status"] != "open" or role not in q["roles"]:
                     raise ValueError("Choose an open quest and one of its disciplines.")
@@ -67,11 +73,11 @@ class Community:
                     raise ValueError("Join first, then describe your contribution.")
                 q["contributions"][actor].update(description=description, status="pending")
             elif action == "verify":
-                d.reviewer(actor, member, q.get("shop_id"))
+                authority = d.reviewer(actor, member, q.get("shop_id"), "quest_complete", quest=quest_id, commit=True)
                 c = q["contributions"].get(member)
                 if not c or c["status"] != "pending":
                     raise ValueError("No submitted contribution to verify.")
-                c.update(status="verified", reviewer=actor)
+                c.update(status="verified", reviewer=actor, review_authority=authority)
                 accepted = {m: c for m, c in q["contributions"].items() if c["status"] == "verified"}
                 if len(accepted) >= 2 and set(q["roles"]).issubset({c["role"] for c in accepted.values()}):
                     q["status"] = "completed"
@@ -81,7 +87,7 @@ class Community:
                             continue
                         s.put("ledger_evidence", {"_id": key, "kind": "submission", "achievement": "boss", "catalog_id": f"quest:{quest_id}",
                               "member_id": m, "description": contribution["description"], "learners": [], "acknowledged": [],
-                              "shop_id": q.get("shop_id"), "status": "approved", "reviewer": contribution["reviewer"], "at": now()})
+                              "shop_id": q.get("shop_id"), "status": "approved", "reviewer": contribution["reviewer"], "at": now(), **contribution["review_authority"]})
                         d._reconcile(m)
             else:
                 raise ValueError("Unknown quest action.")

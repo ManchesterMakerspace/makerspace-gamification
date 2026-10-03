@@ -10,11 +10,11 @@
  */
 var LedgerMongoRoles = (() => {
   // Collections actually queried by the current source adapter/call sites.
-  // checkout_approvers and volunteer_events currently trigger MQTT reconciliation
-  // only; no Mongo find privilege is needed on them.
+  // checkout_approvers is a reconciliation trigger only. cards/checkins are
+  // internal arrival reads, never collections exposed to conversation tools.
   const sourceCollections = [
     "members", "slack_users", "shops", "tools", "tool_checkouts",
-    "volunteer_credits", "volunteer_tasks", "earned_memberships", "groups",
+    "volunteer_credits", "volunteer_tasks", "volunteer_events", "earned_memberships", "groups", "checkins", "cards",
   ];
   const ledgerCollections = [
     "ledger_participants", "ledger_relationships", "ledger_rulesets",
@@ -25,7 +25,7 @@ var LedgerMongoRoles = (() => {
   // Exactly the collections where MongoStore.indexes() calls create_index().
   const indexedCollections = new Set([
     "ledger_participants", "ledger_inbox", "ledger_outbox", "ledger_evidence",
-    "ledger_awards", "ledger_context", "ledger_relationships",
+    "ledger_awards", "ledger_context", "ledger_relationships", "ledger_quests",
   ]);
 
   function buildRoles(sourceDatabase = "makerauth", ledgerDatabase = "makerauth") {

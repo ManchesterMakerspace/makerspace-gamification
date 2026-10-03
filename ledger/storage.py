@@ -5,10 +5,12 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from uuid import uuid4
+import re
 
 from pymongo import ASCENDING, MongoClient, ReturnDocument
 from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
+from pymongo.errors import DuplicateKeyError
 
 
 def now():
@@ -40,9 +42,17 @@ class MongoStore:
     def atomic(self, fn):
         if self.session:
             return fn(self)
-        with self.db.client.start_session() as session:
-            return session.with_transaction(lambda s: fn(MongoStore(self.db, s)),
-                                            read_concern=ReadConcern("snapshot"), write_concern=WriteConcern("majority"))
+        # Racing first upserts of a deterministic budget/cooldown/receipt ID
+        # can raise DuplicateKeyError without a transient-transaction label.
+        # The transaction is aborted, so retry the entire pure callback.
+        for attempt in range(3):
+            try:
+                with self.db.client.start_session() as session:
+                    return session.with_transaction(lambda s: fn(MongoStore(self.db, s)),
+                                                    read_concern=ReadConcern("snapshot"), write_concern=WriteConcern("majority"))
+            except DuplicateKeyError:
+                if attempt == 2:
+                    raise
 
     def claim(self, collection, clock=None, kinds=None, exclude=None):
         clock = clock or now()
@@ -73,10 +83,26 @@ class MongoStore:
         self.db.ledger_awards.create_index([("member_id", 1), ("kind", 1)])
         self.db.ledger_context.create_index("expires_at", expireAfterSeconds=0)
         self.db.ledger_relationships.create_index([("recipient", 1), ("kind", 1)])
+        self.db.ledger_relationships.create_index([("kind", 1), ("delegate", 1), ("status", 1)])
+        self.db.ledger_relationships.create_index([("kind", 1), ("grantor", 1), ("status", 1)])
+        self.db.ledger_relationships.create_index([("kind", 1), ("scope.kind", 1), ("scope.shops", 1), ("status", 1)])
+        self.db.ledger_relationships.create_index([("member_id", 1), ("logical_id", 1), ("kind", 1)])
+        self.db.ledger_quests.create_index([("kind", 1), ("status", 1), ("target_rank", 1)])
+        self.db.ledger_quests.create_index([("creator", 1), ("logical_id", 1)])
+        self.db.ledger_evidence.create_index([("kind", 1), ("status", 1), ("shop_id", 1)])
+        self.db.ledger_evidence.create_index([("kind", 1), ("member_id", 1), ("day", 1)])
 
 
 def matches(doc, query):
     for key, val in query.items():
+        if key == "$or":
+            if not any(matches(doc, branch) for branch in val):
+                return False
+            continue
+        if key == "$and":
+            if not all(matches(doc, branch) for branch in val):
+                return False
+            continue
         actual = doc.get(key)
         if isinstance(val, dict):
             for op, target in val.items():
@@ -87,6 +113,10 @@ def matches(doc, query):
                 if op == "$ne" and actual == target:
                     return False
                 if op == "$lte" and (actual is None or actual > target):
+                    return False
+                if op == "$gte" and (actual is None or actual < target):
+                    return False
+                if op == "$regex" and (not isinstance(actual, str) or not re.search(target, actual, re.I if val.get("$options") == "i" else 0)):
                     return False
         elif actual != val:
             return False

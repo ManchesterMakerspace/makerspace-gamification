@@ -37,13 +37,15 @@ def test_role_grants_match_actual_collections_deletes_and_indexes():
                 collections.add(node.value)
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
-            if node.func.attr == "rows" and node.args:
+            if node.func.attr in ("rows", "bounded") and node.args:
                 # Includes the shops/tools conditional dropdown expression.
                 sources.update(collection_literals(node.args[0]))
             if node.func.attr == "delete" and node.args and isinstance(node.args[0], ast.Constant):
                 deletes.add(node.args[0].value)
             if node.func.attr == "create_index":
                 indexed.add(node.func.value.attr)
+    from ledger.query_tools import PROJECTIONS
+    sources.update(PROJECTIONS)
     read_role = definition("mongosh", "source")
     write_role = definition("mongosh", "ledger")
     assert {p["resource"]["collection"] for p in read_role["privileges"]} == sources

@@ -28,6 +28,6 @@ def test_broker_connects_in_background_and_resubscribes(subscribe, caplog):
         client.on_connect(client, None, None, MagicMock(is_failure=False), None)
     if subscribe:
         assert client.subscribe.call_count == 2
-        assert client.subscribe.call_args.args[0] == [(f'{name}/+', 1) for name in FIELDS]
+        assert client.subscribe.call_args.args[0] == [(f'{name}/+', 1) for name in FIELDS if name not in ('checkins', 'cards')] + [('checkins/insert', 1)]
     else:
         client.subscribe.assert_not_called()

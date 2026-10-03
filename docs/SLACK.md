@@ -119,3 +119,7 @@ Slack delivers `message.im` and `message.groups` as `type: "message"`; `message_
 No user-token scopes, public-channel history/management, workspace administration, email lookup, reaction write, incoming webhooks, or app-level Socket Mode token are needed. Custom emoji shortcodes render in Slack without calling `emoji.list`. Ordinary app tokens do not bypass workspace policy on creating private channels or removing members; verify those permissions with workspace administrators during the pilot.
 
 The bot must be invited to existing private game channels before `ledger bootstrap`. Bootstrap creates new private channels if none are supplied. Test join/leave reconciliation with real members: native manual invitations can briefly expose a private channel before removal, as documented in the accepted design.
+
+## Progress and quest interactions
+
+`/ledger stats`, `/ledger progress`, `/ledger preferences`, and `/ledger achievements` open deterministic private views. `/ledger-quests list` uses external-select title options, with hash-protected updates and revalidated selections/actions. `/ledger-quests create` provides editable asynchronous Help draft with The Ledger suggestions; interaction acknowledgments never wait for inference. All authored member-facing copy uses The Ledger/The System, preserving original member text. See [member routes and deployment checks](ENGAGEMENT_QUESTS.md).

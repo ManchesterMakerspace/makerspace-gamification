@@ -1,5 +1,7 @@
 """Read-only projections over the Rails-owned Mongo collections."""
 from bson import ObjectId
+from pymongo import timeout
+import re
 from .storage import matches, now
 
 FIELDS = {
@@ -10,8 +12,10 @@ FIELDS = {
     "tool_checkouts": "member_id tool_id approved_by_id checked_out_at revoked_at volunteer_credit_id",
     "checkout_approvers": "member_id shop_ids tool_ids",
     "volunteer_credits": "member_id credit_value status tool_checkout_id task_id created_at reversed reversal_of_id",
-    "volunteer_tasks": "title description shop_id status prerequisite_tool_ids claimed_by_id verified_by_id completed_at",
-    "volunteer_events": "title shop_id status event_date attendee_ids",
+    "volunteer_tasks": "title description shop_id status prerequisite_tool_ids claimed_by_id verified_by_id completed_at next_available days parent_task_id",
+    "volunteer_events": "title description shop_id status event_date prerequisite_tool_ids",
+    "checkins": "uid time timeOf",
+    "cards": "uid member_id validity",
     "earned_memberships": "member_id status",
     "groups": "groupName subscription subscription_id expiry",
 }
@@ -38,7 +42,14 @@ class Sources:
         if name not in FIELDS:
             raise ValueError("Source collection is not allowlisted")
         projection = dict.fromkeys(FIELDS[name].split(), 1)
-        return list(self.db[name].find(query or {}, projection))
+        with timeout(2):
+            return list(self.db[name].find(query or {}, projection).max_time_ms(2000))
+
+    def bounded(self, name, query, fields, limit, timeout_ms=2000):
+        if name not in FIELDS or set(fields) - (set(FIELDS[name].split()) | {"_id"}):
+            raise ValueError("Source projection is not allowlisted")
+        with timeout(timeout_ms / 1000):
+            return list(self.db[name].find(query, dict.fromkeys(fields, 1)).sort("_id", 1).limit(limit).max_time_ms(timeout_ms))
 
     def member(self, member_id):
         rows = self.rows("members", {"_id": object_id(member_id), "merged_at": None})
@@ -54,7 +65,7 @@ class Sources:
     def slack_id(self, member_id):
         rows = self.rows("slack_users", {"member_id": object_id(member_id), "invalidated_at": None})
         uid = rows[0].get("slack_id") if len(rows) == 1 else None
-        return uid if uid and len(self.rows("slack_users", {"slack_id": uid, "invalidated_at": None})) == 1 else None
+        return uid if isinstance(uid, str) and re.fullmatch(r"[UW][A-Z0-9]+", uid) and len(self.rows("slack_users", {"slack_id": uid, "invalidated_at": None})) == 1 else None
 
     def good_standing(self, member_id):
         m = self.member(member_id)
@@ -97,3 +108,6 @@ class MemorySources(Sources):
     def rows(self, name, query=None):
         allowed = set(FIELDS[name].split()) | {"_id"}
         return [{k: v for k, v in r.items() if k in allowed} for r in self.data.get(name, []) if matches(r, query or {})]
+
+    def bounded(self, name, query, fields, limit, timeout_ms=2000):
+        return [{k: v for k, v in r.items() if k in set(fields) | {"_id"}} for r in sorted(self.rows(name, query), key=lambda r: str(r["_id"]))[:limit]]
