@@ -19,6 +19,13 @@ COMMANDS = MANIFEST["features"]["slash_commands"]
 EVENTS = MANIFEST["settings"]["event_subscriptions"]["bot_events"]
 
 
+def test_container_access_log_records_status_and_duration_without_query_or_headers():
+    dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf-8')
+    command = json.loads(next(line[4:] for line in dockerfile.splitlines() if line.startswith('CMD ')))
+    assert command[command.index('--access-logfile') + 1] == '-'
+    assert command[command.index('--access-logformat') + 1] == '%(m)s %(U)s status=%(s)s duration_s=%(L)s'
+
+
 @pytest.mark.parametrize("command", COMMANDS, ids=lambda c: c["command"])
 def test_manifest_commands_dispatch_through_signed_http(joined, command):
     ledger, store, _, composer, *_ = joined

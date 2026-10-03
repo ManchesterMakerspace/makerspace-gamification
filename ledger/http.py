@@ -1,6 +1,11 @@
 """Small WSGI adapter around Bolt's verified HTTP request dispatcher."""
 import json
+import logging
+import time
 from slack_bolt.request import BoltRequest
+
+LOG = logging.getLogger(__name__)
+SLACK_PATHS = ("/slack/events", "/slack/commands", "/slack/interactions")
 
 
 class HTTPApp:
@@ -8,6 +13,7 @@ class HTTPApp:
         self.bolt, self.store, self.sources = bolt, store, sources
 
     def __call__(self, env, start_response):
+        started = time.monotonic()
         path, method = env.get("PATH_INFO", "/"), env.get("REQUEST_METHOD", "GET")
         status, text, content_type = 404, "Not found", "text/plain"
         if path in ("/health", "/ready") and method == "GET":
@@ -19,7 +25,7 @@ class HTTPApp:
                         self.sources.ready()
                 except Exception:
                     status, text = 503, "Database not ready"
-        elif path in ("/slack/events", "/slack/commands", "/slack/interactions") and method == "POST":
+        elif path in SLACK_PATHS and method == "POST":
             try:
                 length = int(env.get("CONTENT_LENGTH", "0"))
                 if length < 0 or length > 1024 * 1024:
@@ -35,9 +41,14 @@ class HTTPApp:
                         content_type = content_type[0]
             except (ValueError, UnicodeDecodeError):
                 status, text = 400, "Invalid request"
-            except Exception:
+            except Exception as error:
                 # Non-2xx is essential when durable ingress failed: Slack can retry.
+                # Exception messages can contain credentials or request contents.
+                LOG.error("Slack ingress failed error_type=%s", type(error).__name__)
                 status, text = 503, "Please retry"
+        elapsed_ms = (time.monotonic() - started) * 1000
+        if path in SLACK_PATHS and (status >= 400 or elapsed_ms >= 2500):
+            LOG.warning("Slack callback path=%s status=%s duration_ms=%.0f", path, status, elapsed_ms)
         if not isinstance(text, str):
             text = json.dumps(text)
         payload = text.encode("utf-8")
