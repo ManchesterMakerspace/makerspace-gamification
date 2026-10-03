@@ -21,6 +21,33 @@ def worker(env):
     return Worker(l, composer, slack, bot_id='UBOT')
 
 
+def test_welcome_waits_for_accounting_without_exhausting_delivery_retries(joined, caplog):
+    ledger, store, _, _, _, slack = joined
+    w = worker(joined)
+    key = f'dm:join:{oid(1)}:1'
+    # Select only this welcome so other queued work cannot mask its outcome.
+    for other in store.select('ledger_outbox'):
+        if other['_id'] != key:
+            other['status'] = 'done'
+            store.put('ledger_outbox', other)
+    for _ in range(12):
+        job = store.get('ledger_outbox', key)
+        job['available_at'] = now() - timedelta(seconds=1)
+        store.put('ledger_outbox', job)
+        assert w.step('ledger_outbox')
+    job = store.get('ledger_outbox', key)
+    assert job['status'] == 'pending' and job['attempts'] == 0
+    assert job['last_error'] == 'HistoryImportPending'
+    assert caplog.text.count('check ledger-accounting') == 1
+    slack.chat_postMessage.assert_not_called()
+    ledger.reconcile(str(oid(1)), historical=True)
+    job['available_at'] = now() - timedelta(seconds=1)
+    store.put('ledger_outbox', job)
+    assert w.step('ledger_outbox')
+    assert store.get('ledger_outbox', key)['status'] == 'done'
+    slack.chat_postMessage.assert_called_once()
+
+
 def test_public_kudos_keeps_body_live_ranks_and_independent_receipts(joined):
     l, s, _, _, api, slack = joined
     w = worker(joined)

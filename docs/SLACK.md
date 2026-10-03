@@ -32,6 +32,26 @@ The manifest enables App Home and writable app messages. All seven commands have
 
 All modals, buttons, checkboxes, and external shop/tool/member dropdowns use the interaction endpoint. They are interaction payloads, not additional event subscriptions or commands.
 
+## Saved opt-in and chat replies
+
+The consent modal saves `ledger_participants.opted_in` synchronously and displays **Opt-in saved** after the transaction succeeds. Repeating `/ledger join` or clicking an old invitation while still opted in shows **Already opted in**, current rank/XP, and any pending history import. It does not reset consent, rules, progress, or invitations. Opting out and joining again still shows the consent form. Older images always reopened consent even for a saved participant; that alone did not mean consent was lost.
+
+HTTP 200 for a chat event confirms receipt, not that a reply has been generated. The complete path is:
+
+`ledger-web → ledger_inbox → ledger-accounting → ledger_outbox → ledger-delivery → Slack`
+
+`ledger-channels` separately handles invitations/removals. All three workers must be running alongside the web service. If web and delivery run alone, chat events and history imports remain queued; welcome messages wait for the missing import. Current workers report `HistoryImportPending`, defer the welcome without spending delivery retries, and log `check ledger-accounting`. Older images reported only `RuntimeError` and could exhaust their retries. Already-failed jobs need the targeted retry procedure in [operations](OPERATIONS.md#recovery); do not erase consent or re-award XP.
+
+```sh
+docker compose up -d --build --no-deps ledger-web ledger-accounting ledger-delivery ledger-channels
+docker compose ps --all
+docker compose logs --since=5m ledger-accounting ledger-delivery ledger-channels
+```
+
+Accounting logs `Slack event processed ... outcome=reply_queued` when it queues a reply; otherwise it reports a fixed reason such as `ignored_unlinked_identity`, `ignored_unregistered_channel`, or `ignored_unaddressed_channel_message`. No message body is logged. Pending `slack_event` inbox jobs point to accounting; pending `conversation` outbox jobs point to delivery. Check workers use the same `LEDGER_URI`/`LEDGER_DATABASE` as web if queued jobs never appear to them. Check Slack errors such as `missing_scope` or `invalid_auth` in delivery logs, and reinstall the Slack app after scope changes.
+
+Participating members get replies in DMs. In registered private Ledger channels, address the bot with `@The Ledger` or continue a thread the bot is participating in; ordinary channel chatter and unregistered channels do not prompt replies. Nonparticipants with a valid linked identity receive an opt-in invitation in response to a DM. Chat narration does not itself execute administrative commands or award XP; use the command/forms for actions. Ensure `message.im` and `app_mention` subscriptions, `message.groups` for private-channel thread replies, and the matching manifest scopes are installed. `SLACK_BOT_USER_ID` must be the bot's `U...` user ID.
+
 ## Troubleshooting "the app did not respond"
 
 Slack needs an HTTP acknowledgment within three seconds of invoking a command ([Slack's command guide](https://docs.slack.dev/interactivity/implementing-slash-commands/)). Healthy `/health` and `/ready` responses do not verify this path: readiness checks Mongo connectivity and Ledger replica-set topology, not collection read/write authorization, callback reachability, or worker delivery.

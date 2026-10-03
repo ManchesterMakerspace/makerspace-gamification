@@ -21,13 +21,15 @@ flowchart LR
 
 ## Durable processing
 
-`POST /slack/events`, `/slack/commands`, and `/slack/interactions` use Bolt's signing-secret and timestamp verification plus a single-workspace check. Accepted event/command work is persisted before acknowledgement. Modal actions validate and commit their short state transitions synchronously; generation and message delivery are asynchronous. Ingress has no LLM calls. `/health` checks the process; `/ready` checks both Mongo connections and transaction capability on the Ledger connection.
+`POST /slack/events`, `/slack/commands`, and `/slack/interactions` use Bolt's signing-secret and timestamp verification plus a single-workspace check. Accepted event/command work is persisted before acknowledgement. Modal actions validate and commit their short state transitions synchronously; generation and message delivery are asynchronous. Ingress has no LLM calls. `/health` checks the process; `/ready` checks both Mongo connections and replica-set/sharded topology on the Ledger connection, not collection permissions or worker health.
 
 Mongo transactions use snapshot reads and majority writes. Award/source identities, Slack event IDs, submission keys, consent revisions, and destination IDs are deterministic `_id` uniqueness boundaries. Participant writes serialize concurrent XP/cap decisions. Corrections append journal deltas against per-source balances. The memory store is exclusively a transactional test double, never a production option.
 
 `MLAB_URI` supplies the read-only source adapter; `LEDGER_URI` supplies all Ledger reads/writes, indexes, sessions, and transactions. Separate clients keep credentials and session ownership independent, including when both connect to `makerauth`. Source reads do not participate in the Ledger transaction. Database-name selection and the exact Atlas/self-managed role definitions are documented in [MongoDB access](MONGODB_ACCESS.md).
 
 Workers claim jobs with 120-second leases. Expired leases can be recovered; an old worker cannot complete a newer lease. Transient failures retry with backoff, honoring Slack `Retry-After`. Ordinary jobs stop after ten attempts and become visible as failed; channel removals keep retrying. The channel queue runs independently of accounting and generation. Persist composed text before delivery, then reuse it on retries.
+
+MQTT startup is asynchronous so broker outages do not gate Slack queues. A welcome awaiting history import is a dependency wait (`HistoryImportPending`), deferred fifteen seconds without consuming a delivery attempt. Alert on prolonged waits and check accounting. Consent success is shown after the write, and repeat join requests read saved state rather than reopen consent.
 
 Known successful kudos destinations are skipped on recovery, with separate DM/shared receipts. Database award decisions are exactly once. Slack/network timeouts after remote acceptance have an inherently uncertain delivery outcome: stable `client_msg_id` is reused, but this application does not promise universal exactly-once external delivery. File uploads and channel creation likewise need operator inspection after an ambiguous timeout. Bind an already created channel through `LEDGER_CHANNELS`/bootstrap instead of creating a duplicate.
 

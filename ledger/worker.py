@@ -20,6 +20,10 @@ from .views import home
 log = logging.getLogger(__name__)
 
 
+class HistoryImportPending(RuntimeError):
+    """Welcome delivery waits for the accounting worker, without spending retries."""
+
+
 class Worker:
     def __init__(self, ledger, composer, slack, mqtt=None, bot_id=""):
         self.ledger, self.store = ledger, ledger.store
@@ -37,9 +41,19 @@ class Worker:
             self.finish(collection, job, "done")
         except Denied:
             self.finish(collection, job, "cancelled")
+        except HistoryImportPending:
+            if job.get("last_error") != "HistoryImportPending":
+                log.warning("Welcome delivery waiting for history import; check ledger-accounting job=%s", job["_id"])
+            self.finish(collection, job, "pending", 15, "HistoryImportPending", deferred=True)
         except Exception as exc:
             # Never log event payloads, prompts, member messages, or provider responses.
-            log.warning("job %s failed: %s", job["_id"], type(exc).__name__)
+            code = getattr(exc, "code", None)
+            slack_error = exc.response.get("error") if isinstance(exc, SlackApiError) else None
+            # Only known protocol codes belong in diagnostics, never arbitrary API text.
+            safe_slack_errors = {"invalid_auth", "not_authed", "token_revoked", "account_inactive", "missing_scope",
+                                 "channel_not_found", "not_in_channel", "user_not_found", "ratelimited", "no_permission"}
+            log.warning("job %s failed: %s code=%s slack_error=%s", job["_id"], type(exc).__name__,
+                        code if isinstance(code, int) else "none", slack_error if isinstance(slack_error, str) and slack_error in safe_slack_errors else "none")
             retry = min(300, 2 ** min(job["attempts"], 8))
             if isinstance(exc, SlackApiError) and exc.response.status_code == 429:
                 retry = max(retry, int(exc.response.headers.get("Retry-After", "60")))
@@ -47,11 +61,13 @@ class Worker:
             self.finish(collection, job, status, retry, type(exc).__name__)
         return True
 
-    def finish(self, collection, job, status, delay=0, error=None):
+    def finish(self, collection, job, status, delay=0, error=None, deferred=False):
         def write(s):
             current = s.get(collection, job["_id"])
             if current and current.get("lease") == job["lease"] and current["status"] == "working":
                 current.update(status=status, available_at=now() + timedelta(seconds=delay), last_error=error)
+                if deferred:
+                    current["attempts"] = max(0, current.get("attempts", 1) - 1)
                 s.put(collection, current)
                 if collection == "ledger_outbox" and job["kind"] == "kudos" and status in ("failed", "cancelled"):
                     self.kudos_receipt(s, job, {"status": status, "at": now()})
@@ -71,7 +87,8 @@ class Worker:
                 self.ledger.reconcile(p["member_id"])
             self.reconcile_channels()
         elif job["kind"] == "slack_event":
-            self.event(payload, job["_id"])
+            outcome = self.event(payload, job["_id"])
+            log.info("Slack event processed job=%s outcome=%s", job["_id"], outcome or "handled")
         elif job["kind"] == "command":
             try:
                 self.command(payload["member_id"], payload["command"], job["_id"])
@@ -175,22 +192,23 @@ class Worker:
                     self.store.atomic(lambda s: s.put("ledger_context", prior))
             return
         if event.get("bot_id") or event.get("user") == self.bot_id or event.get("subtype"):
-            return
+            return "ignored_bot_or_subtype"
         if not member:
-            return
+            return "ignored_unlinked_identity"
         member_id = sid(member["_id"])
         is_dm = event.get("channel_type") == "im" or channel.startswith("D")
         text = event.get("text", "")
         if is_dm and text.strip().lower() in ("opt out", "opt-out", "leave"):
             self.ledger.leave(member_id)
-            return
+            return "opt_out_saved"
         if not self.ledger.active(member_id):
             if is_dm:
                 self.ledger.notify(member_id, "onboarding", {"summary": "Choose Opt in to participate in The Ledger."}, key, exception=True)
-            return
+                return "onboarding_queued"
+            return "ignored_inactive_participant"
         managed = {c["channel_id"] for c in self.store.select("ledger_channels", {"kind": "channel"})}
         if not is_dm and channel not in managed:
-            return
+            return "ignored_unregistered_channel"
         thread = event.get("thread_ts") or event.get("ts")
         addressed = is_dm or kind == "app_mention" or (self.bot_id and f"<@{self.bot_id}>" in text)
         continuing = self.store.get("ledger_context", f"thread:{channel}:{thread}")
@@ -203,6 +221,8 @@ class Worker:
                 enqueue(s, "ledger_outbox", f"reply:{channel}:{event['ts']}", "conversation", {"member_id": member_id, "channel": channel,
                         "thread": thread, "text": text[:6000], "message_id": message_id})
             self.store.atomic(write)
+            return "reply_queued"
+        return "ignored_unaddressed_channel_message"
 
     def command(self, member_id, command, key):
         from .slack_app import SlackUI
@@ -503,7 +523,7 @@ class Worker:
         if p["type"] in ("return", "onboarding") and self.ledger.active(member_id):
             participant = self.ledger.participant(member_id)
             if participant.get("import_pending"):
-                raise RuntimeError("Waiting for history import")
+                raise HistoryImportPending()
             facts.update(rank=self.ledger.presentation(participant["rank"])["name"], xp=participant["xp"], metrics=participant["metrics"])
         def current_labels(fact):
             if isinstance(fact, dict):

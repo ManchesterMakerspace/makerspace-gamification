@@ -80,6 +80,8 @@ Downloads allow two seconds to connect and fifteen seconds total, up to three re
 
 With no Google Doc override, startup/reload reads the packaged file. With an override, the packaged matrix remains the fallback, so policy changes should update both the repository and the operator-maintained Doc. A remote copy missing a newly required role is rejected. Updating an external Doc is an operator action; repository maintenance never silently publishes it.
 
+Bundled matrix version 2 clarifies that repeat joins display saved participation, confirmation follows a successful consent write, and pending imports/invitations are not completed work. Operators with a Google Doc override should copy the updated consent section into their Doc, increment its version, and run `/ledger-admin reload-prompts`. Existing reserved deliveries keep their original policy snapshot.
+
 ## Validation and pilot plan
 
 ```powershell

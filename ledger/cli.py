@@ -56,15 +56,25 @@ def broker(store, subscribe=True):
     if os.environ.get("MQTT_TLS", "false").lower() == "true":
         client.tls_set()
     def on_connect(c, userdata, flags, reason_code, properties):
+        if reason_code.is_failure:
+            logging.warning("MQTT connection rejected; background reconnect continues")
+            return
+        logging.info("MQTT connected source_subscription=%s", subscribe)
         if subscribe and not reason_code.is_failure:
             c.subscribe([(f"{collection}/+", 1) for collection in FIELDS])
+    def on_connect_fail(c, userdata):
+        logging.warning("MQTT unavailable; reconnecting in background while Slack queues continue")
     def on_message(c, userdata, msg):
         try:
             ingest_mqtt(store, msg.topic, msg.payload)
         except Exception as exc:
             logging.warning("MQTT trigger not persisted: %s; periodic reconciliation will recover", type(exc).__name__)
     client.on_connect, client.on_message = on_connect, on_message
-    client.connect(os.environ["MQTT_HOST"], int(os.environ.get("MQTT_PORT", "1883")), 60)
+    client.on_connect_fail = on_connect_fail
+    client.reconnect_delay_set(min_delay=1, max_delay=60)
+    # loop_start retries even the first connection on its network thread.
+    # An unavailable broker must not prevent durable Slack queues from starting.
+    client.connect_async(os.environ["MQTT_HOST"], int(os.environ.get("MQTT_PORT", "1883")), 60)
     client.loop_start()
     return client
 
@@ -151,6 +161,7 @@ def main():
         threads = [Thread(target=run, args=(q,), name=q, daemon=True) for q in queues]
         for thread in threads:
             thread.start()
+        logging.info("Ledger worker started queues=%s", ",".join(queues))
         try:
             if args.queue != "channels":
                 # The independent channel thread is already running, even if Docs is unavailable.

@@ -72,6 +72,19 @@ def consent(sponsor=None):
         checkbox("agree", "I choose to participate")], {"sponsor": sponsor}, "Opt in")
 
 
+def participation(ledger, member_id, title="Already opted in"):
+    participant = ledger.participant(member_id)
+    rank = ledger.presentation(participant["rank"])
+    blocks = [section("Your opt-in is saved. You do not need to join again."),
+              section(f"*Rank:* {escape(rank['name'])}\n*XP:* {escape(participant['xp'])}")]
+    if participant.get("import_pending"):
+        blocks.append(section("Your verified history import is queued or in progress. The Ledger will send a summary when it finishes."))
+    if not ledger.active(member_id):
+        blocks.append(section("Your opt-in is retained, but Ledger access is currently unavailable. Ask makerspace staff to check your member and Slack account status."))
+    blocks.append(section("Use /ledger for progress or /ledger leave to opt out. Channel invitations and messages are processed in the background."))
+    return modal("dismiss", title, blocks, submit="Done")
+
+
 def kudos_recipient():
     return modal("kudos_recipient", "Give kudos", [select_input("recipient", "Choose a member first")], {"key": str(uuid4())})
 

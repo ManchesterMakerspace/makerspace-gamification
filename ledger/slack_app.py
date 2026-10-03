@@ -59,11 +59,17 @@ class SlackUI:
     def queue(self, member_id, command, key):
         self.ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", key, "command", {"member_id": member_id, "command": command}))
 
+    def join_view(self, actor, sponsor=None):
+        participant = self.ledger.participant(actor)
+        if participant and participant["opted_in"]:
+            return views.participation(self.ledger, actor)
+        return views.consent(sponsor)
+
     def command(self, body, client):
         actor = self.actor(body)
         command, text = body["command"], body.get("text", "").strip()
         if command == "/ledger" and text in ("join", "opt-in"):
-            return self.open(client, body, views.consent())
+            return self.open(client, body, self.join_view(actor))
         if command == "/ledger" and text in ("leave", "opt-out"):
             return self.open(client, body, views.modal("leave_confirm", "Opt out", [section("Leave all game channels and stop game announcements. Your skills and XP remain, and eligible makerspace activity continues accruing silently. Peer kudos remains available without kudos XP.")], submit="Opt out"))
         if command == "/ledger-admin":
@@ -171,7 +177,7 @@ class SlackUI:
                 raise ValueError("Explicitly choose to participate to continue.")
             self.confirm_human(actor, client)
             self.ledger.join(actor, meta.get("sponsor"))
-            return {}
+            return {"response_action": "update", "view": views.participation(self.ledger, actor, "Opt-in saved")}
         if callback == "leave_confirm":
             self.ledger.leave(actor)
             return {}
@@ -242,7 +248,7 @@ class SlackUI:
         action = body["actions"][0]
         name, value = action["action_id"], action.get("value", "")
         if name == "join":
-            return self.open(client, body, views.consent(value or None))
+            return self.open(client, body, self.join_view(actor, value or None))
         if name == "leave":
             return self.open(client, body, views.modal("leave_confirm", "Opt out", [section("Your progress is retained and continues accruing silently. All game channel access will be removed.")], submit="Opt out"))
         if name == "ack_mentoring":

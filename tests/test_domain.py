@@ -208,7 +208,9 @@ def test_recruitment_requires_new_verified_milestone(joined):
     l.join(recruit, giver)
     l.reconcile(recruit, historical=True)
     assert l.participant(giver)["xp"] == "0"
-    source.data["volunteer_credits"].append({"_id": oid(602), "member_id": oid(3), "status": "approved", "credit_value": 1, "created_at": now()})
+    # Coarse platform clocks can return the same instant as first opt-in.
+    earned_at = l.participant(recruit)["first_opt_in"] + timedelta(seconds=1)
+    source.data["volunteer_credits"].append({"_id": oid(602), "member_id": oid(3), "status": "approved", "credit_value": 1, "created_at": earned_at})
     l.reconcile(recruit)
     l.reconcile(recruit)
     assert l.participant(giver)["xp"] == "11"
