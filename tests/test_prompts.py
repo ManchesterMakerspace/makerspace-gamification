@@ -180,6 +180,9 @@ def test_rank_event_supplies_names_old_new_rank_skill_and_caches_variation(joine
 def test_kudos_does_not_send_body_or_retained_progress_to_prompt(joined):
     ledger, store, _, composer, api, slack = joined
     recipient = str(oid(2))
+    ranks = store.get('ledger_catalog', 'rank_display')['ranks']
+    ranks[0]['name'] = 'PRIVATE_RETAINED_RANK'
+    ledger.publish_ranks(str(oid(10)), ranks)
     ledger.leave(recipient)
     ledger.kudos(str(oid(1)), recipient, 'SECRET_AUTHORED_BODY', key='prompt', public=True, expected_participation=False)
     worker = Worker(ledger, composer, slack)
@@ -188,7 +191,8 @@ def test_kudos_does_not_send_body_or_retained_progress_to_prompt(joined):
         worker.outbox(claim(store, 'kudos:prompt:' + audience))
         sent = str(api.complete.call_args)
         assert 'Maker1 Test' in sent and 'Maker2 Test' in sent
-        assert 'SECRET_AUTHORED_BODY' not in sent and 'Newbie' not in sent
+        # Public seed-rank examples may appear in the policy, but retained personal labels may not.
+        assert 'SECRET_AUTHORED_BODY' not in sent and 'PRIVATE_RETAINED_RANK' not in sent
 
 
 def test_slack_editor_previews_and_publishes_all_variations(joined):

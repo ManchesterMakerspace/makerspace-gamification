@@ -33,6 +33,8 @@ The bot's leatherbound grimoire icon is included at [512 × 512](icons/ledger-bo
 
 AI narration uses [23 message-type JSON files](ledger/prompts), each with three paired system/user prompt variations. The bot avoids the last two voices before selecting randomly, using shared history for channel posts and separate history per DM recipient. It substitutes verified member/event details, and delivery retries reuse the composed text. See the [rank-up example](ledger/prompts/rank_up.json) and [prompt authoring guide](docs/PROMPTS.md) for variables, audience settings, and admin preview/publication.
 
+The shared [Prompt Matrix Template](ledger/prompts/prompt_matrix.xml.md) codifies roles, game rules, personality, and channel/DM conduct in hybrid XML/Markdown. Set `LEDGER_PROMPT_MATRIX_DOC_URL` to optionally load it from a Google Doc on worker startup; `/ledger-admin reload-prompts` requests a fresh copy. Failed refreshes retain valid policy, and existing deliveries retain their snapshots. See [matrix design, authentication, reload, and validation](docs/PROMPT_MATRIX.md).
+
 ## Member experience
 
 | Command | Purpose |

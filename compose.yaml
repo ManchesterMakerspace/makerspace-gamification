@@ -14,6 +14,8 @@ x-ledger-environment: &ledger-environment
   LEDGER_LLM_BASE_URL: ${LEDGER_LLM_BASE_URL:-http://ledger-ai:8000/v1}
   LEDGER_LLM_MODEL: ${LEDGER_LLM_MODEL:-nvidia/Qwen3.8-27B-NVFP4}
   LEDGER_LLM_API_KEY: ${LEDGER_LLM_API_KEY:?Set a shared vLLM API key in .env}
+  LEDGER_PROMPT_MATRIX_DOC_URL: ${LEDGER_PROMPT_MATRIX_DOC_URL:-}
+  LEDGER_PROMPT_MATRIX_GOOGLE_ACCESS_TOKEN: ${LEDGER_PROMPT_MATRIX_GOOGLE_ACCESS_TOKEN:-}
   MQTT_HOST: ${MQTT_HOST:-localhost}
   MQTT_PORT: ${MQTT_PORT:-1883}
   MQTT_USER: ${MQTT_USER:-}
@@ -25,7 +27,7 @@ services:
   ledger-web:
     build: .
     environment: *ledger-environment
-    ports: ["127.0.0.1:3000:3000"]
+    ports: ["127.0.0.1:${LEDGER_WEB_PORT:-3000}:3000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/health', timeout=2).close()"]
       interval: 15s
