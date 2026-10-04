@@ -337,6 +337,149 @@ def test_optional_threads_prioritize_latest_activity_and_report_failure(generato
     assert notes == ["optional thread replies unavailable"]
 
 
+def test_thread_only_names_are_redacted_from_every_excerpt_before_prompting(generator):
+    g, (_, _, _, _, api, slack) = generator
+    stamp = now()
+    root = {"user": "U1", "ts": str((stamp - timedelta(minutes=5)).timestamp()),
+        "text": "Cecilia Threadmaker recommended a measuring jig.", "reply_count": 2}
+    slack.conversations_history.side_effect = lambda channel, **kwargs: {"messages": [root] if channel == "CCHAT" else []}
+    profiles = {"U1": "Alice Rootmaker", "U2": "Benjamin Replymaker", "U3": "Cecilia Threadmaker"}
+    slack.users_info.side_effect = lambda user: {"user": {"id": user, "real_name": profiles[user], "is_bot": False}}
+    slack.conversations_replies.return_value = {"messages": [
+        {"user": "U2", "ts": str((stamp - timedelta(minutes=2)).timestamp()), "text": "Cecilia Threadmaker shared useful feedback."},
+        {"user": "U3", "ts": str((stamp - timedelta(minutes=1)).timestamp()), "text": "Benjamin Replymaker should try adjustable stops."}]}
+    g.run(rank=1, dry_run=True)
+    prompt = json.dumps(api.quest_response.call_args.args[0])
+    assert 'measuring jig' in prompt and 'adjustable stops' in prompt
+    for name in profiles.values():
+        assert all(part not in prompt for part in name.split())
+
+
+@pytest.mark.parametrize('field', ['title', 'description', 'criteria'])
+@pytest.mark.parametrize('excerpt,copied', [
+    ('Try an adjustable stop for repeatable cuts.', 'Try an adjustable stop for repeatable cuts.'),
+    ('Some initial discussion of materials and measurements that the model should not repeat. '
+     'Use the unusual copper jig with a purple stop and record seven careful trial cuts.',
+     'Use the unusual copper jig with a purple stop and record seven careful trial cuts.')])
+def test_copy_guard_rejects_short_and_later_chat_quotes(generator, field, excerpt, copied):
+    g, (_, s, _, _, api, slack) = generator
+    stamp = now()
+    slack.conversations_history.side_effect = lambda channel, **kwargs: {"messages": [
+        {"user": "U1", "ts": str(stamp.timestamp()), "text": excerpt}] if channel == "CCHAT" else []}
+    api.quest_response.return_value = json.dumps({**proposal(), field: copied})
+    with pytest.raises(ValueError):
+        g.run(rank=1, request_id='quoted')
+    assert not s.select('ledger_quests') and not s.select('ledger_outbox', {'kind': 'review_notice'})
+    assert api.quest_response.call_count == 2
+
+
+def test_profiles_discovered_in_second_channel_redact_first_channel(generator):
+    g, (_, s, _, _, api, slack) = generator
+    stamp = now()
+    slack.users_info.side_effect = lambda user: {'user': {'id': user, 'is_bot': False,
+        'profile': {'display_name': 'Zelda Threadonly' if user == 'U3' else 'Root Maker'}}}
+    roots = {'CCHAT': {'user': 'U1', 'ts': str((stamp - timedelta(minutes=4)).timestamp()),
+        'text': 'Zelda Threadonly suggested adjustable stops.'},
+        'CRANK1': {'user': 'U1', 'ts': str((stamp - timedelta(minutes=3)).timestamp()),
+        'text': 'Feedback on the measuring jig.', 'reply_count': 1}}
+    slack.conversations_history.side_effect = lambda channel, **kwargs: {'messages': [roots[channel]] if channel in roots else []}
+    slack.conversations_replies.return_value = {'messages': [{'user': 'U3',
+        'ts': str((stamp - timedelta(minutes=1)).timestamp()), 'text': 'Try a safer clamp position.'}]}
+    result = g.run(rank=1, request_id='cross-channel')
+    rendered = json.dumps(api.quest_response.call_args.args[0])
+    saved = json.dumps(s.get('ledger_context', 'quest-input:cross-channel'), default=str)
+    assert 'Zelda' not in rendered + saved and 'Threadonly' not in rendered + saved
+    assert 'adjustable stops' in rendered and result['status'] == 'submitted'
+
+
+@pytest.mark.parametrize('field', ['name', 'expectation'])
+def test_cooperative_discipline_text_cannot_copy_chat(generator, field):
+    g, (_, _, _, _, api, _) = generator
+    snapshot = g.context(1, random.Random(1), now())
+    snapshot['data']['chat'] = [{'text': 'Share careful jig measurements.'}]
+    bad = proposal('cooperative')
+    bad['disciplines'][0][field] = 'SHARE   careful\njig measurements.'
+    api.quest_response.return_value = json.dumps(bad)
+    with pytest.raises(ValueError): g.compose(snapshot, 'cooperative')
+
+
+def test_short_excerpt_matches_whole_words_and_allows_paraphrase(generator):
+    g, (_, _, _, _, api, _) = generator
+    snapshot = g.context(1, random.Random(1), now())
+    snapshot['data']['chat'] = [{'text': 'jig'}]
+    good = {**proposal(), 'title': 'Use a jigsaw', 'description': 'Build a measuring fixture and refine its design.',
+        'criteria': 'Demonstrate consistent safe cuts.'}
+    api.quest_response.return_value = json.dumps(good)
+    assert g.compose(snapshot, 'individual') == good
+
+
+@pytest.mark.parametrize('composed', [False, True])
+def test_legacy_unfinished_inputs_and_composed_proposals_require_new_request(generator, composed):
+    g, (_, s, _, _, api, _) = generator
+    with patch.object(g, 'fit', side_effect=TimeoutError):
+        with pytest.raises(TimeoutError): g.run(rank=1, request_id='legacy')
+    audit = s.get('ledger_evidence', 'quest-generation:legacy')
+    audit['prompt_version'] = 1
+    if composed: audit.update(status='composed', proposal=proposal(), retained_inputs={})
+    s.put('ledger_evidence', audit)
+    saved = deepcopy(s.get('ledger_context', 'quest-input:legacy'))
+    with pytest.raises(ValueError, match='new request ID'): g.run(rank=1, request_id='legacy')
+    assert s.get('ledger_context', 'quest-input:legacy') == saved
+    assert not s.select('ledger_quests')
+    api.quest_response.assert_not_called()
+
+
+def test_legacy_submitted_request_stays_idempotently_readable(generator):
+    g, (_, s, _, _, api, _) = generator
+    first = g.run(rank=1, request_id='legacy-submitted')
+    audit = s.get('ledger_evidence', 'quest-generation:legacy-submitted')
+    audit['prompt_version'] = 1; s.put('ledger_evidence', audit)
+    api.quest_response.reset_mock()
+    assert g.run(rank=1, request_id='legacy-submitted')['quest_id'] == first['quest_id']
+    api.quest_response.assert_not_called()
+
+
+def test_reply_profile_failure_omits_all_chat_instead_of_leaking_cross_mentions(generator):
+    g, (_, s, _, _, api, slack) = generator
+    stamp = now()
+    slack.conversations_history.side_effect = lambda channel, **kwargs: {'messages': [{
+        'user': 'U1', 'ts': str((stamp - timedelta(minutes=5)).timestamp()),
+        'text': 'Cecilia Threadmaker recommended a measuring jig.', 'reply_count': 2}] if channel == 'CCHAT' else []}
+    response = MagicMock(status_code=403, headers={})
+    def profile(user):
+        if user == 'U3': raise SlackApiError('unavailable', response)
+        return {'user': {'id': user, 'real_name': 'Root Maker', 'is_bot': False}}
+    slack.users_info.side_effect = profile
+    slack.conversations_replies.return_value = {'messages': [
+        {'user': 'U2', 'ts': str((stamp - timedelta(minutes=2)).timestamp()), 'text': 'Cecilia Threadmaker provided feedback.'},
+        {'user': 'U3', 'ts': str((stamp - timedelta(minutes=1)).timestamp()), 'text': 'Try adjustable stops.'}]}
+    result = g.run(rank=1, request_id='profile-failure')
+    rendered = json.dumps(api.quest_response.call_args.args[0])
+    saved = json.dumps(s.get('ledger_context', 'quest-input:profile-failure'), default=str)
+    assert 'Cecilia' not in rendered + saved and result['status'] == 'submitted'
+    assert result['retained_inputs']['messages'] == 0
+
+
+def test_short_reply_only_names_and_escaped_names_are_redacted(generator):
+    g, (_, _, _, _, _, slack) = generator
+    stamp = now()
+    slack.users_info.side_effect = lambda user: {'user': {'id': user, 'real_name': 'Li' if user == 'U3' else 'Root Maker'}}
+    root = {'user': 'U1', 'ts': str((stamp - timedelta(minutes=5)).timestamp()),
+        'text': 'L&#105; suggested a line jig with a limit stop.', 'reply_count': 1}
+    slack.conversations_replies.return_value = {'messages': [{
+        'user': 'U3', 'ts': str((stamp - timedelta(minutes=1)).timestamp()), 'text': 'Try safer clamps.'}]}
+    rows, _ = g.history.inspiration('CCHAT', [root], stamp - timedelta(days=14), stamp)
+    assert rows[0]['text'].startswith('[identity removed] suggested a line jig with a limit stop.')
+
+
+def test_quote_guard_canonicalizes_slack_reserved_entities(generator):
+    g, (_, _, _, _, api, _) = generator
+    snapshot = g.context(1, random.Random(1), now())
+    snapshot['data']['chat'] = [{'text': 'Try the purple jig &amp; test every stop.'}]
+    api.quest_response.return_value = json.dumps({**proposal(), 'description': 'Try the purple jig & test every stop.'})
+    with pytest.raises(ValueError): g.compose(snapshot, 'individual')
+
+
 def test_completed_example_joins_and_anonymizes_original_submission(generator):
     g, (_, s, *_ ) = generator
     s.put("ledger_quests", {"_id": "approved-definition", "kind": "member_quest", "logical_id": "past",

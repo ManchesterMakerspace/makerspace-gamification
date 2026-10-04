@@ -196,6 +196,67 @@ def test_nonparticipant_delivered_notice_survives_join_without_repeating(env):
     assert Engagement(l).capture(member(1), 'joined', 'message', 'Useful feedback', 'CCHAT')
 
 
+def test_kudos_only_nonparticipant_starts_notice_and_observes_later_metadata(env):
+    l, s, _, composer, _, slack = env
+    l.kudos(member(1), member(2), 'Thanks for helping with the build.', key='first-kudos', expected_participation=False)
+    key = f'observation-notice:{member(1)}:0'
+    assert s.get('ledger_outbox', key)['status'] == 'pending'
+    assert not s.select('ledger_evidence', {'kind': 'observation'})
+    assert Worker(l, composer, slack).step('ledger_outbox', kinds=['engagement_notice'])
+    l.kudos(member(1), member(3), 'Thanks for the lesson.', key='second-kudos', expected_participation=False)
+    captured = s.select('ledger_evidence', {'kind': 'observation'})
+    assert len(captured) == 1 and captured[0]['event_kind'] == 'kudos_metadata'
+    assert captured[0]['text'] == '' and not l.participant(member(1))
+
+
+@pytest.mark.parametrize('change', ['pause', 'disable', 'revoke', 'preference'])
+def test_notice_receipt_survives_eligibility_change_after_slack_accepts(env, monkeypatch, change):
+    l, s, src, composer, _, slack = env
+    service = Engagement(l)
+    service.notice(member(1))
+    def post(**kwargs):
+        if change == 'pause': s.put('ledger_catalog', {'_id': 'control', 'paused': True})
+        if change == 'disable': monkeypatch.setenv('LEDGER_OBSERVATION', 'false')
+        if change == 'revoke': src.data['members'][0]['status'] = 'revoked'
+        if change == 'preference': l.preferences(member(1), False, True)
+        return {'ts': '125.001'}
+    slack.chat_postMessage.side_effect = post
+    worker = Worker(l, composer, slack)
+    assert worker.step('ledger_outbox', kinds=['engagement_notice'])
+    key = f'observation-notice:{member(1)}:0'
+    assert s.get('ledger_outbox', key)['status'] == 'done'
+    assert l.preference_profile(member(1))['observation_notice_ts'] == '125.001'
+    assert service.capture(member(1), 'blocked', 'kudos_metadata') is None
+    s.put('ledger_catalog', {'_id': 'control', 'paused': False})
+    monkeypatch.setenv('LEDGER_OBSERVATION', 'true')
+    src.data['members'][0]['status'] = 'activeMember'
+    if change == 'preference': l.preferences(member(1), True, True)
+    service.notice(member(1))
+    assert service.capture(member(1), 'after-resume', 'kudos_metadata')
+    assert slack.chat_postMessage.call_count == 1 and not l.participant(member(1))
+
+
+def test_legacy_done_notice_without_receipt_is_retried(env):
+    l, s, _, composer, _, slack = env
+    service = Engagement(l)
+    service.notice(member(1))
+    key = f'observation-notice:{member(1)}:0'
+    job = s.get('ledger_outbox', key); job.update(status='done', lease='expired')
+    s.put('ledger_outbox', job)
+    service.notice(member(1))
+    job = s.get('ledger_outbox', key)
+    assert job['status'] == 'pending' and 'lease' not in job
+    assert Worker(l, composer, slack).step('ledger_outbox', kinds=['engagement_notice'])
+    assert l.preference_profile(member(1))['observation_notice_ts'] == '123.456'
+
+
+def test_volunteer_only_member_starts_notice_without_observing_before_delivery(env):
+    l, s, *_ = env
+    assert Engagement(l).capture(member(1), 'volunteer:first', 'volunteer', metadata={'credit_value': '1'}) is None
+    assert s.get('ledger_outbox', f'observation-notice:{member(1)}:0')['status'] == 'pending'
+    assert not s.select('ledger_evidence', {'kind': 'observation'})
+
+
 def test_removing_configured_channel_discards_pending_observation_before_inference(env):
     l, s, _, composer, api, slack = env
     Engagement(l).notice(member(1))

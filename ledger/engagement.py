@@ -37,7 +37,7 @@ class Engagement:
                 return
             key = f"observation-notice:{member}:{p.get('consent_generation', 0)}"
             job = s.get("ledger_outbox", key)
-            if job and job["status"] in ("cancelled", "failed"):
+            if job and job["status"] in ("cancelled", "failed", "done"):
                 d.touch_preferences(member)
                 # Same ID keeps Slack retry deduplication stable; removing the
                 # expired lease prevents an old worker from finishing this retry.
@@ -59,8 +59,7 @@ class Engagement:
             return None
         if kind == "message" and (not channel or channel.startswith("D") or channel not in {c["channel_id"] for c in self.l.store.select("ledger_channels", {"kind": "channel"})}):
             return None
-        if kind == "message":
-            self.notice(member)
+        self.notice(member)
         if not observe_allowed(self.l, member):
             return None
         p = self.l.preference_profile(member)

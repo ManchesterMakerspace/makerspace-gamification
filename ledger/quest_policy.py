@@ -1,5 +1,6 @@
 """Application guardrails shared by generated quest proposals and human review."""
 from copy import deepcopy
+from html import unescape
 import re
 
 from .sources import sid
@@ -37,14 +38,17 @@ def enabled_rank(ledger, slot):
 
 def sanitize(text, names=()):
     """Drop sensitive messages; discard link destinations and identifying syntax."""
-    if not isinstance(text, str) or SENSITIVE.search(text):
+    if not isinstance(text, str):
+        return ""
+    text = unescape(text)
+    if SENSITIVE.search(text):
         return ""
     text = re.sub(r"<[@!#][^>]*>", "[identity removed]", text)
     text = re.sub(r"<https?://[^>|]+(?:\|([^>]+))?>", lambda m: m[1] or "[link removed]", text)
     text = re.sub(r"https?://\S+", "[link removed]", text)
     text = PERSONAL.sub("[identity removed]", text)
     for name in sorted(set(names), key=len, reverse=True):
-        if name and len(name) >= 3:
+        if name:
             text = re.sub(r"(?<!\w)" + re.escape(name) + r"(?!\w)", "[identity removed]", text, flags=re.I)
     return text.strip()
 

@@ -88,3 +88,5 @@ Per-activity leases serialize concurrent deliveries; saved post reservations kee
 ## Ledger-authored quest proposals
 
 See [quest generation](QUEST_GENERATION.md) for the standalone CLI, weighted rank selection, historical channel inspiration, immutable review edits, ordinary challenge rewards and independent shared-project finalization. Generation/submission creates no XP or published availability. Historical inspiration is a separate purpose from audit-only observation; publish its channel-use explanation before enabling operators.
+
+New eligible kudos metadata and verified volunteer activity also trigger explanatory observation notices, including for nonparticipants. The first activity is excluded until notice delivery; original kudos bodies remain outside observation. A Slack-confirmed notice receipt is saved for the same consent generation even if processing is paused or observation/eligibility/preferences change during posting. Live eligibility continues to gate capture and inference. Legacy done notice jobs missing their receipt can be reopened on reconciliation after eligibility resumes.

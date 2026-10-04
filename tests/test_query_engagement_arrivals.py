@@ -202,6 +202,12 @@ def test_notice_retry_leaves_live_jobs_alone_and_reopens_only_terminal_failures(
     job = s.get('ledger_outbox', key)
     job.update(status=status, attempts=10, lease='old-lease', last_error='ProviderError')
     s.put('ledger_outbox', job)
+    if status == 'done':
+        # A legitimately completed notice has a receipt; missing receipts from
+        # older workers are covered by the separate recovery regression.
+        profile = l.preference_profile(member(1))
+        profile['observation_notice_delivered_at'] = now()
+        l.save_preference_profile(profile)
     with ThreadPoolExecutor(4) as pool:
         list(pool.map(lambda _: service.notice(member(1)), range(4)))
     current = s.get('ledger_outbox', key)

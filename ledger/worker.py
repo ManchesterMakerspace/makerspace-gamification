@@ -616,6 +616,7 @@ class Worker:
             self.assert_live_job(job)
             latest = self.ledger.preference_profile(member_id)
             if (not enabled("OBSERVATION") or not self.ledger.member_eligible(member_id)
+                    or (self.store.get("ledger_catalog", "control") or {}).get("paused")
                     or not latest.get("preferences", {}).get("observation", True)
                     or latest.get("consent_generation", 0) != p["consent_generation"]):
                 raise Denied("Observation settings changed.")
@@ -623,9 +624,10 @@ class Worker:
             def notice_receipt(s):
                 d = Ledger(s, self.ledger.sources)
                 participant = d.preference_profile(member_id)
-                if (d.member_eligible(member_id) and enabled("OBSERVATION") and not (s.get("ledger_catalog", "control") or {}).get("paused")
-                        and participant.get("preferences", {}).get("observation", True)
-                        and participant.get("consent_generation", 0) == p["consent_generation"]):
+                # This is a receipt of a confirmed Slack delivery, not consent
+                # or permission to observe. Temporary ineligibility cannot erase
+                # it; live checks still gate every capture/evaluation.
+                if participant.get("consent_generation", 0) == p["consent_generation"]:
                     participant.update(observation_notice_delivered_at=now(), observation_notice_ts=response["ts"])
                     d.save_preference_profile(participant)
             self.store.atomic(notice_receipt)

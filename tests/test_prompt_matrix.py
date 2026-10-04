@@ -43,6 +43,10 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'sender display name replaces the admin real name' in admin
     assert 'on opt-out remove them' in admin
     assert 'Omit /ledger-admin and related help for ineligible callers' in root.find('response').text
+    generated_author = root.find("roles/role[@id='ledger_quest_author']").text
+    assert 'both channels' in generated_author and 'cooperative discipline prose' in generated_author
+    consent = root.find('consent').text
+    assert 'legacy done jobs without receipts' in consent and 'confirmed delivery receipts' in consent
     assert len(matrix['text'].encode()) <= MAX_MATRIX_BYTES
     assert {r.get('id') for r in root.find('roles')} == REQUIRED_ROLES
     assert 'Repeated join requests show saved participation' in root.find('consent').text

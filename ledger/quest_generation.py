@@ -2,6 +2,7 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from html import unescape
 import json
 import random
 import re
@@ -18,7 +19,7 @@ from .sources import object_id, sid
 from .rules import amount
 from .storage import enqueue, now
 
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 ACTIVITY_DAYS = 30
 CHAT_DAYS = 14
 SOURCE_LIMIT = 5000
@@ -66,6 +67,7 @@ class SlackHistory:
     def __init__(self, client, sleep=time.sleep):
         self.client, self.sleep = client, sleep
         self.users = {}
+        self.redaction_incomplete = False
 
     def call(self, method, **kwargs):
         waited = 0
@@ -106,18 +108,33 @@ class SlackHistory:
                 or not isinstance(user, str) or not user.startswith(("U", "W")) or user == "USLACKBOT"):
             return False
         if user not in self.users:
-            self.users[user] = self.call("users_info", user=user)["user"]
+            try:
+                self.users[user] = self.call("users_info", user=user)["user"]
+            except (SlackApiError, KeyError, TypeError):
+                self.redaction_incomplete = True
+                raise
         profile = self.users[user]
         return not (profile.get("deleted") or profile.get("is_bot") or profile.get("is_app_user"))
 
-    def inspiration(self, channel_id, messages, oldest, latest):
-        rows, notes, seen = [], [], set()
-        recent = sorted(messages, key=lambda m: timestamp(m.get("ts")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    def redact(self, rows):
+        if self.redaction_incomplete:
+            # Earlier rows can mention an author whose later lookup failed;
+            # omitting just that author's own reply cannot protect identities.
+            return []
         all_names = set()
         for user in self.users.values():
-            all_names.update([user.get("real_name", ""), user.get("name", ""),
-                user.get("profile", {}).get("real_name", ""), user.get("profile", {}).get("display_name", "")])
+            profile = user.get("profile") or {}
+            all_names.update(n for n in (user.get("real_name"), user.get("name"),
+                profile.get("real_name"), profile.get("display_name")) if isinstance(n, str))
         all_names.update(part for name in list(all_names) for part in name.split())
+        return [{**row, "text": text[:600]} for row in rows
+                if (text := sanitize(row["text"], all_names))]
+
+    def inspiration(self, channel_id, messages, oldest, latest, *, defer_redaction=False):
+        if not defer_redaction:
+            self.redaction_incomplete = False
+        rows, notes, seen = [], [], set()
+        recent = sorted(messages, key=lambda m: timestamp(m.get("ts")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         def append(message):
             stamp = timestamp(message.get("ts"))
             if not stamp or not oldest <= stamp <= latest or message.get("ts") in seen or not self.human(message):
@@ -125,14 +142,10 @@ class SlackHistory:
             seen.add(message["ts"])
             # Only text is considered. Attachments, files, blocks and forwarding
             # metadata never enter a prompt; Ledger-authored kudos are bots.
-            user = self.users[message["user"]]
-            names = [user.get("real_name", ""), user.get("name", ""),
-                     user.get("profile", {}).get("real_name", ""), user.get("profile", {}).get("display_name", "")]
-            names.extend(part for name in list(names) for part in name.split())
-            names.extend(all_names)
-            text = sanitize(message.get("text"), names)
-            if text:
-                rows.append({"ref": f"{channel_id}:{message['ts']}", "text": text[:600]})
+            if sanitize(message.get("text")):
+                # Keep originals in memory until all sampled author profiles are
+                # available, including profiles discovered by later replies.
+                rows.append({"ref": f"{channel_id}:{message['ts']}", "text": message["text"]})
         for message in recent:
             append(message)
             if len(rows) >= 40:
@@ -151,7 +164,7 @@ class SlackHistory:
                     append(message)
             except (SlackApiError, KeyError, TypeError):
                 notes.append("optional thread replies unavailable")
-        return rows, sorted(set(notes))
+        return (rows if defer_redaction else self.redact(rows)), sorted(set(notes))
 
 
 def rank_weight(members, verified, chat, opened, pending):
@@ -304,6 +317,7 @@ class QuestGenerator:
         return result
 
     def context(self, rank, rng, stamp):
+        self.history.redaction_incomplete = False
         if rank is not None and not enabled_rank(self.l, rank):
             raise QuestGenerationError("--rank must name an enabled numeric rank slot.")
         metrics, histories = self.metrics(stamp)
@@ -317,9 +331,16 @@ class QuestGenerator:
         chat, coverage = [], []
         for channel in channels:
             messages, complete = histories[channel["_id"]]
-            rows, notes = self.history.inspiration(channel["channel_id"], messages, stamp - timedelta(days=CHAT_DAYS), stamp)
+            rows, notes = self.history.inspiration(channel["channel_id"], messages, stamp - timedelta(days=CHAT_DAYS), stamp, defer_redaction=True)
             chat.extend({**row, "channel": channel["_id"]} for row in rows)
             coverage.append({"channel": channel["_id"], "history_complete": complete, "notes": notes, "messages": len(rows)})
+        # The second channel's replies may identify someone mentioned in the
+        # first. Redact before building prompts or persisting reserved inputs.
+        chat = self.history.redact(chat)
+        if self.history.redaction_incomplete:
+            for item in coverage:
+                item["messages"] = 0
+                item["notes"] = sorted(set(item["notes"] + ["chat omitted because author profiles unavailable"]))
         examples = self.examples(rng)
         shops, shops_complete = self.bounded("shops", {"disabled": {"$ne": True}}, ["name", "disabled", "out_of_service"])
         tools, tools_complete = self.bounded("tools", {"disabled": {"$ne": True}}, ["name", "description", "shop_id", "disabled", "out_of_service"])
@@ -391,9 +412,19 @@ class QuestGenerator:
                 allowed_shops = {s["id"] for s in snapshot["data"]["shops"]} | {t["shop_id"] for t in snapshot["data"]["tools"]}
                 if not set(proposal["shop_ids"]).issubset(allowed_shops):
                     raise QuestGenerationError("Quest used shop IDs outside the supplied catalog.")
-                for field in ("title", "description", "criteria"):
+                prose = [proposal[k] for k in ("title", "description", "criteria")]
+                prose.extend(d[k] for d in proposal["disciplines"] for k in ("name", "expectation"))
+                for text in prose:
+                    output = " ".join(unescape(text).casefold().split())
                     for chat in snapshot["data"]["chat"]:
-                        if len(chat["text"]) >= 60 and chat["text"][:60].casefold() in proposal[field].casefold():
+                        excerpt = " ".join(unescape(chat["text"]).casefold().split())
+                        if not excerpt:
+                            continue
+                        if len(excerpt) < 60:
+                            copied = re.search(r"(?<!\w)" + re.escape(excerpt) + r"(?!\w)", output)
+                        else:
+                            copied = any(excerpt[i:i + 60] in output for i in range(len(excerpt) - 59))
+                        if copied:
                             raise QuestGenerationError("Quest text copied a chat excerpt.")
                 return proposal
             except (ValueError, KeyError, TypeError):
@@ -454,6 +485,10 @@ class QuestGenerator:
             return self.l.store.atomic(write)
         try:
             saved = self.l.store.get("ledger_context", snapshot_key)
+            if (saved or "proposal" in audit) and audit.get("prompt_version") != PROMPT_VERSION:
+                # Retain old reservations for audit, but never send potentially
+                # identifying legacy inputs or submit legacy unchecked prose.
+                raise QuestGenerationError("The unfinished request predates current privacy checks; use a new request ID.")
             if audit["status"] in ("context_saved", "composed") and (not saved or saved["expires_at"] <= self.clock()):
                 raise QuestGenerationError("The unfinished request input expired; use a new request ID.")
             if "proposal" in audit:
