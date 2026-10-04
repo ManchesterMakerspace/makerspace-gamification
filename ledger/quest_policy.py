@@ -2,6 +2,7 @@
 from copy import deepcopy
 from html import unescape
 import re
+from unicodedata import category, normalize
 
 from .sources import sid
 
@@ -53,10 +54,32 @@ def sanitize(text, names=()):
     return text.strip()
 
 
+def contains_rank_name(ledger, value):
+    """Shared definitions have no audience-safe configured rank labels."""
+    def canonical(text):
+        text = normalize("NFKC", unescape(text)).casefold()
+        # Invisible format controls and variation selectors cannot split a
+        # visible rank label. Normalize for comparison without editing prose.
+        text = "".join(c for c in text if category(c) != "Cf" and c != "\u034f"
+                       and not ("\ufe00" <= c <= "\ufe0f" or "\U000e0100" <= c <= "\U000e01ef"
+                                or "\u180b" <= c <= "\u180f"))
+        return " ".join(re.sub(r"[*_~`]", "", text).split())
+    prose = [value.get(k, "") for k in ("title", "description", "criteria")]
+    disciplines = value.get("disciplines")
+    prose.extend(d.get(k, "") for d in (disciplines if isinstance(disciplines, list) else []) if isinstance(d, dict)
+                 for k in ("name", "expectation"))
+    names = [canonical(r["name"]) for r in (ledger.store.get("ledger_catalog", "rank_display") or {}).get("ranks", [])
+             if isinstance(r.get("name"), str) and r["name"].strip()]
+    return any(re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", canonical(text))
+               for text in prose if isinstance(text, str) for name in names)
+
+
 def validate_definition(ledger, value, quest_type):
     if quest_type not in ("individual", "cooperative") or not isinstance(value, dict) or set(value) != set(DEFINITION_FIELDS):
         raise ValueError("Quest proposal must contain exactly the six definition fields.")
     result = deepcopy(value)
+    if contains_rank_name(ledger, result):
+        raise ValueError("Quest text must use numeric rank slots instead of configured rank names.")
     for key, limit in (("title", 100), ("description", 2000), ("criteria", 2000)):
         text = result[key]
         if (not isinstance(text, str) or not text.strip() or len(text) > limit or

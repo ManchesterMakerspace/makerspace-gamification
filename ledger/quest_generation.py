@@ -37,7 +37,8 @@ Individual quests have disciplines: []. Cooperative quests have 2–4 distinct o
 expectation (observable contribution evidence), a shared goal and at least two contributors.
 No volunteer task or Boss Fight classification is implied. Title <=100 characters; description and
 observable completion criteria <=2000 each. No mentions, control tokens or implementation model names.
-Do not expose another rank's name or requirements in quest text. Keep learning, feedback and safe craft central.
+Use numeric rank slots only; never include configured rank names in any quest or discipline text.
+Do not expose another rank's requirements. Keep learning, feedback and safe craft central.
 """
 
 
@@ -264,6 +265,31 @@ class QuestGenerator:
             rows.append(q)
         return rows
 
+    def completion_activity_at(self, completion):
+        """Resolve original evidence, including receipts written before activity_at."""
+        if completion.get("activity_at") is not None:
+            return completion["activity_at"]
+        member, revision = completion["member_id"], completion.get("quest_revision")
+        if completion.get("submission_id"):
+            submission = self.l.store.get("ledger_evidence", completion["submission_id"])
+            if (submission and submission.get("member_id") == member and submission.get("quest_revision") == revision
+                    and submission.get("kind") == "quest_submission" and submission.get("status") == "approved"):
+                return submission.get("at")
+            return None
+        quest = self.l.store.get("ledger_quests", revision) if revision else None
+        logical = completion.get("logical_id") or (quest or {}).get("logical_id")
+        if logical:
+            review = self.l.store.get("ledger_evidence", f"group-review:{logical}:{member}")
+            if (review and review.get("kind") == "quest_contribution_review" and review.get("member_id") == member
+                    and review.get("quest_revision") == revision and review.get("actor") not in (None, member)):
+                return review.get("activity_at")
+            project = self.l.store.get("ledger_relationships", "cooperative:" + logical)
+            if project and project.get("quest_revision") == revision:
+                contribution = project.get("contributions", {}).get(member, {})
+                if contribution.get("status") == "verified":
+                    return contribution.get("submitted_at")
+        return None
+
     def metrics(self, stamp):
         participants = [p for p in self.l.store.select("ledger_participants") if self.l.active(p["member_id"])]
         member_ids = {p["member_id"] for p in participants}
@@ -289,7 +315,7 @@ class QuestGenerator:
                 valid.append((e["member_id"], e.get("at")))
         for e in self.l.store.select("ledger_evidence", {"kind": "quest_completion"}):
             if e.get("member_id") in member_ids and e.get("reviewer") and e["reviewer"] != e["member_id"]:
-                valid.append((e["member_id"], e.get("at")))
+                valid.append((e["member_id"], self.completion_activity_at(e)))
         for e in self.l.store.select("ledger_evidence", {"kind": "quest_contribution_review"}):
             if e.get("member_id") in member_ids and e.get("actor") and e["actor"] != e["member_id"]:
                 valid.append((e["member_id"], e.get("activity_at")))

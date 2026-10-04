@@ -6,7 +6,7 @@ from .authority import Authority
 from .domain import Denied, Ledger, CHALLENGES
 from .sources import object_id, sid
 from .storage import now
-from .quest_policy import REVIEWED_KINDS, cooperative, enabled_rank, generated, individual
+from .quest_policy import REVIEWED_KINDS, contains_rank_name, cooperative, enabled_rank, generated, individual
 
 
 class Quests:
@@ -22,7 +22,7 @@ class Quests:
 
     def author_available(self, q):
         if generated(q):
-            return enabled_rank(self.l, q["target_rank"])
+            return enabled_rank(self.l, q["target_rank"]) and not contains_rank_name(self.l, q)
         p = self.l.participant(q["creator"])
         identity = self.l.store.get("ledger_catalog", f"identity:{q['creator']}") or {}
         if not p or not self.l.sources.permitted(q["creator"]) or identity.get("deactivated") or identity.get("bot"):
@@ -336,7 +336,7 @@ class Quests:
             s.put("ledger_quests", q)
             if cooperative(q):
                 project = s.get("ledger_relationships", "cooperative:" + q["logical_id"])
-                if project and project["status"] == "open":
+                if project and project["status"] == "open" and project["quest_revision"] == key:
                     project.update(status="disabled", disable_reason=reason)
                     s.put("ledger_relationships", project)
             s.put("ledger_evidence", {"_id": "quest-disable:" + str(uuid4()), "kind": "quest_disable", "quest": key, "actor": actor, "reason": reason, "at": now()})

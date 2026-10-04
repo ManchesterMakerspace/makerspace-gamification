@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from .authority import Authority
 from .domain import Denied, Ledger
-from .quest_policy import (DEFINITION_FIELDS, LEDGER_AUTHOR, cooperative, enabled_rank,
+from .quest_policy import (DEFINITION_FIELDS, LEDGER_AUTHOR, contains_rank_name, cooperative, enabled_rank,
                            generated, validate_definition)
 from .storage import now
 
@@ -21,6 +21,7 @@ class LedgerQuests:
         self.l.require(member)
         state = self.project(q) if cooperative(q) else None
         if (not cooperative(q) or q["status"] != "published" or not enabled_rank(self.l, q["target_rank"])
+                or contains_rank_name(self.l, q)
                 or not state or state["quest_revision"] != q["_id"] or state["status"] != "open"
                 or not Quests(self.l).prerequisites(q, member)):
             raise Denied("This cooperative quest is unavailable or its prerequisites are not met.")
@@ -143,7 +144,8 @@ class LedgerQuests:
                                                 q["logical_id"], excluded=excluded, commit=True)
             if state["status"] == "completed":
                 return state
-            if state["status"] != "open" or q["status"] != "published" or not enabled_rank(d, q["target_rank"]):
+            if (state["status"] != "open" or q["status"] != "published" or not enabled_rank(d, q["target_rank"])
+                    or contains_rank_name(d, q)):
                 raise Denied("This shared project is closed or disabled.")
             if not isinstance(description, str) or not description.strip() or len(description) > 2000:
                 raise ValueError("Provide observable evidence of the shared outcome within 2,000 characters.")
@@ -158,7 +160,7 @@ class LedgerQuests:
                 if not s.get("ledger_evidence", completion):
                     s.put("ledger_evidence", {"_id": completion, "kind": "quest_completion", "member_id": member,
                         "quest_revision": key, "logical_id": q["logical_id"], "description": contribution["description"],
-                        "reviewer": actor, "review_authority": audit, "at": now()})
+                        "reviewer": actor, "review_authority": audit, "activity_at": contribution.get("submitted_at"), "at": now()})
                     d.award(member, completion, str(contribution["reward"]), "quest", facts={
                         "quest_title": q["title"], "summary": "Independently verified shared quest completion."})
                     d._advance(member)

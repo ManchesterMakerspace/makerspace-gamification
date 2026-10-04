@@ -67,6 +67,63 @@ def test_review_rechecks_authority_rank_resources_and_edited_scope(joined):
     assert rejected["status"] == "rejected"
 
 
+def test_disabling_superseded_cooperative_revision_preserves_active_project(joined):
+    l, s, *_ = joined
+    original = pending(joined, 'cooperative')
+    service = LedgerQuests(l)
+    edits = {k: original[k] for k in DEFINITION_FIELDS}
+    edits['title'] = 'Build a repeatable marking jig'
+    current = service.review(str(oid(10)), original['_id'], 100, edits=edits)
+    project = deepcopy(service.project(current))
+    Quests(l).disable(str(oid(10)), original['_id'], 'Retire the superseded proposal')
+    assert service.project(current) == project
+    assert s.get('ledger_quests', current['_id'])['status'] == 'published'
+    assert service.available(str(oid(1)), current) == current
+    Quests(l).disable(str(oid(10)), current['_id'], 'Close the current project')
+    assert service.project(current)['status'] == 'disabled'
+    with pytest.raises(Denied):
+        service.available(str(oid(1)), s.get('ledger_quests', current['_id']))
+
+
+@pytest.mark.parametrize('edited', [False, True])
+def test_rank_name_proposals_and_human_edits_cannot_be_published(joined, edited):
+    l, s, *_ = joined
+    q = pending(joined, 'cooperative', target=6)
+    unsafe = {**{k: q[k] for k in DEFINITION_FIELDS}, 'title': 'Meet the Adept'}
+    if not edited:
+        q.update(unsafe)
+        s.put('ledger_quests', q)
+    before = deepcopy(s.data)
+    with pytest.raises(ValueError, match='numeric rank slots'):
+        LedgerQuests(l).review(str(oid(10)), q['_id'], 100, edits=unsafe if edited else None)
+    assert s.data == before
+
+
+@pytest.mark.parametrize('quest_type', ['individual', 'cooperative'])
+@pytest.mark.parametrize('unsafe', ['renamed_rank', 'invisible_label'])
+def test_existing_rank_name_quests_are_hidden_after_rank_name_changes(joined, quest_type, unsafe):
+    from ledger.conversations import conversation_facts
+    l, s, *_ = joined
+    service = LedgerQuests(l)
+    q = service.review(str(oid(10)), pending(joined, quest_type)['_id'], 100)
+    if unsafe == 'renamed_rank':
+        display = s.get('ledger_catalog', 'rank_display')
+        display['ranks'][5]['name'] = q['title']
+        s.put('ledger_catalog', display)
+    else:
+        q['title'] = 'Meet the Ad\u200bept'
+        s.put('ledger_quests', q)
+    assert not any(key.endswith(q['_id']) for key, _ in Quests(l).options(str(oid(1))))
+    assert q['title'] not in json.dumps(conversation_facts(l, str(oid(1)), True, 'Which quests can I do?'), ensure_ascii=False)
+    assert s.get('ledger_quests', q['_id'])['title'] == q['title']
+    if quest_type == 'cooperative':
+        with pytest.raises(Denied):
+            service.finalize(str(oid(10)), q['_id'], 'Shared result')
+    else:
+        with pytest.raises(Denied):
+            Quests(l).accept(str(oid(1)), q['_id'])
+
+
 def test_cooperative_finalization_requires_all_disciplines_and_live_clearances(joined):
     l, s, src, *_ = joined
     q = pending(joined, "cooperative", shops=[str(oid(201))])

@@ -102,6 +102,51 @@ def test_incomplete_activity_is_neutral(generator):
     assert not metrics[0]["verified_complete"] and not metrics[0]["chat_complete"]
 
 
+@pytest.mark.parametrize('days', [1, 90])
+@pytest.mark.parametrize('legacy', [False, True])
+def test_cooperative_completion_metrics_use_original_contribution_time(generator, days, legacy):
+    from ledger.ledger_quests import LedgerQuests
+    from test_ledger_quests import pending
+    g, (l, s, *_ ) = generator
+    service = LedgerQuests(l)
+    q = service.review(str(oid(10)), pending(generator[1], 'cooperative')['_id'], 0)
+    activity_at = now() - timedelta(days=days)
+    for member, role in ((1, 'Design'), (2, 'Fabrication')):
+        service.contribute(str(oid(member)), q['_id'], 'join', role=role)
+        with patch('ledger.ledger_quests.now', return_value=activity_at):
+            service.contribute(str(oid(member)), q['_id'], 'submit', description='Original contribution evidence')
+        service.contribute(str(oid(10)), q['_id'], 'verify', member=str(oid(member)))
+    service.finalize(str(oid(10)), q['_id'], 'Final outcome verified today')
+    for completion in s.select('ledger_evidence', {'kind': 'quest_completion'}):
+        if legacy:
+            completion.pop('activity_at', None)
+            s.put('ledger_evidence', completion)
+        else:
+            assert completion['activity_at'] == activity_at
+    metric = g.metrics(now())[0][0]
+    assert metric['verified_complete'] and metric['V'] == (1 if days == 1 else 0)
+
+
+@pytest.mark.parametrize('source', ['submission', 'project', 'unknown'])
+def test_completion_metrics_resolve_original_evidence_and_never_receipt_time(generator, source):
+    g, (_, s, *_ ) = generator
+    member = str(oid(1))
+    old = now() - timedelta(days=90)
+    completion = {'_id': 'completion', 'kind': 'quest_completion', 'member_id': member,
+        'reviewer': str(oid(10)), 'quest_revision': 'q', 'logical_id': 'logical', 'at': now()}
+    if source == 'submission':
+        completion['submission_id'] = 'submission'
+        s.put('ledger_evidence', {'_id': 'submission', 'kind': 'quest_submission', 'status': 'approved',
+            'member_id': member, 'reviewer': str(oid(10)), 'quest_revision': 'q', 'at': old})
+    if source == 'project':
+        s.put('ledger_relationships', {'_id': 'cooperative:logical', 'kind': 'quest_project', 'quest_revision': 'q',
+            'contributions': {member: {'status': 'verified', 'submitted_at': old}}})
+    s.put('ledger_evidence', completion)
+    metric = g.metrics(now())[0][0]
+    assert metric['V'] == (0.5 if source == 'unknown' else 0)
+    assert metric['verified_complete'] == (source != 'unknown')
+
+
 def test_active_threads_make_chat_activity_coverage_neutral(generator):
     g, (_, _, _, _, _, slack) = generator
     stamp = now()
@@ -181,6 +226,54 @@ def test_invalid_proposals_reject_without_state_mutation(generator, change):
     with pytest.raises(ValueError):
         g.run(rank=1, dry_run=True)
     assert s.data == before and api.quest_response.call_count == 2
+
+
+@pytest.mark.parametrize('field', ['title', 'description', 'criteria', 'name', 'expectation'])
+def test_configured_rank_names_rejected_in_every_proposal_field(generator, field):
+    g, (_, s, _, _, api, _) = generator
+    bad = proposal('cooperative')
+    if field in ('name', 'expectation'):
+        bad['disciplines'][0][field] = 'Adept'
+    else:
+        bad[field] = 'Prepare a jig for the Adept'
+    api.quest_response.return_value = json.dumps(bad)
+    before = deepcopy(s.data)
+    with pytest.raises(ValueError, match='repair attempt'):
+        g.run('cooperative', rank=6, dry_run=True)
+    assert s.data == before and api.quest_response.call_count == 2
+
+
+@pytest.mark.parametrize('spelling', ['aDePt', '_Adept_', '**Adept**', 'Ad&#101;pt', 'Ａｄｅｐｔ',
+    'Ad\u200bept', 'Ad\u200dept', 'Ad\ufeffept', 'Ad\ufe0fept', 'Ad\u034fept'])
+def test_rank_name_check_handles_equivalent_representations(generator, spelling):
+    g, *_ = generator
+    with pytest.raises(ValueError, match='numeric rank slots'):
+        validate_definition(g.l, {**proposal(), 'title': f'Build with {spelling}'}, 'individual')
+
+
+def test_custom_rank_labels_are_checked_without_rejecting_safe_substring_words(generator):
+    g, (_, s, *_ ) = generator
+    display = s.get('ledger_catalog', 'rank_display')
+    display['ranks'][5]['name'] = 'Master Maker'
+    s.put('ledger_catalog', display)
+    with pytest.raises(ValueError, match='numeric rank slots'):
+        validate_definition(g.l, {**proposal(), 'criteria': 'Ask MASTER\n**MAKER** for feedback.'}, 'individual')
+    safe = {**proposal(), 'description': 'Build a noviceship measuring jig for rank slot 6.'}
+    assert validate_definition(g.l, safe, 'individual') == safe
+
+
+def test_saved_composed_rank_name_proposal_is_revalidated_before_submission(generator):
+    g, (_, s, _, _, api, _) = generator
+    with patch.object(g, 'fit', side_effect=TimeoutError), pytest.raises(TimeoutError):
+        g.run(rank=6, request_id='saved-rank-name')
+    audit = s.get('ledger_evidence', 'quest-generation:saved-rank-name')
+    audit.update(status='composed', proposal={**proposal(), 'title': 'Meet the Adept'},
+                 retained_inputs={'messages': 0, 'examples': 0})
+    s.put('ledger_evidence', audit)
+    with pytest.raises(ValueError, match='numeric rank slots'):
+        g.run(rank=6, request_id='saved-rank-name')
+    assert not s.select('ledger_quests') and not s.select('ledger_outbox', {'kind': 'review_notice'})
+    api.quest_response.assert_not_called()
 
 
 def test_dry_run_and_saved_request_are_idempotent(generator):

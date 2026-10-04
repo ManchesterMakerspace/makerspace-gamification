@@ -50,6 +50,10 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'omit chat when identity reads fail, are malformed or incomplete' in generated_author
     assert 'Names absent from both directories may remain' in root.find('privacy').text
     assert 'Directory records themselves never enter saved context or inference' in generated_author
+    assert 'configured rank names are forbidden' in generated_author
+    assert 'human publication edits and saved proposal retries' in generated_author
+    assert 'never completion finalization time' in root.find('economy').text
+    assert 'quest_revision matches the disabled revision' in root.find('community').text
     consent = root.find('consent').text
     assert 'legacy done jobs without receipts' in consent and 'confirmed delivery receipts' in consent
     assert len(matrix['text'].encode()) <= MAX_MATRIX_BYTES
