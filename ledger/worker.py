@@ -413,11 +413,14 @@ class Worker:
                     pass
             for doc in self.store.select("ledger_evidence", {"kind": "quest_submission", "status": "pending"}):
                 q = self.store.get("ledger_quests", doc["quest_revision"])
+                if not q:
+                    continue
                 try:
                     Authority(l).authorize(actor, doc["member_id"], "quest_complete", q["shop_ids"], q["logical_id"], excluded=[q["creator"]])
                     summary += f"\nQuest completion: {doc['_id']} — {doc['description']}"
                 except Denied:
                     pass
+            summary += self.cooperative_reviews(actor)
         elif args and args[0] in ("approve", "reject") and len(args) >= 2:
             doc = self.store.get("ledger_evidence", args[1])
             if doc and doc.get("kind") == "quest_submission":
@@ -460,6 +463,46 @@ class Worker:
             from .metrics import snapshot
             summary = json.dumps(snapshot(self.store), default=str)
         l.notify(actor, "status", {"summary": summary}, key, exception=True, administrative=True)
+
+    def cooperative_reviews(self, actor):
+        from .authority import Authority
+        from .ledger_quests import LedgerQuests
+        from .quest_policy import LEDGER_AUTHOR, REVIEWED_KINDS, cooperative
+        l, lines = self.ledger, []
+        authority, service = Authority(l), LedgerQuests(l)
+        parents = [(q, q) for q in self.store.select("ledger_quests", {"status": "open", "kind": {"$nin": list(REVIEWED_KINDS)}})]
+        for project in self.store.select("ledger_relationships", {"kind": "quest_project", "status": "open"}):
+            q = self.store.get("ledger_quests", project["quest_revision"])
+            if q and cooperative(q) and q["status"] == "published" and project["quest_revision"] == q["_id"]:
+                parents.append((q, project))
+        for q, state in parents:
+            contributions = state.get("contributions", {})
+            logical, shops = q.get("logical_id", q["_id"]), q.get("shop_ids") or [q.get("shop_id")]
+            for member, contribution in contributions.items():
+                if contribution["status"] != "pending":
+                    continue
+                try:
+                    if cooperative(q):
+                        service.available(member, q)
+                    authority.authorize(actor, member, "quest_complete", shops, logical, excluded=contributions)
+                    uid = l.sources.slack_id(member)
+                    if uid:
+                        lines.append(f"Cooperative contribution: {q['_id']} · <@{uid}> — {contribution['description']}; use /ledger-admin verify-quest {q['_id']} <@{uid}>.")
+                except Denied:
+                    continue
+            if cooperative(q):
+                eligible = service.verified_contributors(q, state)
+                if len(eligible) < 2 or not {d["name"] for d in q["disciplines"]}.issubset({c["role"] for c in eligible.values()}):
+                    continue
+                try:
+                    for member in eligible:
+                        service.available(member, q)
+                        authority.authorize(actor, member, "quest_complete", shops, logical, excluded=contributions)
+                    authority.authorize(actor, LEDGER_AUTHOR, "quest_complete", shops, logical, excluded=contributions)
+                    lines.append(f"Shared project ready: {q['_id']} — {q['title']}; use /ledger-admin complete-quest {q['_id']}.")
+                except Denied:
+                    continue
+        return "".join("\n" + line for line in lines)
 
     def persist_composition(self, job, kind, audience, facts, conversation=None):
         current = self.store.get("ledger_outbox", job["_id"])

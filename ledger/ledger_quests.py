@@ -129,9 +129,13 @@ class LedgerQuests:
             return state
         return self.l.store.atomic(run)
 
+    def verified_contributors(self, q, state):
+        from .quests import Quests
+        return {m: c for m, c in state["contributions"].items()
+                if c["status"] == "verified" and self.l.active(m) and Quests(self.l).prerequisites(q, m)}
+
     def finalize(self, actor, key, description):
         def run(s):
-            from .quests import Quests
             d = Ledger(s, self.l.sources)
             q = s.get("ledger_quests", key)
             if not q or not cooperative(q):
@@ -149,8 +153,7 @@ class LedgerQuests:
                 raise Denied("This shared project is closed or disabled.")
             if not isinstance(description, str) or not description.strip() or len(description) > 2000:
                 raise ValueError("Provide observable evidence of the shared outcome within 2,000 characters.")
-            eligible = {m: c for m, c in state["contributions"].items()
-                        if c["status"] == "verified" and d.active(m) and Quests(d).prerequisites(q, m)}
+            eligible = LedgerQuests(d).verified_contributors(q, state)
             if len(eligible) < 2 or not {r["name"] for r in q["disciplines"]}.issubset({c["role"] for c in eligible.values()}):
                 raise ValueError("Completion requires at least two eligible verified contributors covering every discipline.")
             for member, contribution in eligible.items():

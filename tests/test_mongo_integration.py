@@ -138,6 +138,17 @@ def test_real_transactions_and_concurrent_exactly_once_kudos(env, monkeypatch):
         Engagement(l).notice(c)
         assert store.get('ledger_outbox', notice_key)['status'] == 'cancelled'
         slack.chat_postMessage.assert_not_called()
+        # Dynamic contribution keys must select only legacy mismatched notices
+        # on the real server, including when other rows have missing/bad shapes.
+        monkeypatch.delenv('LEDGER_QUEST_REVIEW_CHANNEL_ID', raising=False)
+        for key, fields in (
+            ('legacy-channel', {'contributions': {a: {'review_channel_id': 'COLD'}}}),
+            ('legacy-current', {'contributions': {a: {'review_channel_id': 'CNEW'}}}),
+            ('indexed-parent', {'review_notice_channel': 'CNEW', 'contributions': {a: {'review_channel_id': 'COLD'}}}),
+            ('no-contributions', {}), ('null-contributions', {'contributions': None}),
+            ('list-contributions', {'contributions': []})):
+            store.put('ledger_quests', {'_id': key, 'status': 'completed', **fields})
+        assert {row['_id'] for row in store.legacy_review_channels('ledger_quests', 'CNEW')} == {'legacy-channel'}
     finally:
         assert database.startswith('ledger_test_') and len(database) == len('ledger_test_') + 32
         store.db.client.drop_database(database)

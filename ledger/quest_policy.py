@@ -54,23 +54,24 @@ def sanitize(text, names=()):
     return text.strip()
 
 
+def canonical_prose(text):
+    """Compare visible text without changing stored member-authored prose."""
+    text = normalize("NFKC", unescape(text)).casefold()
+    text = "".join(c for c in text if category(c) != "Cf" and c != "\u034f"
+                   and not ("\ufe00" <= c <= "\ufe0f" or "\U000e0100" <= c <= "\U000e01ef"
+                            or "\u180b" <= c <= "\u180f"))
+    return " ".join(re.sub(r"[*_~`]", "", text).split())
+
+
 def contains_rank_name(ledger, value):
     """Shared definitions have no audience-safe configured rank labels."""
-    def canonical(text):
-        text = normalize("NFKC", unescape(text)).casefold()
-        # Invisible format controls and variation selectors cannot split a
-        # visible rank label. Normalize for comparison without editing prose.
-        text = "".join(c for c in text if category(c) != "Cf" and c != "\u034f"
-                       and not ("\ufe00" <= c <= "\ufe0f" or "\U000e0100" <= c <= "\U000e01ef"
-                                or "\u180b" <= c <= "\u180f"))
-        return " ".join(re.sub(r"[*_~`]", "", text).split())
     prose = [value.get(k, "") for k in ("title", "description", "criteria")]
     disciplines = value.get("disciplines")
     prose.extend(d.get(k, "") for d in (disciplines if isinstance(disciplines, list) else []) if isinstance(d, dict)
                  for k in ("name", "expectation"))
-    names = [canonical(r["name"]) for r in (ledger.store.get("ledger_catalog", "rank_display") or {}).get("ranks", [])
+    names = [canonical_prose(r["name"]) for r in (ledger.store.get("ledger_catalog", "rank_display") or {}).get("ranks", [])
              if isinstance(r.get("name"), str) and r["name"].strip()]
-    return any(re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", canonical(text))
+    return any(re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", canonical_prose(text))
                for text in prose if isinstance(text, str) for name in names)
 
 

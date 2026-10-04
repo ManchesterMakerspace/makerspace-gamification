@@ -15,13 +15,13 @@ from pymongo.errors import PyMongoError
 from slack_sdk.errors import SlackApiError, SlackRequestError
 
 from .domain import Denied, Ledger
-from .quest_policy import (LEDGER_AUTHOR, QUEST_SCHEMA, REVIEWED_KINDS,
+from .quest_policy import (LEDGER_AUTHOR, QUEST_SCHEMA, REVIEWED_KINDS, canonical_prose,
                            cooperative, enabled_rank, sanitize, validate_definition)
 from .sources import object_id, sid
 from .rules import amount
 from .storage import enqueue, now
 
-PROMPT_VERSION = 3
+PROMPT_VERSION = 4
 ACTIVITY_DAYS = 30
 CHAT_DAYS = 14
 SOURCE_LIMIT = 5000
@@ -499,6 +499,29 @@ class QuestGenerator:
             else:
                 raise QuestGenerationError("Quest policy does not fit the configured model context window.")
 
+    @staticmethod
+    def original_prose(proposal, snapshot):
+        prose = [proposal[k] for k in ("title", "description", "criteria")]
+        prose.extend(d[k] for d in proposal["disciplines"] for k in ("name", "expectation"))
+        sources = [c["text"] for c in snapshot["data"].get("chat", [])]
+        for example in snapshot["data"].get("completed_examples", []):
+            sources.extend(example.get(k, "") for k in ("title", "description", "criteria", "outcome"))
+            for discipline in example.get("disciplines", []):
+                if isinstance(discipline, dict):
+                    sources.extend(discipline.get(k, "") for k in ("name", "expectation"))
+                else:
+                    sources.append(discipline)
+        excerpts = [canonical_prose(s) for s in sources if isinstance(s, str) and s.strip()]
+        for text in prose:
+            output = canonical_prose(text)
+            for excerpt in excerpts:
+                if not excerpt:
+                    continue
+                copied = (re.search(r"(?<!\w)" + re.escape(excerpt) + r"(?!\w)", output) if len(excerpt) < 60
+                          else any(excerpt[i:i + 60] in output for i in range(len(excerpt) - 59)))
+                if copied:
+                    raise QuestGenerationError("Quest text copied supplied inspiration.")
+
     def compose(self, snapshot, quest_type):
         messages = self.messages(snapshot, quest_type)
         for attempt in range(2):
@@ -510,20 +533,7 @@ class QuestGenerator:
                 allowed_shops = {s["id"] for s in snapshot["data"]["shops"]} | {t["shop_id"] for t in snapshot["data"]["tools"]}
                 if not set(proposal["shop_ids"]).issubset(allowed_shops):
                     raise QuestGenerationError("Quest used shop IDs outside the supplied catalog.")
-                prose = [proposal[k] for k in ("title", "description", "criteria")]
-                prose.extend(d[k] for d in proposal["disciplines"] for k in ("name", "expectation"))
-                for text in prose:
-                    output = " ".join(unescape(text).casefold().split())
-                    for chat in snapshot["data"]["chat"]:
-                        excerpt = " ".join(unescape(chat["text"]).casefold().split())
-                        if not excerpt:
-                            continue
-                        if len(excerpt) < 60:
-                            copied = re.search(r"(?<!\w)" + re.escape(excerpt) + r"(?!\w)", output)
-                        else:
-                            copied = any(excerpt[i:i + 60] in output for i in range(len(excerpt) - 59))
-                        if copied:
-                            raise QuestGenerationError("Quest text copied a chat excerpt.")
+                self.original_prose(proposal, snapshot)
                 return proposal
             except (ValueError, KeyError, TypeError):
                 if attempt:
@@ -532,7 +542,7 @@ class QuestGenerator:
                 # error details. The same reserved context stays authoritative.
                 messages = [*self.messages(snapshot, quest_type), {"role": "user", "content":
                     "Repair the proposal: follow the exact six-field schema, limits and allowed resource IDs. "
-                    "Do not quote chat, include identities or propose any reward/authority fields."}]
+                    "Do not copy chat or completed-example prose, include identities or propose any reward/authority fields."}]
                 if self.api.tokenize(messages) + OUTPUT_TOKENS > self.context_limit:
                     raise QuestGenerationError("The reserved context cannot fit a repair request.") from None
 
@@ -591,7 +601,7 @@ class QuestGenerator:
                 raise QuestGenerationError("The unfinished request input expired; use a new request ID.")
             if "proposal" in audit:
                 proposal = audit["proposal"]
-                snapshot = {k: audit[k] for k in ("rank", "metrics", "coverage", "matrix", "retained_inputs")}
+                snapshot = saved["value"]
             else:
                 if saved:
                     snapshot = saved["value"]
@@ -618,6 +628,7 @@ class QuestGenerator:
                 if (s.get("ledger_catalog", "control") or {}).get("paused") or not enabled_rank(d, snapshot["rank"]):
                     raise Denied("The Ledger is paused or the selected rank was disabled.")
                 definition = validate_definition(d, proposal, quest_type)
+                self.original_prose(definition, snapshot)
                 quest_id, notice_id = "generated:" + request_id, "quest-review-notice:" + request_id
                 s.put("ledger_quests", {"_id": quest_id, "kind": "ledger_quest", "creator": LEDGER_AUTHOR,
                     "logical_id": quest_id, "quest_type": quest_type, "target_rank": snapshot["rank"], **definition,
