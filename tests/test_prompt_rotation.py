@@ -29,8 +29,8 @@ def test_shared_posts_avoid_two_recent_voices_across_types_and_members(joined):
                         kind=['rank_up', 'shop_complete', 'boss'][i % 3])['prompt_variation'] for i in range(9)]
     for i, variation in enumerate(selected):
         assert variation not in selected[max(0, i - 2):i]
-    assert len(composer.choose.call_args_list[0].args[0]) == 3
-    assert len(composer.choose.call_args_list[1].args[0]) == 2
+    assert len(composer.choose.call_args_list[0].args[0]) == 5
+    assert len(composer.choose.call_args_list[1].args[0]) == 4
     assert len(composer.choose.call_args_list[2].args[0]) == 1
     history = store.get('ledger_context', 'prompt_history:shared')
     assert history['recent'] == selected[-2:][::-1]

@@ -68,8 +68,21 @@ def consent(sponsor=None):
     return modal("consent", "Join The Ledger", [
         section("The Ledger recognizes learning, mentoring, and community contribution. Joining imports verified makerspace history and invites you to private game channels."),
         section("If you opt out, channel access and game announcements stop. Your skills and XP are retained and eligible makerspace activity continues accruing silently. Peer-addressed kudos may still be delivered, but earns no kudos XP while you are opted out."),
-        section("AI customizes messages using relevant game facts. Participation is optional and never changes tool safety clearances."),
+        section("The Ledger customizes messages using relevant game facts. Opt-in also covers observation of new activity in Ledger channels, kudos issuance metadata, and verified volunteer activity. The System records suggestions for audit only; they do not change XP or ranks or send recognition messages. Preferences independently disable observation and arrival mentions. An explanatory notice arrives before observation activates. Participation never changes tool safety clearances."),
         checkbox("agree", "I choose to participate")], {"sponsor": sponsor}, "Opt in")
+
+
+def participation(ledger, member_id, title="Already opted in"):
+    participant = ledger.participant(member_id)
+    rank = ledger.presentation(participant["rank"])
+    blocks = [section("Your opt-in is saved. You do not need to join again."),
+              section(f"*Rank:* {escape(rank['name'])}\n*XP:* {escape(participant['xp'])}")]
+    if participant.get("import_pending"):
+        blocks.append(section("Your verified history import is queued or in progress. The Ledger will send a summary when it finishes."))
+    if not ledger.active(member_id):
+        blocks.append(section("Your opt-in is retained, but Ledger access is currently unavailable. Ask makerspace staff to check your member and Slack account status."))
+    blocks.append(section("Use /ledger for progress or /ledger leave to opt out. Channel invitations and messages are processed in the background."))
+    return modal("dismiss", title, blocks, submit="Done")
 
 
 def kudos_recipient():
@@ -90,6 +103,10 @@ def kudos_form(ledger, recipient, key, draft=None):
         blocks.append(select_input("invitation", "Also invite this member?", [option("Send kudos only", "no"), option("Send kudos and invite them to The Ledger", "yes")],
                                    selected=option("Send kudos and invite them to The Ledger" if draft.get("invitation") == "yes" else "Send kudos only", draft["invitation"]) if draft.get("invitation") else None))
     blocks.append(text_input("message", "Your kudos message", draft.get("message", ""), multiline=True))
+    from .kudos import EMOJI, selected_emoji
+    selected = selected_emoji(draft.get("emoji"))
+    blocks.append(select_input("emoji", "Emoji (optional)", [option(label, value) for label, value in EMOJI],
+                               selected=next((option(label, value) for label, value in EMOJI if value == selected), None), optional=True))
     blocks.append(section("Slack formatting and emoji are welcome. Your message is delivered as written."))
     shop = ledger.sources.shop(draft.get("shop")) if draft.get("shop") else None
     blocks.append(select_input("shop", "Shop (optional)", selected=option(shop["name"], str(shop["_id"])) if shop else None, optional=True, dispatch=True))
@@ -130,6 +147,7 @@ def home(ledger, member_id):
     display = ledger.presentation(p["rank"])
     rules = ledger.store.get("ledger_rulesets", p["ruleset"])
     blocks = [section(f"{display['emoji']} *{escape(display['name'])}* · {p['xp']} XP"),
+              navigation(),
               section("Choose your next step: `/ledger-skills`, `/ledger-quests`, `/ledger-mentor`, `/kudos`, or `/ledger-project`."),
               section("*Your progress*\n" + "\n".join(f"{k.replace('_', ' ').title()}: {v}" for k, v in p.get("metrics", {}).items()))]
     if p["rank"] <= 2:
@@ -138,10 +156,7 @@ def home(ledger, member_id):
         blocks.append(section("*Pass it on*\nComfortable with a tool? Ask its resource manager about becoming a volunteer checkout approver, or offer a small skill-sharing session. Teaching and project help both count as mentoring."))
     else:
         blocks.append(section("*Choose your next contribution*\nDevelop another mentor, design a class, or leave a usable stewardship handoff. Tool Captain, Workshop Instructor, Design Challenge Judge, and Resource Manager appointments remain human decisions. Choose a commitment that fits your capacity."))
-    if p["rank"] < 7 and rules["ranks"][p["rank"]]["enabled"]:
-        nxt = rules["ranks"][p["rank"]]
-        blocks.append(section(f"*Next: {escape(ledger.presentation(nxt['slot'])['name'])}*\nXP floor: {nxt['floor']}\n" +
-            "\n".join(f"{k.replace('_', ' ').title()}: {v}" for k, v in nxt["requirements"].items()) + "\nAdvancement also requires current paid or earned membership."))
+    blocks.extend(progress_blocks(ledger, member_id))
     projects = ledger.store.select("ledger_projects")[-10:]
     if projects:
         blocks.append(section("*Project gallery*"))
@@ -150,3 +165,135 @@ def home(ledger, member_id):
             blocks.append(section(f"<{project['permalink']}|{title}>" if project.get("permalink") else title))
     blocks.append({"type": "actions", "elements": [button("Current rank channel", "reinvite", ""), button("Opt out", "leave", "")]})
     return {"type": "home", "blocks": blocks}
+
+
+def navigation():
+    return {"type": "actions", "elements": [button(label, action, "") for label, action in
+        [("Next rank", "progress"), ("Browse quests", "browse_quests"), ("Skill tree", "skill_tree"),
+         ("Achievements", "achievements"), ("Preferences", "preferences")]]}
+
+
+def progress_blocks(ledger, member):
+    from .progress import progress
+    facts = progress(ledger, member)
+    blocks = [section(f"*Next rank:* {escape(facts['next_rank'] or 'Highest configured rank held')}\n*Remaining XP:* {facts['remaining_xp']}")]
+    if facts["milestones"]:
+        blocks.append(section("\n".join(f"{m['metric'].replace('_', ' ').title()}: {m['current']} / {m['required']} (remaining {m['remaining']})" for m in facts["milestones"])))
+    if facts["blockers"]:
+        blocks.append(section("*Private eligibility details*\n" + "\n".join(escape(b) for b in facts["blockers"])))
+    if facts["suggestions"]:
+        blocks.append(section("*Optional next steps*\n" + "\n".join(escape(b) for b in facts["suggestions"])))
+    return blocks
+
+
+def character_sheet(ledger, member):
+    from .progress import progress
+    facts = progress(ledger, member)
+    blocks = [section(f"*{escape(facts['rank'])}* · {facts['xp']} XP\n*Deepest cleared skill:* {escape(facts.get('highest_skill', 'No recorded clearance'))}")]
+    if facts["metrics"]:
+        blocks.append(section("\n".join(f"{k.replace('_', ' ').title()}: {escape(v)}" for k, v in facts["metrics"].items())))
+    else:
+        pending = (ledger.participant(member) or {}).get("import_pending")
+        blocks.append(section("Verified history import pending; progress may be incomplete." if pending else "No recorded milestones yet."))
+    blocks.append(navigation())
+    recorded = ledger.store.select("ledger_awards", {"member_id": member})
+    blocks.append(section(f"Recorded achievements: {len(recorded)}. Open Achievements for details."))
+    return modal("dismiss", "Character sheet", blocks, submit="Done")
+
+
+def progress_view(ledger, member):
+    return modal("dismiss", "Your next rank", progress_blocks(ledger, member) + [navigation()], submit="Done")
+
+
+def preferences(ledger, member):
+    p = ledger.require(member)
+    pref = p.get("preferences", {})
+    return modal("preferences_save", "Ledger preferences", [
+        section("The System observes only new eligible activity in registered Ledger channels, kudos issuance metadata, and verified volunteer activity. Original kudos text and DMs are excluded. Suggestions are audit-only and do not change XP or ranks or send recognition messages. Ask staff about the audit process."),
+        checkbox("observation", "Allow observation", pref.get("observation", True)),
+        checkbox("arrival_mentions", "Allow arrival mentions", pref.get("arrival_mentions", True))], submit="Save")
+
+
+def achievements(ledger, member):
+    ledger.require(member)
+    rows = ledger.store.select("ledger_awards", {"member_id": member})
+    blocks = [section("*Recorded milestones and achievements*")]
+    for row in sorted(rows, key=lambda r: r.get("at"), reverse=True)[:35]:
+        if row.get("kind") not in ("review", "rank_correction", "rank_hold_release"):
+            blocks.append(section(escape(row.get("name") or row.get("kind", "Achievement").replace("_", " ").title()) + (" · " + escape(row["delta"]) + " XP" if row.get("delta") else "")))
+    for row in ledger.store.select("ledger_evidence", {"kind": "ai_decision", "member_id": member, "status": "committed"})[-30:]:
+        if row.get("achievement"):
+            blocks.append(section(f"*{escape(row['achievement']['title'])}*\n{escape(row['achievement']['description'])}"))
+    for row in ledger.store.select("ledger_evidence", {"kind": "quest_completion", "member_id": member})[-10:]:
+        quest = ledger.store.get("ledger_quests", row["quest_revision"]) or {}
+        blocks.append(section("*Verified quest completion:* " + escape(quest.get("title", "Quest"))))
+    for row in ledger.store.select("ledger_evidence", {"kind": "submission", "member_id": member, "status": "approved"})[-10:]:
+        blocks.append(section("*Verified milestone:* " + escape(row["achievement"].replace("_", " ").title())))
+    return modal("dismiss", "Achievements", blocks[:95] or [section("No recorded achievements yet.")], submit="Done")
+
+
+def quest_browser(ledger, member, selected=None):
+    from .quests import Quests
+    service = Quests(ledger)
+    blocks = [select_input("quest_selection", "Search quest titles", dispatch=True)]
+    metadata = {}
+    if selected:
+        item = service.detail(member, selected)
+        blocks[0]["element"]["initial_option"] = option(item["title"], selected)
+        blocks.extend([section(f"*{escape(item['title'])}*\n{escape(item.get('description') or item.get('criteria', ''))}"),
+                       section("*Acceptance criteria*\n" + escape(item.get("criteria", "")))])
+        if item.get("kind") == "member_quest":
+            author_uid = ledger.sources.slack_id(item["creator"])
+            author = f"<@{author_uid}>" if author_uid and ledger.active(item["creator"]) else escape(author_uid or "Unavailable Slack identity")
+            blocks.extend([section(f"*Creator:* {author}\n*Exact target rank:* {escape(ledger.presentation(item['target_rank'])['name'])}\n*Approved reward:* {item['reward']} XP\n*Verification:* independent authorized reviewer"),
+                section("*Prerequisites*\nShops: " + escape(", ".join((ledger.sources.shop(i) or {}).get("name", i) for i in item["shop_ids"]) or "None") +
+                        "\nTools: " + escape(", ".join((ledger.sources.tool(i) or {}).get("name", i) for i in item["tool_ids"]) or "None"))])
+            accepted = service.acceptance(member, item["logical_id"])
+            blocks.append({"type": "actions", "elements": [button("Submit completion" if accepted else "Accept quest", "quest_complete_form" if accepted else "quest_accept", item["_id"])]})
+        elif item.get("kind") == "challenge":
+            blocks.append(section("*Verification:* existing milestone evidence requirements and independent review.\nUse /ledger-quests submit " + escape(item["_id"])))
+        else:
+            blocks.append(section("*Disciplines:* " + escape(", ".join(item["roles"])) + "\nUse /ledger-quests join " + escape(item["_id"]) + " <discipline>, then contribute for independent verification."))
+        metadata["selected"] = selected
+    blocks.append({"type": "actions", "elements": [button("Create quest", "quest_author", "")]})
+    return modal("dismiss", "Explore quests", blocks, metadata, "Done")
+
+
+def quest_author(ledger, member, draft=None, suggestion=False):
+    from .quests import Quests
+    targets = Quests(ledger).targets(member)
+    draft = draft or {}
+    choices = [option(ledger.presentation(i)["name"], i) for i in targets]
+    result = modal("member_quest_submit", "Author a quest", [
+        text_input("title", "Title", draft.get("title", ""), max_length=100),
+        text_input("description", "Description", draft.get("description", ""), multiline=True),
+        text_input("criteria", "Observable acceptance criteria", draft.get("criteria", ""), multiline=True),
+        select_input("target_rank", "Exact target rank", choices, selected=next((c for c in choices if c["value"] == str(draft.get("target_rank"))), None)),
+        text_input("shops", "Shop prerequisite IDs (comma separated)", draft.get("shops", ", ".join(draft.get("shop_ids", []))), optional=True),
+        text_input("tools", "Tool prerequisite IDs (comma separated)", draft.get("tools", ", ".join(draft.get("tool_ids", []))), optional=True),
+        text_input("disciplines", "Collaboration disciplines (optional)", ", ".join(draft["disciplines"]) if isinstance(draft.get("disciplines"), list) else draft.get("disciplines", ""), optional=True),
+        {"type": "actions", "elements": [button("Help draft with The Ledger", "quest_draft_help", "")]},
+        section("The Ledger's draft suggestions are editable. You explicitly submit your draft; an independent reviewer sets the reward from 0–500 XP. Publication grants no XP.")],
+        {"revision_of": draft.get("revision_of"), "submission_key": draft.get("submission_key") or str(uuid4())}, "Submit for review")
+    if suggestion:
+        # Matching block/action IDs preserve Slack state. New block IDs apply
+        # generated initial values while leaving the other fields intact.
+        marker = str(uuid4())
+        for block in result["blocks"][:3]:
+            block["block_id"] += ":suggestion:" + marker
+    return result
+
+
+def delegates(ledger, actor):
+    from .authority import Authority, CAPABILITIES
+    if not Authority(ledger).staff_scope(actor):
+        raise ValueError("Delegation requires current staff authority.")
+    blocks = [select_input("delegate", "Choose a participating member")]
+    blocks.extend(checkbox("cap_" + cap, cap.replace("_", " ").title()) for cap in sorted(CAPABILITIES))
+    blocks.extend([select_input("scope_kind", "Authority scope", [option(k.title(), k) for k in ("global", "shops", "quest")]),
+        text_input("scope_ids", "Shop IDs or quest ID (any revision)", optional=True), text_input("reason", "Required reason", multiline=True)])
+    for g in ledger.store.select("ledger_relationships", {"kind": "delegation", "status": "active"})[:30]:
+        if Authority(ledger).staff_scope(actor)["kind"] == "global" or g["grantor"] == actor:
+            blocks.append(section(f"Grant {escape(g['_id'])}\nDelegate: {escape(ledger.sources.slack_id(g['delegate']))}\nCapabilities: {escape(', '.join(g['capabilities']))}\nScope: {escape(json.dumps(g['scope']))}"))
+            blocks.append({"type": "actions", "elements": [button("Revoke grant", "delegate_revoke", g["_id"])]})
+    return modal("delegate_grant", "Review delegates", blocks, submit="Grant authority")

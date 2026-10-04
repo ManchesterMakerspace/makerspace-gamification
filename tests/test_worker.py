@@ -21,15 +21,43 @@ def worker(env):
     return Worker(l, composer, slack, bot_id='UBOT')
 
 
-def test_public_kudos_keeps_body_live_ranks_and_independent_receipts(joined):
+def test_welcome_waits_for_accounting_without_exhausting_delivery_retries(joined, caplog):
+    ledger, store, _, _, _, slack = joined
+    w = worker(joined)
+    key = f'dm:join:{oid(1)}:1'
+    # Select only this welcome so other queued work cannot mask its outcome.
+    for other in store.select('ledger_outbox'):
+        if other['_id'] != key:
+            other['status'] = 'done'
+            store.put('ledger_outbox', other)
+    for _ in range(12):
+        job = store.get('ledger_outbox', key)
+        job['available_at'] = now() - timedelta(seconds=1)
+        store.put('ledger_outbox', job)
+        assert w.step('ledger_outbox')
+    job = store.get('ledger_outbox', key)
+    assert job['status'] == 'pending' and job['attempts'] == 0
+    assert job['last_error'] == 'HistoryImportPending'
+    assert caplog.text.count('check ledger-accounting') == 1
+    slack.chat_postMessage.assert_not_called()
+    ledger.reconcile(str(oid(1)), historical=True)
+    job['available_at'] = now() - timedelta(seconds=1)
+    store.put('ledger_outbox', job)
+    assert w.step('ledger_outbox')
+    assert store.get('ledger_outbox', key)['status'] == 'done'
+    slack.chat_postMessage.assert_called_once()
+
+
+def test_public_kudos_keeps_body_selected_emoji_and_independent_receipts(joined):
     l, s, _, _, api, slack = joined
     w = worker(joined)
     a, b = str(oid(1)), str(oid(2))
     body = '*Thanks* _maker_ ~oops~ <https://example.com|link>\n> quote\n`code` :hammer: 🌱'
-    l.kudos(a, b, body, key='render', public=True, expected_participation=True)
+    l.kudos(a, b, body, key='render', public=True, expected_participation=True, emoji=':clap:')
     dm = claim(s, 'kudos:render:recipient')
     w.outbox(dm)
     assert slack.chat_postMessage.call_args.kwargs['blocks'][2]['text']['text'] == body
+    assert slack.chat_postMessage.call_args.kwargs['text'].startswith(':clap: You have received kudos from <@U1>\n')
     l.leave(b)
     ranks = s.get('ledger_catalog', 'rank_display')['ranks']
     ranks[0].update(emoji=':custom_maker:', name='Seedling')
@@ -38,9 +66,9 @@ def test_public_kudos_keeps_body_live_ranks_and_independent_receipts(joined):
     w.outbox(public)
     call = slack.chat_postMessage.call_args.kwargs
     assert call['channel'] == 'CCHAT'
-    assert call['blocks'][0]['text']['text'] == ':custom_maker: <@U1> → <@U2>'
+    assert call['blocks'][0]['text']['text'] == ':clap: <@U2> has received kudos from <@U1>'
     assert call['blocks'][2]['text']['text'] == body
-    assert 'Seedling <@U1>' in call['text'] and 'Seedling <@U2>' not in call['text']
+    assert 'Seedling' not in call['text'] and ':custom_maker:' not in call['text']
     assert set(s.get('ledger_evidence', 'kudos:render')['deliveries']) == {'shared', 'recipient'}
     assert l.participant(b)['xp'] == '17'
     calls = slack.chat_postMessage.call_count

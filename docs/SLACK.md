@@ -26,11 +26,31 @@ The manifest enables App Home and writable app messages. All seven commands have
 | `/ledger-skills` | Shop/tool skill trees and accessible text |
 | `/ledger-quests` | Learning challenges, evidence, collaborative quests |
 | `/ledger-mentor` | Success Buddies and verified mentoring |
-| `/kudos` | Recipient-first thanks, optional public sharing and invitation |
+| `/kudos` | Thanks for linked members with or without opt-in; optional emoji, public sharing and invitation |
 | `/ledger-project` | Project gallery and feedback threads |
 | `/ledger-admin` | Authorized configuration, verification, metrics, pause/resume |
 
 All modals, buttons, checkboxes, and external shop/tool/member dropdowns use the interaction endpoint. They are interaction payloads, not additional event subscriptions or commands.
+
+## Saved opt-in and chat replies
+
+The consent modal saves `ledger_participants.opted_in` synchronously and displays **Opt-in saved** after the transaction succeeds. Repeating `/ledger join` or clicking an old invitation while still opted in shows **Already opted in**, current rank/XP, and any pending history import. It does not reset consent, rules, progress, or invitations. Opting out and joining again still shows the consent form. Older images always reopened consent even for a saved participant; that alone did not mean consent was lost.
+
+HTTP 200 for a chat event confirms receipt, not that a reply has been generated. The complete path is:
+
+`ledger-web → ledger_inbox → ledger-accounting → ledger_outbox → ledger-delivery → Slack`
+
+`ledger-channels` separately handles invitations/removals. All three workers must be running alongside the web service. If web and delivery run alone, chat events and history imports remain queued; welcome messages wait for the missing import. Current workers report `HistoryImportPending`, defer the welcome without spending delivery retries, and log `check ledger-accounting`. Older images reported only `RuntimeError` and could exhaust their retries. Already-failed jobs need the targeted retry procedure in [operations](OPERATIONS.md#recovery); do not erase consent or re-award XP.
+
+```sh
+docker compose up -d --build --no-deps ledger-web ledger-accounting ledger-delivery ledger-channels
+docker compose ps --all
+docker compose logs --since=5m ledger-accounting ledger-delivery ledger-channels
+```
+
+Accounting logs `Slack event processed ... outcome=reply_queued` when it queues a reply; otherwise it reports a fixed reason such as `ignored_unlinked_identity`, `ignored_unjoined_channel`, or `ignored_unaddressed_channel_message`. No message body is logged. Pending `slack_event` inbox jobs point to accounting; pending `conversation` outbox jobs point to delivery. Check workers use the same `LEDGER_URI`/`LEDGER_DATABASE` as web if queued jobs never appear to them. Check Slack errors such as `missing_scope` or `invalid_auth` in delivery logs, and reinstall the Slack app after scope changes.
+
+Linked human members may chat in DMs without opting in. In any channel the bot has joined, address The Ledger by name or Slack mention, or continue a thread containing a bot reply or a bot-authored root post. Only registered Ledger channels examine unaddressed messages containing `?` or recognize self-directed progress requests. Unrelated ambient messages in other channels are neither saved as chat context nor sent to inference; old ambient jobs are rejected before inference, and unrequested stored history is excluded from addressed replies there. Ordinary unaddressed chatter receives no reply. Nonparticipants may ask about The Ledger and XP generally and known shops/tools, with an optional `/ledger join` journey invitation; rules, specific ranks/quests and retained personal progress stay unavailable. Participants receive accurate current/lower rank details and next-rank requirements, with higher-rank names/details and inaccessible quests excluded from conversation facts. Unknown answers, including unavailable shop/tool facts, say "I don't know." Chat narration does not itself execute administrative commands or award XP; use the command/forms for actions. Ensure `message.im` and `app_mention` subscriptions, `message.groups` for private-channel replies and `message.channels` for joined public channels, and the matching manifest scopes are installed. `SLACK_BOT_USER_ID` must be the bot's `U...` user ID.
 
 ## Troubleshooting "the app did not respond"
 
@@ -72,7 +92,8 @@ After changing `.env`, recreate the affected containers with `docker compose up 
 | `app_home_opened` | Publish the participant's gallery/progress Home view | No additional event scope |
 | `app_mention` | Threaded responses when The Ledger is addressed | `app_mentions:read` |
 | `message.im` | Onboarding/opt-out DMs and conversations; message edits/deletions | `im:history` |
-| `message.groups` | Authorized private-channel conversations and context edits/deletions | `groups:history` |
+| `message.groups` | Joined private-channel conversations and context edits/deletions | `groups:history` |
+| `message.channels` | Joined public-channel questions, mentions and existing bot threads | `channels:history` |
 | `member_joined_channel` | Check consent/rank and remove unauthorized game-channel joins | `groups:read` for private channels |
 | `member_left_channel` | Record voluntary departure and respect re-invitation rules | `groups:read` for private channels |
 | `user_change` | Refresh active human identity/deactivation state | `users:read` |
@@ -86,6 +107,8 @@ Slack delivers `message.im` and `message.groups` as `type: "message"`; `message_
 | `commands` | All slash commands and their interactive flows |
 | `app_mentions:read` | `app_mention` event |
 | `chat:write` | `chat.postMessage` for DMs, notifications, kudos, project threads, and replies |
+| `channels:read` | `conversations.info` verifies the bot is a member of a public channel before chat delivery |
+| `channels:history` | Receives `message.channels` in public channels the bot has joined |
 | `groups:read` | `conversations.info`, `conversations.members`, private-channel membership events |
 | `groups:history` | `message.groups`, including edits/deletions; private project thread visibility |
 | `groups:write` | `conversations.create` with `is_private`, `conversations.invite`, `conversations.kick` |
@@ -99,3 +122,15 @@ Slack delivers `message.im` and `message.groups` as `type: "message"`; `message_
 No user-token scopes, public-channel history/management, workspace administration, email lookup, reaction write, incoming webhooks, or app-level Socket Mode token are needed. Custom emoji shortcodes render in Slack without calling `emoji.list`. Ordinary app tokens do not bypass workspace policy on creating private channels or removing members; verify those permissions with workspace administrators during the pilot.
 
 The bot must be invited to existing private game channels before `ledger bootstrap`. Bootstrap creates new private channels if none are supplied. Test join/leave reconciliation with real members: native manual invitations can briefly expose a private channel before removal, as documented in the accepted design.
+
+## Progress and quest interactions
+
+`/ledger stats`, `/ledger progress`, `/ledger preferences`, and `/ledger achievements` open deterministic private views. `/ledger-quests list` uses external-select title options, with hash-protected updates and revalidated selections/actions. `/ledger-quests create` provides editable asynchronous Help draft with The Ledger suggestions; interaction acknowledgments never wait for inference. All authored member-facing copy uses The Ledger/The System, preserving original member text. See [member routes and deployment checks](ENGAGEMENT_QUESTS.md).
+
+## Kudos emoji and consent
+
+The `/kudos` sending modal offers an optional emoji picker. Its selection is saved with the submission and survives shop/recipient changes and retries. Negative/offensive selections (including `:poop:`, `:-1:`, `:middle_finger:`, `:clown_face:`, aliases and tone variants) and unknown picker values are silently dropped. The selected emoji and a space precede "You have received kudos from <SENDER>" in the recipient DM; SENDER is a validated Slack mention. The public Ledge Chat header includes the same emoji, recipient and sender. Authored formatting and emoji in the message body remain untouched and are never sent to inference.
+
+Both sending and receiving are available without game opt-in. Recipient participation still controls XP; one giver/recipient/week and five recipient/day qualifying XP caps still apply, and extra thanks still deliver. Nonparticipant senders can request public delivery and an invitation, but do not become recruitment sponsors. Requested acknowledgments/receipts are delivered without opt-in. Public-channel scopes and subscriptions have changed: update the manifest and reinstall the app before verifying joined-channel chat.
+
+DMs acknowledging kudos submissions and reporting delivery use `delivery.json` paired variations. Recipient identity, overall status, DM/public status and the once-only XP result are available to custom prompts; the original kudos body is excluded. Customize with `/ledger-admin template delivery member` or explicitly adopt the updated file via `/ledger-admin template-library delivery member`. Saved choices/text remain stable on retries. See [delivery prompt variables](PROMPTS.md).

@@ -27,11 +27,13 @@ Set `MLAB_URI` for the makerspace reader and `LEDGER_URI` for the Ledger writer.
 
 For deployment, populate `.env` with database/Slack/MQTT credentials, a shared vLLM API key, and a Cloudflare Tunnel token. Compose includes `ghcr.io/timothystewart6/vllm-gb10` and `cloudflare/cloudflared`; the tunnel's published hostname forwards to `http://ledger-web:3000`. The AI endpoint stays inside Docker. Follow the [GB10 and tunnel deployment guide](docs/DEPLOYMENT.md) for startup, model warmup, and verification, then the [pilot steps](docs/OPERATIONS.md).
 
+After updating the deployment checkout, run `bash scripts/rebuild.sh` on the Linux deployment host to rebuild images and recreate all services while preserving named volumes and external data. See [rebuild behavior and verification](docs/DEPLOYMENT.md#rebuild-after-a-repository-update).
+
 The importable [Slack manifest JSON](slack-manifest.json) includes all seven commands, seven event subscriptions, App Home, modal interactions, and required bot scopes. Replace every `LEDGER_HOST` with the tunnel's public hostname. See the [Slack setup and permission mapping](docs/SLACK.md); check that `/kudos` is available before installation.
 
 The bot's leatherbound grimoire icon is included at [512 × 512](icons/ledger-bot-512.png) for Slack upload and [36 × 36](icons/ledger-bot-36.png) for mobile rendering. See [icon assets and installation](icons/README.md) for the source illustration and generation prompt.
 
-AI narration uses [23 message-type JSON files](ledger/prompts), each with three paired system/user prompt variations. The bot avoids the last two voices before selecting randomly, using shared history for channel posts and separate history per DM recipient. It substitutes verified member/event details, and delivery retries reuse the composed text. See the [rank-up example](ledger/prompts/rank_up.json) and [prompt authoring guide](docs/PROMPTS.md) for variables, audience settings, and admin preview/publication.
+The Ledger narration uses [23 message-type JSON files](ledger/prompts), with three paired variations per type and two additional System variations in five completion types. The bot avoids the last two voices before selecting randomly, using shared history for channel posts and separate history per DM recipient. It substitutes verified member/event details, and delivery retries reuse the composed text. See the [rank-up example](ledger/prompts/rank_up.json) and [prompt authoring guide](docs/PROMPTS.md) for variables, audience settings, and admin preview/publication.
 
 The shared [Prompt Matrix Template](ledger/prompts/prompt_matrix.xml.md) codifies roles, game rules, personality, and channel/DM conduct in hybrid XML/Markdown. Set `LEDGER_PROMPT_MATRIX_DOC_URL` to optionally load it from a Google Doc on worker startup; `/ledger-admin reload-prompts` requests a fresh copy. Failed refreshes retain valid policy, and existing deliveries retain their snapshots. See [matrix design, authentication, reload, and validation](docs/PROMPT_MATRIX.md).
 
@@ -59,7 +61,7 @@ The shared [Prompt Matrix Template](ledger/prompts/prompt_matrix.xml.md) codifie
 | `/ledger-project new` | Start a project showcase and feedback thread |
 | `/ledger-project update <project-id>` | Share progress, revisions, and collaborator credit in its thread |
 
-The App Home shows progress, next-rank requirements, a project gallery, and channel/consent controls. DM conversations and addressed private-channel threads use The Ledger's system-AI personality. The bot does not interject into unrelated ambient messages.
+The App Home shows progress, next-rank requirements, a project gallery, and channel/consent controls. DM conversations and addressed private-channel threads use The Ledger's System personality. Clear self-directed progress questions in Ledger channels receive contextual replies with private-detail controls. Other ambient messages receive no reply.
 
 Opt-in immediately queues Ledge Chat and the entry/current-rank channel. Verified history is imported asynchronously. Opt-out removes all registered game-channel memberships and cancels pending invitations, while retaining progress and silently accounting for eligible source activity. Returning members retain their original ruleset and receive one state summary. Peer kudos is the explicit consent exception: nonparticipants can receive thanks, but never receive XP for those kudos, including after joining later.
 
@@ -102,7 +104,7 @@ Formal checkout teaching is imported automatically. Other mentoring needs learne
 
 Only participants with permitted Ledger access can give kudos. Select another linked, active human Slack identity first. Nonparticipants trigger a warning and an explicit **Send kudos only** / **Send kudos and invite them to The Ledger** choice.
 
-The required body accepts 1–2,000 characters of Slack `mrkdwn`, links, line breaks, Unicode emoji, and emoji shortcodes. It is stored and rendered verbatim; the AI generates only an introduction. Optional shop/tool selections describe the contribution and never require clearance. Changing shops clears the tool.
+The required body accepts 1–2,000 characters of Slack `mrkdwn`, links, line breaks, Unicode emoji, and emoji shortcodes. It is stored and rendered verbatim; The Ledger generates only an introduction. Optional shop/tool selections describe the contribution and never require clearance. Changing shops clears the tool.
 
 **Make public** defaults off. Checking it creates a second delivery to private Ledge Chat. Public attribution uses the giver's current configured rank emoji and the recipient's emoji only when currently participating. Screen-reader fallback text includes rank names. Public kudos is neither copied to rank channels nor suppressed by XP caps.
 
@@ -126,3 +128,7 @@ python -m pytest tests/test_mongo_integration.py
 The ordinary suite runs without credentials. It covers rules, accounting, consent, Slack forms, signed HTTP ingress, retries, public kudos, scopes, channel races, mentoring, quests, and a real local HTTP chat-API stub. The Mongo integration test is skipped unless explicitly configured; it creates and removes only its own random `ledger_test_*` database. Workspace Slack behavior, broker delivery, replica-set performance, and pilot latency need deployment validation.
 
 The sibling `ChangeStream2MQTT` change filters every `ledger_*` collection before logging or publishing, with defensive filtering at the dispatch and publish boundaries. Deploy that exclusion before enabling Ledger writes. Rails and React behavior is unchanged.
+
+## Character sheets and reviewed member quests
+
+Use `/ledger stats`, `/ledger progress`, `/ledger preferences`, and `/ledger achievements` for private detail. `/ledger-quests list` searches eligible titles; rank-3 members can use `/ledger-quests create` and Help draft with The Ledger. Independent reviewers approve immutable revisions and 0–500 XP rewards. Accepted quests survive rank-up and pay once per logical quest. Staff use `/ledger-admin delegates` to issue explicit scoped review authority. Optional audit-only observation and arrival mentions have independent preferences and deployment switches. Model proposals cannot change accounting, rank or recognition delivery, regardless of flags. See [member guide, authority, and rollout](docs/ENGAGEMENT_QUESTS.md).

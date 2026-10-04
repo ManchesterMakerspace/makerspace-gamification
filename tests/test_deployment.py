@@ -59,7 +59,7 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
     supported = next(ast.literal_eval(node.value) for node in ast.walk(tree) if isinstance(node, ast.Assign)
                      and any(isinstance(target, ast.Name) and target.id == 'supported' for target in node.targets))
     assert {event.split('.')[0] for event in EVENTS} == supported
-    assert {'message.im', 'message.groups'} <= set(EVENTS)
+    assert {'message.im', 'message.groups', 'message.channels'} <= set(EVENTS)
     assert len(COMMANDS) == len({c['command'] for c in COMMANDS}) == 7
     settings = MANIFEST['settings']
     assert settings['event_subscriptions']['request_url'] == 'https://LEDGER_HOST/slack/events'
@@ -68,10 +68,10 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
     assert not settings['socket_mode_enabled'] and not settings['token_rotation_enabled']
     scopes = set(MANIFEST['oauth_config']['scopes']['bot'])
     assert scopes == {'commands', 'app_mentions:read', 'chat:write', 'groups:read', 'groups:history',
-                      'groups:write', 'im:write', 'im:history', 'users:read', 'files:write'}
+                      'groups:write', 'im:write', 'im:history', 'users:read', 'files:write', 'channels:read', 'channels:history'}
     # Inventory actual SDK calls: new methods require an explicit permission review.
     method_scopes = {
-        'users_info': {'users:read'}, 'conversations_info': {'groups:read'},
+        'users_info': {'users:read'}, 'conversations_info': {'groups:read', 'channels:read'},
         'conversations_members': {'groups:read'}, 'conversations_create': {'groups:write'},
         'conversations_invite': {'groups:write'}, 'conversations_kick': {'groups:write'},
         'conversations_open': {'im:write'}, 'files_upload_v2': {'files:write'},

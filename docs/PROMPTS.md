@@ -1,6 +1,6 @@
 # The Ledger prompt library
 
-The bot ships with **23 JSON files and 69 prompt variations** in [`ledger/prompts`](../ledger/prompts). Each file owns one message type. Each variation pairs a `system` prompt with a `user` prompt and identifies its personality and attitude. The default voices are a measured archivist, a practical mentor, and a dry-witted grimoire. Sensitive messages such as opt-out confirmations and corrections stay sober in all three voices.
+The bot ships with **23 JSON files and 79 prompt variations** in [`ledger/prompts`](../ledger/prompts). Each file owns one message type. Each variation pairs a `system` prompt with a `user` prompt and identifies its personality and attitude. The default voices are a measured archivist, a practical mentor, and a dry-witted grimoire. Sensitive messages such as opt-out confirmations and corrections stay sober in all three voices.
 
 Every generation also receives the shared [XML/Markdown Prompt Matrix Template](PROMPT_MATRIX.md). It defines game rules, role limits, personality, privacy, and DM/channel conduct. `LEDGER_PROMPT_MATRIX_DOC_URL` optionally supplies its contents from a Google Doc on startup or admin reload. The matrix and its content hash are saved with each new prompt reservation; changing it does not reroll voices or rewrite reserved deliveries.
 
@@ -65,6 +65,10 @@ Placeholders work in **both** `system` and `user`. String values are inserted as
 | `project_title`, `quest_title` | Title when the originating project/quest notification supplies one |
 | `giver_full_name`, `giver_slack_id` | Kudos giver's projected name and validated Slack mapping |
 | `recipient_full_name`, `recipient_slack_id` | Kudos recipient's projected name and validated Slack mapping |
+| `recipient_mention` | Validated kudos recipient Slack mention, including sender delivery acknowledgments and receipts |
+| `delivery_status` | Recorded overall kudos delivery result: queued, pending, partial, delivered, failed or cancelled |
+| `dm_status`, `public_status` | Recorded destination status; public status is `not requested` when sharing is off |
+| `xp_result` | Once-only kudos XP result: `17 XP awarded` or `0 XP`; a receipt never awards XP again |
 | `sponsor_full_name`, `sponsor_slack_id` | Invitation sponsor's projected name and validated Slack mapping |
 | `summary` | Application-authored summary, when supplied by the originating message |
 | `message_type`, `audience` | Current routing type and audience |
@@ -92,9 +96,15 @@ Files are included in the Python wheel and Docker image and cached for the proce
 
 Admins and board members have two publication paths:
 
-1. `/ledger-admin template <type> <audience>` edits the variation JSON array, audience instructions, fallback, temperature, and token budget. The modal previews every system/user pair with sample facts before publication. Slack's JSON input has a 3,000-character limit; use file edits for longer sets.
+1. `/ledger-admin template <type> <audience>` edits the variation JSON array, audience instructions, fallback, temperature, and token budget. The modal previews every system/user pair with sample facts before publication. Each Slack input is limited to 3,000 characters. Larger sets use one JSON input per paired variation; oversized individual pairs use the file workflow.
 2. `/ledger-admin template-library <type> <audience>` previews the deployed JSON file's variations and publishes them as a new immutable database version. Use this to adopt updated file defaults over a prior custom override, or to publish larger sets. No override changes until **Publish** is submitted.
 
 For example, `/ledger-admin template-library rank_up shared` adopts the shared rank-up configuration. Audiences publish independently. `/ledger-admin template-test rank_up shared` queues one live generation preview in the administrator's DM and reports the selected variation. `/ledger-admin template-history` lists versions; `/ledger-admin template-rollback <template-id>` republishes a prior version without changing already composed jobs.
 
-Existing database versions with a single `system`/`prompt` pair remain readable as one `legacy` variation; they are not silently overwritten. Adopt the library to enable its three voices for those overrides. Database version IDs identify published configurations; library-adoption records also retain the source file digest. Original event/audit rank labels stay historical even when current names are used in newly composed text.
+Existing database versions with a single `system`/`prompt` pair remain readable as one `legacy` variation; they are not silently overwritten. Adopt the library to enable its packaged voices for those overrides. Database version IDs identify published configurations; library-adoption records also retain the source file digest. Original event/audit rank labels stay historical even when current names are used in newly composed text.
+
+The five completion files `shop_complete`, `rank_up`, `quest`, `volunteer_credit`, and `develop_mentor` are version 2 with five paired variations. New Achievement framing applies only to verified completion, never acceptance, pending evidence, or corrections. Original System humor uses absurd titles, bureaucracy, and short grounded punchlines. All member-facing model text uses The Ledger/The System; original member-authored content is preserved. `delivery.json` remains the source of varied kudos acknowledgments/receipts; deterministic delivery facts include the once-only XP result.
+
+`delivery.json` version 2 also supplies recipient-aware variations for DMs to kudos senders. A confirmed DM may say "The delivery to <RECIPIENT> was successful," using `{recipient_mention}`; queued acknowledgments and partial/failed/cancelled receipts use their recorded statuses instead. Public-post status is independent, and delivery does not confirm reading. Recipient identity and receipt metadata are supplied without the original kudos body or personal rank/XP totals. The exact receipt facts remain visible below the varied text, even when generation falls back.
+
+Customize these DMs with `/ledger-admin template delivery member`, or adopt the updated file using `/ledger-admin template-library delivery member`. Preview with `/ledger-admin template-test delivery member`. Stable paired voice IDs share the sender's existing DM history; reserved prompts and saved text survive retries without rerolling. Existing database overrides require explicit publication to adopt version 2.

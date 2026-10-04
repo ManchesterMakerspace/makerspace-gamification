@@ -95,7 +95,7 @@ def test_published_overrides_legacy_compatibility_and_validation(joined):
     assert 'variations' not in store.get('ledger_message_templates', 'old-version')
     template = default_template('rank_up', 'member')
     version = composer.publish(str(oid(10)), template, ledger.admin)
-    assert len(version['variations']) == 3
+    assert len(version['variations']) == 5
     assert composer.compose('rank_up', 'member', EXAMPLE_FACTS)['template_version'] == version['_id']
     assert composer.compose('rank_up', 'shared', EXAMPLE_FACTS)['template_version'] != version['_id']
     bad = deepcopy(template)
@@ -201,13 +201,13 @@ def test_slack_editor_previews_and_publishes_all_variations(joined):
     ui.command({'user_id': 'U10', 'command': '/ledger-admin', 'trigger_id': 'T', 'text': 'template rank_up shared'}, slack)
     editor = slack.views_open.call_args.kwargs['view']
     inputs = {b['element']['action_id']: b['element']['initial_value'] for b in editor['blocks'] if b.get('type') == 'input'}
-    assert len(json.loads(inputs['variations'])) == 3
-    assert next(b['element']['max_length'] for b in editor['blocks'] if b.get('block_id') == 'variations') == 3000
+    assert len([key for key in inputs if key.startswith('variation_')]) == 5
+    assert all(b['element']['max_length'] == 3000 for b in editor['blocks'] if b.get('block_id', '').startswith('variation_'))
     preview = ui.submission(form(editor, inputs, 'U10'), slack)['view']
     assert all(v in json.dumps(preview) for v in ('archivist', 'mentor', 'wry_grimoire', 'Joe Maker'))
     assert '{member_full_name}' not in json.dumps(preview['blocks'])
     ui.submission(form(preview, {}, 'U10'), slack)
-    assert len(composer.template('rank_up', 'shared')['variations']) == 3
+    assert len(composer.template('rank_up', 'shared')['variations']) == 5
 
 
 def test_slack_library_adoption_preserves_override_until_publication(joined):
@@ -223,7 +223,7 @@ def test_slack_library_adoption_preserves_override_until_publication(joined):
     assert all(v in json.dumps(preview) for v in ('archivist', 'mentor', 'wry_grimoire'))
     ui.submission(form(preview, {}, 'U10'), slack)
     published = composer.template('rank_up', 'shared')
-    assert len(published['variations']) == 3 and published['_id'] != previous['_id']
+    assert len(published['variations']) == 5 and published['_id'] != previous['_id']
     assert published['library_version'] == library_template('rank_up', 'shared')['library_version']
     assert composer.template('rank_up', 'member').get('_id') is None
 

@@ -15,7 +15,8 @@ VARIABLES = {
     "member_full_name", "member_slack_id", "member_mention", "current_rank", "old_rank", "new_rank",
     "highest_skill", "highest_skill_shop", "highest_skill_depth", "xp_change", "xp_total", "shop_name",
     "tool_name", "challenge_title", "project_title", "quest_title", "volunteer_credits", "summary",
-    "giver_full_name", "giver_slack_id", "recipient_full_name", "recipient_slack_id",
+    "giver_full_name", "giver_slack_id", "recipient_full_name", "recipient_slack_id", "recipient_mention",
+    "delivery_status", "dm_status", "public_status", "xp_result",
     "sponsor_full_name", "sponsor_slack_id", "message_type", "audience", "audience_instruction", "facts",
 }
 # Only these event fields can enter the model, including the legacy {facts} placeholder.
@@ -28,7 +29,9 @@ METRICS = {"checkouts", "shops", "completed_shops", "mentoring", "learners", "vo
 EXAMPLE_FACTS = {"member_full_name": "Joe Maker", "member_slack_id": "U012EXAMPLE", "old_rank": "Newbie",
                  "new_rank": "Novice", "rank": "Novice", "highest_skill": "Bandsaw", "highest_skill_shop": "Woodworking",
                  "highest_skill_depth": 1, "tool": "Bandsaw", "shop": "Woodworking", "xp_change": "100", "xp_total": "400",
-                 "summary": "A verified learning milestone was recorded."}
+                 "summary": "A verified learning milestone was recorded.", "recipient_full_name": "Alex Maker",
+                 "recipient_slack_id": "U045EXAMPLE", "delivery_status": "delivered", "dm_status": "delivered",
+                 "public_status": "not requested", "xp_result": "17 XP awarded"}
 
 
 def clean_facts(facts):
@@ -66,6 +69,8 @@ def variables_for(facts, kind, audience, instruction=""):
         values["new_rank"] = selected.get("rank")
     uid = values["member_slack_id"]
     values["member_mention"] = f"<@{uid}>" if isinstance(uid, str) and re.fullmatch(r"[UW][A-Z0-9]+", uid) else None
+    recipient_uid = values["recipient_slack_id"]
+    values["recipient_mention"] = f"<@{recipient_uid}>" if isinstance(recipient_uid, str) and re.fullmatch(r"[UW][A-Z0-9]+", recipient_uid) else None
     values.update(message_type=kind, audience=audience, audience_instruction=instruction, facts=safe)
     return values
 

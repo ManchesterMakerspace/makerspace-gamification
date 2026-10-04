@@ -13,7 +13,7 @@ from ledger.storage import connect
 
 
 @pytest.mark.skipif(not os.environ.get('LEDGER_TEST_MONGO_URI'), reason='Set LEDGER_TEST_MONGO_URI to a disposable Mongo replica set')
-def test_real_transactions_and_concurrent_exactly_once_kudos(env):
+def test_real_transactions_and_concurrent_exactly_once_kudos(env, monkeypatch):
     _, _, source, *_ = env
     database = 'ledger_test_' + uuid4().hex
     store = connect(os.environ['LEDGER_TEST_MONGO_URI'], database)
@@ -52,6 +52,68 @@ def test_real_transactions_and_concurrent_exactly_once_kudos(env):
             selections = list(pool.map(reserve, range(3)))
         assert len({s['template']['variations'][0]['id'] for s in selections}) == 3
         assert len(store.get('ledger_context', 'prompt_history:shared')['recent']) == 2
+        # Real transaction races for first daily budget creation and revocation.
+        from ledger.authority import Authority
+        from ledger.domain import Denied
+        from ledger.engagement import Engagement
+        from ledger.storage import now
+        from datetime import timedelta
+        grant = Authority(l).grant(str(oid(10)), b, ['learning_review'], {'kind': 'global'}, 'Integration review')
+        evidence = l.submit(a, 'learning-challenge', 'Observed integration evidence')
+        def approve():
+            try:
+                return l.review(b, evidence['_id'])['status']
+            except Denied:
+                return 'denied'
+        with ThreadPoolExecutor(2) as pool:
+            approval = pool.submit(approve)
+            revocation = pool.submit(Authority(l).revoke, str(oid(10)), grant['_id'], 'Concurrent explicit revocation')
+            outcome = approval.result()
+            revocation.result()
+        assert outcome in ('approved', 'denied')
+        assert store.get('ledger_relationships', grant['_id'])['status'] == 'revoked'
+        with pytest.raises(Denied):
+            l.review(b, evidence['_id'])
+        monkeypatch.setenv('LEDGER_OBSERVATION', 'true')
+        monkeypatch.setenv('LEDGER_OBSERVATION_AUDIT_ONLY', 'false')
+        participant = l.participant(a)
+        participant['observation_notice_delivered_at'] = now() - timedelta(minutes=1)
+        store.put('ledger_participants', participant)
+        store.put('ledger_channels', {'_id': 'chat', 'kind': 'channel', 'channel_id': 'CCHAT'})
+        proposals = []
+        for i in range(6):
+            reference = f'message:CCHAT:integration-{i}'
+            store.put('ledger_context', {'_id': reference, 'kind': 'message', 'member_id': a, 'text': 'Constructive feedback'})
+            observed = Engagement(l).capture(a, reference, 'message', 'Constructive feedback', 'CCHAT', now())
+            proposals.append({'member_id': a, 'evidence': [observed['_id']], 'category': 'recognition', 'xp': 4, 'reason': 'Verified feedback'})
+        before = l.participant(a)['xp']
+        def recognize(i):
+            try:
+                return Engagement(l).commit(proposals[i], 'integration-' + str(i))['status']
+            except Denied:
+                return 'denied'
+        with ThreadPoolExecutor(6) as pool:
+            outcomes = list(pool.map(recognize, range(6)))
+        assert outcomes == ['audit_only'] * 6
+        from ledger.rules import amount
+        assert amount(l.participant(a)['xp']) == amount(before)
+        l.reconcile(a)
+        assert amount(l.participant(a)['xp']) == amount(before)
+        # Notice reopening must conflict with opt-out even when leave's scan
+        # initially sees a cancelled job and would otherwise never write it.
+        c = str(oid(4))
+        l.join(c)
+        notice_key = f'observation-notice:{c}:1'
+        notice = store.get('ledger_outbox', notice_key)
+        notice['status'] = 'cancelled'
+        store.put('ledger_outbox', notice)
+        with ThreadPoolExecutor(2) as pool:
+            retry = pool.submit(Engagement(l).notice, c)
+            leave = pool.submit(l.leave, c)
+            retry.result()
+            leave.result()
+        assert not l.active(c)
+        assert store.get('ledger_outbox', notice_key)['status'] == 'cancelled'
     finally:
         assert database.startswith('ledger_test_') and len(database) == len('ledger_test_') + 32
         store.db.client.drop_database(database)

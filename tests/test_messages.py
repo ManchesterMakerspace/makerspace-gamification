@@ -92,3 +92,29 @@ def test_timeout_template_version_and_audience_isolation(joined):
     assert composer.compose('kudos', 'recipient', {})['text'] != 'Public thanks.'
     with pytest.raises(ValueError):
         composer.publish(str(oid(1)), template, l.admin)
+
+
+def test_tool_transport_is_separate_and_strips_reasoning_fields():
+    from ledger.query_tools import QUERY_TOOL
+    call = {'id': 'call-1', 'type': 'function', 'function': {'name': 'query_makerspace', 'arguments': '{"collection":"shops"}'}}
+    payload = {'choices': [{'finish_reason': 'tool_calls', 'message': {'role': 'assistant', 'content': '<think>PRIVATE</think>',
+               'reasoning_content': 'PRIVATE', 'tool_calls': [call]}}]}
+    with server(payload) as (api, calls):
+        result = api.tool_response([{'role': 'user', 'content': 'Enabled shops?'}], [QUERY_TOOL])
+    assert result == {'role': 'assistant', 'content': None, 'tool_calls': [call]}
+    assert calls[0][1]['tools'] == [QUERY_TOOL] and calls[0][1]['tool_choice'] == 'auto'
+    assert calls[0][1]['chat_template_kwargs'] == {'enable_thinking': False}
+    with server(payload) as (api, _), pytest.raises(ValueError):
+        api.complete([{'role': 'user', 'content': 'Narration only'}])
+
+
+def test_generated_names_are_branded_without_changing_member_kudos(joined):
+    l, s, _, composer, api, slack = joined
+    from ledger.worker import Worker
+    from test_worker import claim
+    api.complete.return_value = 'Qwen AI appreciates this help.'
+    assert composer.compose('status', 'member', {})['text'] == 'The System appreciates this help.'
+    original = 'Qwen AI helped with this project; thank you!'
+    receipt = l.kudos(str(oid(1)), str(oid(2)), original, key='brand-original', expected_participation=True)
+    Worker(l, composer, slack).outbox(claim(s, receipt['_id'] + ':recipient'))
+    assert slack.chat_postMessage.call_args.kwargs['blocks'][2]['text']['text'] == original

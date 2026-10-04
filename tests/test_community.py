@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 
 from conftest import oid
+from ledger.authority import Authority
 from ledger.community import Community
 from ledger.domain import Denied
 from ledger.storage import now
@@ -25,6 +26,48 @@ def test_quest_requires_two_people_disciplines_and_independent_acceptance(joined
     c.quest(str(oid(10)), q['_id'], 'verify', member=str(oid(2)))
     assert s.get('ledger_quests', q['_id'])['status'] == 'completed'
     for member in (str(oid(1)), str(oid(2))):
+        assert l.participant(member)['xp'] == '500'
+        assert l.participant(member)['metrics']['boss'] == 1
+
+
+@pytest.mark.parametrize('legacy_authority', ['missing', 'null'])
+def test_quest_completion_preserves_legacy_verification_and_new_grant_audit(joined, legacy_authority):
+    l, s, src, *_ = joined
+    src.data['volunteer_tasks'].append({'_id': oid(900), 'title': 'Community arcade'})
+    c = Community(l)
+    a, b, delegate, staff, original_reviewer = map(str, [oid(1), oid(2), oid(3), oid(10), oid(11)])
+    q = c.create_quest(staff, 'Build arcade', 'Working cabinet and safe wiring', ['wood', 'electronics'], str(oid(900)))
+    for member, discipline in [(a, 'wood'), (b, 'electronics')]:
+        c.quest(member, q['_id'], 'join', role=discipline)
+        c.quest(member, q['_id'], 'submit', description='Built and documented my part')
+    c.quest(original_reviewer, q['_id'], 'verify', member=a)
+    q = s.get('ledger_quests', q['_id'])
+    legacy = q['contributions'][a]
+    if legacy_authority == 'missing':
+        legacy.pop('review_authority')
+    else:
+        legacy['review_authority'] = None
+    s.put('ledger_quests', q)
+    l.join(delegate)
+    with pytest.raises(Denied):
+        c.quest(delegate, q['_id'], 'verify', member=b)
+    assert s.get('ledger_quests', q['_id'])['contributions'][b]['status'] == 'pending'
+    grant = Authority(l).grant(staff, delegate, ['quest_complete'], {'kind': 'quest', 'quest': q['_id']}, 'Independent quest review')
+    completed = c.quest(delegate, q['_id'], 'verify', member=b)
+    assert completed['status'] == 'completed'
+    assert completed['contributions'][a] == legacy
+    old_evidence = s.get('ledger_evidence', f"quest:{q['_id']}:{a}")
+    assert old_evidence['reviewer'] == original_reviewer
+    assert not {'authority', 'grant_id', 'grant_version'} & old_evidence.keys()
+    new_evidence = s.get('ledger_evidence', f"quest:{q['_id']}:{b}")
+    assert new_evidence['reviewer'] == delegate
+    assert new_evidence['authority'] == 'delegated'
+    assert new_evidence['grant_id'] == grant['_id']
+    assert new_evidence['grant_version'] == grant['version']
+    with pytest.raises(ValueError, match='No submitted contribution'):
+        c.quest(delegate, q['_id'], 'verify', member=b)
+    for member in (a, b):
+        l.tx('_reconcile', member)
         assert l.participant(member)['xp'] == '500'
         assert l.participant(member)['metrics']['boss'] == 1
 
