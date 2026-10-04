@@ -68,7 +68,7 @@ def consent(sponsor=None):
     return modal("consent", "Join The Ledger", [
         section("The Ledger recognizes learning, mentoring, and community contribution. Joining imports verified makerspace history and invites you to private game channels."),
         section("If you opt out, channel access and game announcements stop. Your skills and XP are retained and eligible makerspace activity continues accruing silently. Peer-addressed kudos may still be delivered, but earns no kudos XP while you are opted out."),
-        section("The Ledger customizes messages using relevant game facts. Opt-in also covers observation of new activity in Ledger channels, kudos issuance metadata, and verified volunteer activity. The System may propose small discretionary XP decisions and original achievements. Preferences independently disable observation/discretionary XP and arrival mentions. An explanatory notice arrives before observation activates. Participation never changes tool safety clearances."),
+        section("The Ledger customizes messages using relevant game facts. Opt-in also covers observation of new activity in Ledger channels, kudos issuance metadata, and verified volunteer activity. The System records suggestions for audit only; they do not change XP or ranks or send recognition messages. Preferences independently disable observation and arrival mentions. An explanatory notice arrives before observation activates. Participation never changes tool safety clearances."),
         checkbox("agree", "I choose to participate")], {"sponsor": sponsor}, "Opt in")
 
 
@@ -204,8 +204,8 @@ def preferences(ledger, member):
     p = ledger.require(member)
     pref = p.get("preferences", {})
     return modal("preferences_save", "Ledger preferences", [
-        section("The System observes only new eligible activity in registered Ledger channels, kudos issuance metadata, and verified volunteer activity. Original kudos text and DMs are excluded. Discretionary decisions have daily limits; suspected imitation gets a warning before a repeat deduction. Ask staff to review a decision."),
-        checkbox("observation", "Allow observation and discretionary XP", pref.get("observation", True)),
+        section("The System observes only new eligible activity in registered Ledger channels, kudos issuance metadata, and verified volunteer activity. Original kudos text and DMs are excluded. Suggestions are audit-only and do not change XP or ranks or send recognition messages. Ask staff about the audit process."),
+        checkbox("observation", "Allow observation", pref.get("observation", True)),
         checkbox("arrival_mentions", "Allow arrival mentions", pref.get("arrival_mentions", True))], submit="Save")
 
 

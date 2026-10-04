@@ -94,11 +94,26 @@ def test_real_transactions_and_concurrent_exactly_once_kudos(env, monkeypatch):
                 return 'denied'
         with ThreadPoolExecutor(6) as pool:
             outcomes = list(pool.map(recognize, range(6)))
-        assert outcomes.count('committed') == 3 and outcomes.count('denied') == 3
+        assert outcomes == ['audit_only'] * 6
         from ledger.rules import amount
-        assert amount(l.participant(a)['xp']) - amount(before) == 12
+        assert amount(l.participant(a)['xp']) == amount(before)
         l.reconcile(a)
-        assert amount(l.participant(a)['xp']) - amount(before) == 12
+        assert amount(l.participant(a)['xp']) == amount(before)
+        # Notice reopening must conflict with opt-out even when leave's scan
+        # initially sees a cancelled job and would otherwise never write it.
+        c = str(oid(4))
+        l.join(c)
+        notice_key = f'observation-notice:{c}:1'
+        notice = store.get('ledger_outbox', notice_key)
+        notice['status'] = 'cancelled'
+        store.put('ledger_outbox', notice)
+        with ThreadPoolExecutor(2) as pool:
+            retry = pool.submit(Engagement(l).notice, c)
+            leave = pool.submit(l.leave, c)
+            retry.result()
+            leave.result()
+        assert not l.active(c)
+        assert store.get('ledger_outbox', notice_key)['status'] == 'cancelled'
     finally:
         assert database.startswith('ledger_test_') and len(database) == len('ledger_test_') + 32
         store.db.client.drop_database(database)

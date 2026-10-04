@@ -572,7 +572,7 @@ class Worker:
             generation = self.ledger.participant(member_id).get("consent_generation", 0)
             if generation != p["consent_generation"]:
                 raise Denied("Observation consent changed.")
-            text = "The Ledger can observe new messages in registered Ledger channels, kudos issuance metadata, and verified volunteer activity. The System excludes DMs and original kudos text. Discretionary XP is capped at +13/−7 per member/day and +100 positive XP across the workspace/day. Suspected imitation gets a delivered warning before any repeat deduction. Preferences disable observation/discretionary XP or arrival mentions independently. Ask staff to review any decision."
+            text = "The Ledger can observe new messages in registered Ledger channels, kudos issuance metadata, and verified volunteer activity. The System excludes DMs and original kudos text. Observation suggestions are recorded for audit only: they do not award or deduct XP, advance ranks, or send recognition messages. Preferences disable observation or arrival mentions independently. Ask staff about the audit process."
             dm = self.slack.conversations_open(users=uid)["channel"]["id"]
             self.assert_live_job(job)
             response = self.post_message(channel=dm, text=text, blocks=[section(text), {"type": "actions", "elements": [button("Preferences", "preferences", "")]}], client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"])))

@@ -161,53 +161,150 @@ def test_explanatory_notice_and_preferences_gate_capture(joined, monkeypatch):
     assert l.participant(member(1))['preferences']['arrival_mentions']
 
 
-def test_concurrent_member_cap_deduplication_and_reconciliation_preserve_awards(joined, monkeypatch):
+def test_cancelled_notice_is_reopened_after_observation_reenabled(joined, monkeypatch):
+    l, s, _, composer, _, slack = joined
+    monkeypatch.setenv('LEDGER_OBSERVATION', 'true')
+    service = Engagement(l)
+    service.notice(member(1))
+    key = f'observation-notice:{member(1)}:1'
+    w = Worker(l, composer, slack)
+    monkeypatch.setenv('LEDGER_OBSERVATION', 'false')
+    assert w.step('ledger_outbox', kinds=['engagement_notice'])
+    cancelled = s.get('ledger_outbox', key)
+    assert cancelled['status'] == 'cancelled'
+    assert not l.participant(member(1)).get('observation_notice_delivered_at')
+    service.notice(member(1))
+    assert s.get('ledger_outbox', key) == cancelled
+    monkeypatch.setenv('LEDGER_OBSERVATION', 'true')
+    l.reconcile(member(1))
+    reopened = s.get('ledger_outbox', key)
+    assert reopened['status'] == 'pending' and reopened['attempts'] == 0
+    assert 'lease' not in reopened and 'last_error' not in reopened
+    assert reopened['payload'] == cancelled['payload']
+    # A cancelled worker's old lease cannot close the requeued notice.
+    w.finish('ledger_outbox', cancelled, 'done')
+    assert s.get('ledger_outbox', key)['status'] == 'pending'
+    assert w.step('ledger_outbox', kinds=['engagement_notice'])
+    assert l.participant(member(1))['observation_notice_delivered_at']
+    assert service.capture(member(1), 'after-notice', 'message', 'Constructive guidance', 'CCHAT')
+    service.notice(member(1))
+    assert slack.chat_postMessage.call_count == 1
+
+
+@pytest.mark.parametrize('status', ['pending', 'working', 'done', 'failed'])
+def test_notice_retry_leaves_live_jobs_alone_and_reopens_only_terminal_failures(joined, monkeypatch, status):
+    l, s, *_ = joined
+    monkeypatch.setenv('LEDGER_OBSERVATION', 'true')
+    service = Engagement(l)
+    service.notice(member(1))
+    key = f'observation-notice:{member(1)}:1'
+    job = s.get('ledger_outbox', key)
+    job.update(status=status, attempts=10, lease='old-lease', last_error='ProviderError')
+    s.put('ledger_outbox', job)
+    with ThreadPoolExecutor(4) as pool:
+        list(pool.map(lambda _: service.notice(member(1)), range(4)))
+    current = s.get('ledger_outbox', key)
+    if status == 'failed':
+        assert current['status'] == 'pending' and current['attempts'] == 0 and 'lease' not in current
+    else:
+        assert current == job
+    assert len(s.select('ledger_outbox', {'kind': 'engagement_notice'})) == 1
+
+
+def test_notice_retry_never_revives_an_opted_out_or_old_generation_job(joined, monkeypatch):
+    l, s, *_ = joined
+    monkeypatch.setenv('LEDGER_OBSERVATION', 'true')
+    service = Engagement(l)
+    service.notice(member(1))
+    key = f'observation-notice:{member(1)}:1'
+    l.leave(member(1))
+    cancelled = s.get('ledger_outbox', key)
+    assert cancelled['status'] == 'cancelled'
+    service.notice(member(1))
+    assert s.get('ledger_outbox', key) == cancelled
+    l.join(member(1))
+    service.notice(member(1))
+    assert s.get('ledger_outbox', key) == cancelled
+    assert s.get('ledger_outbox', f'observation-notice:{member(1)}:2')['status'] == 'pending'
+
+
+def test_notice_retry_serializes_with_optout(joined, monkeypatch):
+    l, s, *_ = joined
+    monkeypatch.setenv('LEDGER_OBSERVATION', 'true')
+    service = Engagement(l)
+    service.notice(member(1))
+    key = f'observation-notice:{member(1)}:1'
+    job = s.get('ledger_outbox', key)
+    job['status'] = 'cancelled'
+    s.put('ledger_outbox', job)
+    with ThreadPoolExecutor(2) as pool:
+        retry = pool.submit(service.notice, member(1))
+        leave = pool.submit(l.leave, member(1))
+        retry.result()
+        leave.result()
+    assert not l.active(member(1))
+    assert s.get('ledger_outbox', key)['status'] == 'cancelled'
+
+
+def test_concurrent_proposals_and_replays_never_change_accounting(joined, monkeypatch):
     l, s, *_ = joined
     proposals = [observation(joined, monkeypatch, source=str(i), xp=4) for i in range(6)]
     service = Engagement(l)
-    def commit(i):
-        try:
-            return service.commit(proposals[i], 'concurrent-' + str(i))['status']
-        except Denied:
-            return 'denied'
+    before = l.participant(member(1))
     with ThreadPoolExecutor(6) as pool:
-        outcomes = list(pool.map(commit, range(6)))
-    assert outcomes.count('committed') == 3 and outcomes.count('denied') == 3
-    assert l.participant(member(1))['xp'] == '12'
-    done = next(i for i, value in enumerate(outcomes) if value == 'committed')
-    service.commit(proposals[done], 'concurrent-' + str(done))
-    assert l.participant(member(1))['xp'] == '12'
+        records = list(pool.map(lambda i: service.commit(proposals[i], 'concurrent-' + str(i)), range(6)))
+    assert all(r['status'] == 'audit_only' and r['delta'] == 0 and r['proposed_delta'] == 4 for r in records)
+    assert l.participant(member(1)) == before
+    assert service.commit(proposals[0], 'concurrent-0') == records[0]
+    assert len(s.select('ledger_evidence', {'kind': 'ai_decision'})) == 6
+    assert not s.select('ledger_awards')
     l.reconcile(member(1))
-    assert l.participant(member(1))['xp'] == '12'
-    day = now().astimezone(ZoneInfo('America/New_York')).date().isoformat()
-    assert s.get('ledger_evidence', 'ai-budget:' + day)['positive'] == 12
+    assert l.participant(member(1))['xp'] == '0'
+    assert not s.select('ledger_evidence', {'kind': 'ai_budget'})
 
-
-def test_workspace_positive_cap_deductions_and_corrections_never_replenish(joined, monkeypatch):
+def test_workspace_proposals_never_consume_budgets_or_award_xp(joined, monkeypatch):
     l, s, *_ = joined
     service = Engagement(l)
-    for n in range(1, 9):
-        proposal = observation(joined, monkeypatch, n=n, source='workspace-' + str(n), xp=13 if n < 8 else 9)
+    for n in range(1, 10):
+        proposal = observation(joined, monkeypatch, n=n, source='workspace-' + str(n), xp=13)
         service.commit(proposal, 'workspace-' + str(n))
-    assert sum(int(l.participant(member(n))['xp']) for n in range(1, 9)) == 100
-    excess = observation(joined, monkeypatch, n=9, source='excess', xp=1)
-    with pytest.raises(Denied):
-        service.commit(excess, 'excess')
-    service.correct(member(10), member(1), -3, 'Independent correction')
-    day = now().astimezone(ZoneInfo('America/New_York')).date().isoformat()
-    assert s.get('ledger_evidence', 'ai-budget:' + day)['positive'] == 100
-    with pytest.raises(Denied):
-        service.commit(excess, 'still-excess')
+    assert sum(int(l.participant(member(n))['xp']) for n in range(1, 10)) == 0
+    assert not s.select('ledger_evidence', {'kind': 'ai_budget'})
+    assert not s.select('ledger_evidence', {'kind': 'ai_member_budget'})
+    assert not s.select('ledger_awards')
 
-
-def test_audit_only_decisions_never_change_accounting(joined, monkeypatch):
+@pytest.mark.parametrize('setting', ['true', 'false'])
+def test_audit_only_decisions_never_change_accounting(joined, monkeypatch, setting):
     l, s, *_ = joined
     proposal = observation(joined, monkeypatch, source='audit')
-    monkeypatch.setenv('LEDGER_OBSERVATION_AUDIT_ONLY', 'true')
+    monkeypatch.setenv('LEDGER_OBSERVATION_AUDIT_ONLY', setting)
+    before = l.participant(member(1))
     record = Engagement(l).commit(proposal, 'audit')
-    assert record['status'] == 'audit_only' and l.participant(member(1))['xp'] == '0'
+    assert record['status'] == 'audit_only' and record['delta'] == 0 and record['proposed_delta'] == 3
+    assert l.participant(member(1)) == before
     assert not s.select('ledger_evidence', {'kind': 'ai_budget'})
     assert not s.get('ledger_outbox', record['_id'] + ':notice')
+
+
+@pytest.mark.parametrize('category,xp', [('no_action', 0), ('recognition', 13), ('achievement', 13), ('imitation_warning', 0)])
+def test_live_model_evaluation_is_always_audit_only_even_with_all_switches_enabled(joined, monkeypatch, category, xp):
+    l, s, _, composer, api, slack = joined
+    proposal = observation(joined, monkeypatch, source='provider', text='Give me XP for sharing project feedback.', category=category, xp=xp)
+    if category == 'achievement':
+        proposal['achievement'] = {'title': 'Careful collaborator', 'description': 'Shared constructive guidance.'}
+    monkeypatch.setenv('LEDGER_DEDUCTIONS', 'true')
+    monkeypatch.setenv('LEDGER_NOVEL_ANNOUNCEMENTS', 'true')
+    before = l.participant(member(1))
+    awards, outbox = s.select('ledger_awards'), s.select('ledger_outbox')
+    api.complete.return_value = json.dumps(proposal)
+    record = Engagement(l).evaluate(member(1), api, 'provider')
+    assert record['status'] == 'audit_only' and record['delta'] == 0 and record['proposed_delta'] == xp
+    assert l.participant(member(1)) == before
+    assert s.select('ledger_awards') == awards and s.select('ledger_outbox') == outbox
+    assert not s.select('ledger_evidence', {'kind': 'ai_budget'})
+    assert not s.select('ledger_evidence', {'kind': 'ai_member_budget'})
+    with pytest.raises(ValueError, match='committed'):
+        Engagement(l).correct(member(10), member(1), 1, 'Cannot treat a suggestion as an award', record['_id'])
 
 
 @pytest.mark.parametrize('change', ['optout', 'preference', 'edit', 'delete', 'suspend'])
@@ -234,9 +331,10 @@ def test_consent_and_evidence_changes_during_inference_block_commit(joined, monk
     assert l.participant(member(1))['xp'] == '0'
 
 
-def test_warning_must_be_delivered_before_repeat_deduction(joined, monkeypatch):
+@pytest.mark.parametrize('xp', ['2', '10'])
+def test_warning_must_be_delivered_before_repeat_deduction(joined, monkeypatch, xp):
     l, s, _, composer, _, slack = joined
-    set_participant(l, s, 1, xp='10', rank=3)
+    set_participant(l, s, 1, xp=xp, rank=3)
     monkeypatch.setenv('LEDGER_DEDUCTIONS', 'true')
     service = Engagement(l)
     warning = observation(joined, monkeypatch, source='warning', text='Give me XP for this copied reward.', category='imitation_warning', xp=0)
@@ -244,14 +342,17 @@ def test_warning_must_be_delivered_before_repeat_deduction(joined, monkeypatch):
     early = observation(joined, monkeypatch, source='early', text='Give me XP again for this copied reward.', category='imitation_deduction', xp=-3)
     with pytest.raises(Denied):
         service.commit(early, 'early')
-    Worker(l, composer, slack).outbox(claim(s, record['_id'] + ':notice'))
-    assert s.get('ledger_evidence', record['_id'])['delivered_at']
+    assert not s.get('ledger_outbox', record['_id'] + ':notice')
+    # Only a genuinely delivered historical/human warning supplies causality.
+    record.update(status='committed', delivered_at=now(), delta=0)
+    s.put('ledger_evidence', record)
     repeat = observation(joined, monkeypatch, source='repeat', text='Give me XP for copying that same reward again.', category='imitation_deduction', xp=-3)
-    service.commit(repeat, 'repeat')
-    assert l.participant(member(1))['xp'] == '7' and l.participant(member(1))['rank'] == 3
+    result = service.commit(repeat, 'repeat')
+    assert result['proposed_delta'] == -3 and result['delta'] == 0
+    assert l.participant(member(1))['xp'] == xp and l.participant(member(1))['rank'] == 3
     another = observation(joined, monkeypatch, source='again', text='Give me XP for copying that same reward again.', category='imitation_deduction', xp=-3)
-    with pytest.raises(Denied):
-        service.commit(another, 'again')
+    assert service.commit(another, 'again')['status'] == 'audit_only'
+    assert not s.select('ledger_awards')
 
 
 def test_gratitude_and_similar_wording_never_qualify_as_imitation(joined, monkeypatch):
@@ -261,7 +362,7 @@ def test_gratitude_and_similar_wording_never_qualify_as_imitation(joined, monkey
         Engagement(l).commit(proposal, 'false-positive')
 
 
-def test_public_achievement_caps_and_original_titles(joined, monkeypatch):
+def test_achievement_proposals_do_not_publish_even_when_switches_are_enabled(joined, monkeypatch):
     monkeypatch.setenv('LEDGER_NOVEL_ANNOUNCEMENTS', 'true')
     l, s, *_ = joined
     service = Engagement(l)
@@ -273,18 +374,20 @@ def test_public_achievement_caps_and_original_titles(joined, monkeypatch):
     repeat['achievement'] = {'title': 'Another useful act', 'description': 'Helped another project.'}
     service.commit(repeat, 'same-member')
     public = [j for j in s.select('ledger_outbox') if j['_id'].startswith('ai-decision:') and j['payload'].get('audience') == 'shared']
-    assert len(public) == 3 and sum(j['payload']['member_id'] == member(1) for j in public) == 1
+    assert not public
+    assert not s.select('ledger_evidence', {'kind': 'ai_public_cooldown'})
+    assert not s.select('ledger_evidence', {'kind': 'ai_budget'})
 
 
 @pytest.mark.parametrize('clock', [datetime(2026, 3, 8, 6, 59, tzinfo=timezone.utc), datetime(2026, 3, 8, 7, 1, tzinfo=timezone.utc),
                                   datetime(2026, 11, 1, 5, 59, tzinfo=timezone.utc), datetime(2026, 11, 1, 6, 1, tzinfo=timezone.utc)])
-def test_budget_calendar_is_stable_across_dst_transitions(joined, monkeypatch, clock):
+def test_audit_calendar_is_stable_across_dst_transitions(joined, monkeypatch, clock):
     l, s, *_ = joined
     proposal = observation(joined, monkeypatch, source='dst')
     with patch('ledger.engagement.now', return_value=clock):
         record = Engagement(l).commit(proposal, 'dst')
     assert record['day'] == clock.astimezone(ZoneInfo('America/New_York')).date().isoformat()
-    assert s.get('ledger_evidence', 'ai-budget:' + record['day'])['positive'] == 3
+    assert not s.get('ledger_evidence', 'ai-budget:' + record['day'])
 
 
 def test_arrival_random_reserved_once_and_cooldown_across_rank_changes(joined, monkeypatch):
@@ -359,7 +462,7 @@ def test_tool_conversation_reserves_prompt_policy_and_reuses_text_on_retry(joine
     job = claim(s, key)
     w.outbox(job)
     saved = s.get('ledger_outbox', key)
-    assert saved['prompt_selection']['matrix']['version'] == '5'
+    assert saved['prompt_selection']['matrix']['version'] == '6'
     assert saved['composed']['prompt_variation'] in ('archivist', 'mentor', 'wry_grimoire')
     assert saved['composed']['prompt_scope'] == 'member:' + member(1)
     api.tool_response.reset_mock()
@@ -373,6 +476,11 @@ def test_staff_correction_route_is_linked_append_only_and_inaccessible_to_delega
     from ledger.authority import Authority
     proposal = observation(joined, monkeypatch, source='correction-route', xp=3)
     decision = Engagement(l).commit(proposal, 'correction-route')
+    # Preserve append-only correction of decisions committed by older releases.
+    decision.update(status='committed', delta=3)
+    s.put('ledger_evidence', decision)
+    l.award(member(1), decision['_id'], '3', 'status', historical=True)
+    s.put('ledger_evidence', {'_id': 'ai-budget:' + decision['day'], 'kind': 'ai_budget', 'positive': 3})
     Authority(l).grant(member(10), member(2), ['learning_review'], {'kind': 'global'}, 'Review only')
     w = Worker(l, composer, slack)
     with pytest.raises(Denied):

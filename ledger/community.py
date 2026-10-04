@@ -85,9 +85,11 @@ class Community:
                         key = f"quest:{quest_id}:{m}"
                         if s.get("ledger_evidence", key):
                             continue
+                        # Legacy verifications retain their reviewer without inventing grant metadata.
+                        review_authority = contribution.get("review_authority") or {}
                         s.put("ledger_evidence", {"_id": key, "kind": "submission", "achievement": "boss", "catalog_id": f"quest:{quest_id}",
                               "member_id": m, "description": contribution["description"], "learners": [], "acknowledged": [],
-                              "shop_id": q.get("shop_id"), "status": "approved", "reviewer": contribution["reviewer"], "at": now(), **contribution["review_authority"]})
+                              "shop_id": q.get("shop_id"), "status": "approved", "reviewer": contribution["reviewer"], "at": now(), **review_authority})
                         d._reconcile(m)
             else:
                 raise ValueError("Unknown quest action.")
