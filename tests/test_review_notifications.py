@@ -56,6 +56,52 @@ def slack_error(code, status=200):
     return SlackApiError(code, response)
 
 
+@pytest.mark.parametrize('configured', [True, False])
+@pytest.mark.parametrize('collection,kind', [('ledger_quests', None), ('ledger_relationships', 'quest_project')])
+@pytest.mark.parametrize('fields', [{}, {'contributions': None}, {'contributions': []},
+                                  {'contributions': 'invalid'}, {'contributions': {'invalid-member': None}}])
+def test_malformed_contributions_preserve_record_without_review_work(reviews, monkeypatch, configured, collection, kind, fields):
+    _, store, _, _, _, slack = reviews
+    if not configured:
+        monkeypatch.delenv('LEDGER_QUEST_REVIEW_CHANNEL_ID')
+    doc = {'_id': 'legacy-malformed', 'kind': kind, 'status': 'open', **deepcopy(fields)}
+    store.put(collection, doc)
+    assert store.get(collection, doc['_id']) == doc
+    assert not store.legacy_review_channels(collection, 'CREVIEW')
+    reconcile(store)
+    drain(reviews)
+    assert not store.select('ledger_outbox', {'kind': 'review_notice'})
+    slack.chat_postMessage.assert_not_called()
+
+
+@pytest.mark.parametrize('collection,kind', [('ledger_quests', None), ('ledger_relationships', 'quest_project')])
+def test_valid_contribution_notice_survives_malformed_sibling(reviews, collection, kind):
+    _, store, _, _, _, slack = reviews
+    store.put(collection, {'_id': 'mixed-contributions', 'kind': kind, 'status': 'open',
+        'contributions': {'invalid-member': None, member(1): {'status': 'pending', 'description': 'Working cabinet.'}}})
+    drain(reviews)
+    saved = store.get(collection, 'mixed-contributions')['contributions']
+    assert saved['invalid-member'] is None
+    assert saved[member(1)]['review_message_ts'] == '100.1'
+    slack.chat_postMessage.assert_called_once()
+    assert 'Working cabinet.' in slack.chat_postMessage.call_args.kwargs['text']
+
+
+def test_legacy_channel_lookup_preserves_existing_addresses_with_notices_disabled(reviews, monkeypatch):
+    _, store, *_ = reviews
+    monkeypatch.delenv('LEDGER_QUEST_REVIEW_CHANNEL_ID')
+    for key, fields in (
+        ('legacy-channel', {'contributions': {member(1): {'review_channel_id': 'COLD'}}}),
+        ('legacy-current', {'contributions': {member(1): {'review_channel_id': 'CNEW'}}}),
+        ('indexed-parent', {'review_notice_channel': 'CNEW', 'contributions': {member(1): {'review_channel_id': 'COLD'}}}),
+        ('no-contributions', {}), ('null-contributions', {'contributions': None}),
+        ('list-contributions', {'contributions': []})):
+        store.put('ledger_quests', {'_id': key, 'status': 'completed'})
+        store.put('ledger_quests', {'_id': key, 'status': 'completed', **fields})
+    assert store.get('ledger_quests', 'legacy-channel')['contributions'][member(1)]['review_channel_id'] == 'COLD'
+    assert {row['_id'] for row in store.legacy_review_channels('ledger_quests', 'CNEW')} == {'legacy-channel'}
+
+
 @pytest.mark.parametrize('approve', [True, False])
 def test_submission_saves_timestamp_and_review_updates_same_message(reviews, approve):
     l, s, _, _, api, slack = reviews

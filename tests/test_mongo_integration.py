@@ -147,6 +147,9 @@ def test_real_transactions_and_concurrent_exactly_once_kudos(env, monkeypatch):
             ('indexed-parent', {'review_notice_channel': 'CNEW', 'contributions': {a: {'review_channel_id': 'COLD'}}}),
             ('no-contributions', {}), ('null-contributions', {'contributions': None}),
             ('list-contributions', {'contributions': []})):
+            # Historical addresses belong to existing activities; new-record
+            # preparation intentionally strips inherited Slack addresses.
+            store.put('ledger_quests', {'_id': key, 'status': 'completed'})
             store.put('ledger_quests', {'_id': key, 'status': 'completed', **fields})
         assert {row['_id'] for row in store.legacy_review_channels('ledger_quests', 'CNEW')} == {'legacy-channel'}
     finally:

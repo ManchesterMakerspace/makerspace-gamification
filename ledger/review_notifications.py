@@ -33,6 +33,10 @@ def watched(collection):
 def activities(store, collection, doc):
     """Yield activity locators, mutable field owners, and bounded review facts."""
     kind = doc.get("kind")
+    raw_contributions = doc.get("contributions")
+    # Sparse legacy records are data, not evidence of a reviewable contribution.
+    contributions = {m: c for m, c in (raw_contributions.items() if isinstance(raw_contributions, dict) else ())
+                     if isinstance(c, dict)}
     if collection == "ledger_evidence" and kind in ("submission", "quest_submission"):
         if doc.get("quest_link"):
             return  # The top-level quest submission owns its specialized review.
@@ -55,7 +59,7 @@ def activities(store, collection, doc):
         parent = doc
     elif collection == "ledger_relationships" and kind == "quest_project":
         parent = store.get("ledger_quests", doc.get("quest_revision")) or {}
-        verified = [c for c in doc.get("contributions", {}).values() if c.get("status") == "verified"]
+        verified = [c for c in contributions.values() if c.get("status") == "verified"]
         ready = len(verified) >= 2 and {d["name"] for d in parent.get("disciplines", [])} <= {c.get("role") for c in verified}
         status = "pending_completion" if doc.get("status") == "open" and ready else doc.get("status")
         yield None, doc, {"type": "Shared project completion", "title": parent.get("title", "Quest"),
@@ -64,7 +68,7 @@ def activities(store, collection, doc):
             "member": None, "reviewer": doc.get("reviewer"), "reason": doc.get("disable_reason", "")}
     else:
         return
-    for member, contribution in doc.get("contributions", {}).items():
+    for member, contribution in contributions.items():
         status = contribution.get("status")
         if doc.get("status") not in ("open", "completed") or parent.get("status") in ("disabled", "withdrawn", "rejected"):
             status = "closed"

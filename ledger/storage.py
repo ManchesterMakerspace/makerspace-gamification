@@ -167,7 +167,8 @@ class MemoryStore:
             query["kind"] = "quest_project"
         return [doc for doc in self.select(collection, query)
                 if isinstance(doc.get("contributions"), dict) and any(
-                    c.get("review_channel_id") not in (None, destination) for c in doc["contributions"].values())]
+                    isinstance(c, dict) and c.get("review_channel_id") not in (None, destination)
+                    for c in doc["contributions"].values())]
 
     def put(self, collection, doc):
         from .review_notifications import prepare, watched
