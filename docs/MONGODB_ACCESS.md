@@ -56,6 +56,8 @@ Use the complete generated files with the [Create One Custom Role API](https://w
 
 ## Exact access used by this implementation
 
+The [one-shot quest generator](QUEST_GENERATION.md) uses existing owned quest definitions/revisions, evidence audits, temporary context, outbox notices and relationship acceptances/shared projects. Its relationship project and generation-lease indexes use the existing `createIndex` resources. The Atlas and self-managed role examples and their tests were reviewed; no new collection, wildcard privilege or source write is needed.
+
 | Resources | MongoDB actions | Reason |
 | --- | --- | --- |
 | `members`, `slack_users`, `shops`, `tools`, `tool_checkouts`, `volunteer_credits`, `volunteer_tasks`, `volunteer_events`, `earned_memberships`, `groups`, `checkins`, `cards` in the source database | `find` | Identity, review scope, catalog, evidence, membership, read-only queries, and internal arrival resolution |
@@ -82,3 +84,9 @@ db.createRole(definitions.gamification);
 ```
 
 Creating a role does not assign it to an existing user and does not revoke previously granted roles. Review user assignments independently. No provisioning example has been run against a live database by this change.
+
+Default observation adds no collection or source permission. Nonparticipant preferences and notice receipts use existing `ledger_relationships` find/insert/update privileges; first join retains an inert migration marker in that collection instead of deleting it. Participation, XP and game authorization still require their own game records. The exact Mongo role examples already cover these operations; no extra remove privilege is required.
+
+Review notifications use existing `ledger_outbox` and activity collection find/insert/update permissions (`ledger_evidence`, `ledger_quests`, `ledger_relationships`); delivery leases and Slack timestamp receipts are fields on those activities. No new collection, remove/index privilege, or source write is introduced. Review/outbox writes share Mongo transactions, with Slack calls outside them.
+
+Admin command eligibility and invitation recipients are read from the existing MLAB_URI members/slack_users projections only; MLAB remains read-only. Administrative consent invitations use ledger_outbox kind admin_invitation. Private review access uses ledger_channels kind review_membership plus ledger_outbox review_channel_invite/remove jobs. No new collections, source fields or Mongo grants are required. Review membership rows are separate from game-channel registrations and never authorize ambient inference or earned rank-channel access.

@@ -145,7 +145,7 @@ def test_self_directed_progress_recognition(text):
 
 
 def test_explanatory_notice_and_preferences_gate_capture(joined, monkeypatch):
-    monkeypatch.setenv('LEDGER_OBSERVATION', 'true')
+    monkeypatch.delenv('LEDGER_OBSERVATION', raising=False)
     l, s, _, composer, _, slack = joined
     service = Engagement(l)
     assert service.capture(member(1), 'm', 'message', 'Hello', 'CCHAT') is None
@@ -161,9 +161,10 @@ def test_explanatory_notice_and_preferences_gate_capture(joined, monkeypatch):
     assert l.participant(member(1))['preferences']['arrival_mentions']
 
 
-def test_cancelled_notice_is_reopened_after_observation_reenabled(joined, monkeypatch):
-    l, s, _, composer, _, slack = joined
+def test_cancelled_notice_is_reopened_after_observation_reenabled(env, monkeypatch):
+    l, s, _, composer, _, slack = env
     monkeypatch.setenv('LEDGER_OBSERVATION', 'true')
+    l.join(member(1))
     service = Engagement(l)
     service.notice(member(1))
     key = f'observation-notice:{member(1)}:1'
@@ -208,7 +209,7 @@ def test_notice_retry_leaves_live_jobs_alone_and_reopens_only_terminal_failures(
         assert current['status'] == 'pending' and current['attempts'] == 0 and 'lease' not in current
     else:
         assert current == job
-    assert len(s.select('ledger_outbox', {'kind': 'engagement_notice'})) == 1
+    assert len([j for j in s.select('ledger_outbox', {'kind': 'engagement_notice'}) if j['payload']['member_id'] == member(1)]) == 1
 
 
 def test_notice_retry_never_revives_an_opted_out_or_old_generation_job(joined, monkeypatch):
@@ -217,6 +218,10 @@ def test_notice_retry_never_revives_an_opted_out_or_old_generation_job(joined, m
     service = Engagement(l)
     service.notice(member(1))
     key = f'observation-notice:{member(1)}:1'
+    l.preferences(member(1), False, True)
+    job = s.get('ledger_outbox', key)
+    job['status'] = 'cancelled'
+    s.put('ledger_outbox', job)
     l.leave(member(1))
     cancelled = s.get('ledger_outbox', key)
     assert cancelled['status'] == 'cancelled'
@@ -225,6 +230,8 @@ def test_notice_retry_never_revives_an_opted_out_or_old_generation_job(joined, m
     l.join(member(1))
     service.notice(member(1))
     assert s.get('ledger_outbox', key) == cancelled
+    assert not s.get('ledger_outbox', f'observation-notice:{member(1)}:2')
+    l.preferences(member(1), True, True)
     assert s.get('ledger_outbox', f'observation-notice:{member(1)}:2')['status'] == 'pending'
 
 
@@ -239,11 +246,13 @@ def test_notice_retry_serializes_with_optout(joined, monkeypatch):
     s.put('ledger_outbox', job)
     with ThreadPoolExecutor(2) as pool:
         retry = pool.submit(service.notice, member(1))
-        leave = pool.submit(l.leave, member(1))
+        optout = pool.submit(l.preferences, member(1), False, True)
         retry.result()
-        leave.result()
-    assert not l.active(member(1))
-    assert s.get('ledger_outbox', key)['status'] == 'cancelled'
+        optout.result()
+    assert not l.participant(member(1))['preferences']['observation']
+    saved = s.get('ledger_outbox', key)
+    service.notice(member(1))
+    assert s.get('ledger_outbox', key) == saved
 
 
 def test_concurrent_proposals_and_replays_never_change_accounting(joined, monkeypatch):
@@ -399,7 +408,7 @@ def test_consent_and_evidence_changes_during_inference_block_commit(joined, monk
     l, s, src, *_ = joined
     proposal = observation(joined, monkeypatch, source='stale')
     if change == 'optout':
-        l.leave(member(1))
+        l.preferences(member(1), False, True)
     elif change == 'preference':
         l.preferences(member(1), False, True)
         l.preferences(member(1), True, True)
@@ -560,6 +569,7 @@ def test_tool_conversation_reserves_prompt_policy_and_reuses_text_on_retry(joine
 
 def test_staff_correction_route_is_linked_append_only_and_inaccessible_to_delegates(joined, monkeypatch):
     l, s, _, composer, _, slack = joined
+    l.join(member(10))
     from ledger.authority import Authority
     proposal = observation(joined, monkeypatch, source='correction-route', xp=3)
     decision = Engagement(l).commit(proposal, 'correction-route')

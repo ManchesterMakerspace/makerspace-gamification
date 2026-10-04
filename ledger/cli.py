@@ -143,7 +143,7 @@ def main():
         stop = Event()
         def run(queue):
             last = 0
-            channel_kinds = ["remove", "invite", "provision_slot"]
+            channel_kinds = ["remove", "invite", "provision_slot", "review_channel_invite"]
             while not stop.is_set():
                 try:
                     if queue == "inbox" and time.monotonic() - last >= 300:

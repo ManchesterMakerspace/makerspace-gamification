@@ -58,7 +58,7 @@
       },
       {
         "command": "/ledger-admin",
-        "description": "Configure ranks, messages, catalogs, and verification",
+        "description": "Authorized account actions",
         "url": "https://LEDGER_HOST/slack/commands",
         "should_escape": true
       }

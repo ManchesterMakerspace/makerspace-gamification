@@ -197,6 +197,7 @@ def test_kudos_does_not_send_body_or_retained_progress_to_prompt(joined):
 
 def test_slack_editor_previews_and_publishes_all_variations(joined):
     ledger, _, _, composer, _, slack = joined
+    ledger.join(str(oid(10)))
     ui = SlackUI(ledger, composer)
     ui.command({'user_id': 'U10', 'command': '/ledger-admin', 'trigger_id': 'T', 'text': 'template rank_up shared'}, slack)
     editor = slack.views_open.call_args.kwargs['view']
@@ -212,6 +213,7 @@ def test_slack_editor_previews_and_publishes_all_variations(joined):
 
 def test_slack_library_adoption_preserves_override_until_publication(joined):
     ledger, _, _, composer, _, slack = joined
+    ledger.join(str(oid(10)))
     custom = default_template('rank_up', 'shared')
     custom['variations'] = custom['variations'][:1]
     custom['variations'][0]['user'] = 'Custom prompt for {member_full_name}.'

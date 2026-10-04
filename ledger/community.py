@@ -50,6 +50,10 @@ class Community:
 
     def quest(self, actor, quest_id, action, role=None, description=None, member=None):
         l = self.ledger
+        q = l.store.get("ledger_quests", quest_id)
+        if q and q.get("kind") == "ledger_quest":
+            from .ledger_quests import LedgerQuests
+            return LedgerQuests(l).contribute(actor, quest_id, action, role, description, member)
         def run(s):
             from .domain import Ledger
             d = Ledger(s, l.sources)

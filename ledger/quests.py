@@ -6,6 +6,7 @@ from .authority import Authority
 from .domain import Denied, Ledger, CHALLENGES
 from .sources import object_id, sid
 from .storage import now
+from .quest_policy import REVIEWED_KINDS, cooperative, enabled_rank, generated, individual
 
 
 class Quests:
@@ -20,6 +21,8 @@ class Quests:
         return [r["slot"] for r in rules["ranks"] if r["enabled"] and r["slot"] <= p["rank"] - 2]
 
     def author_available(self, q):
+        if generated(q):
+            return enabled_rank(self.l, q["target_rank"])
         p = self.l.participant(q["creator"])
         identity = self.l.store.get("ledger_catalog", f"identity:{q['creator']}") or {}
         if not p or not self.l.sources.permitted(q["creator"]) or identity.get("deactivated") or identity.get("bot"):
@@ -30,13 +33,15 @@ class Quests:
     def prerequisites(self, q, member):
         for shop in q.get("shop_ids", []):
             doc = self.l.sources.shop(shop)
-            if not doc or doc.get("disabled"):
+            if not doc or doc.get("disabled") or (generated(q) and doc.get("out_of_service")):
                 return False
         cleared = {sid(c["tool_id"]) for c in self.l.sources.rows("tool_checkouts", {"member_id": object_id(member), "revoked_at": None})}
         for tool in q.get("tool_ids", []):
             doc = self.l.sources.tool(tool)
             shop = self.l.sources.shop((doc or {}).get("shop_id")) if doc else None
             if not doc or doc.get("disabled") or not shop or shop.get("disabled") or tool not in cleared:
+                return False
+            if generated(q) and (doc.get("out_of_service") or shop.get("out_of_service")):
                 return False
         return True
 
@@ -45,7 +50,7 @@ class Quests:
 
     def eligible(self, member, q, action="browse"):
         p = self.l.require(member)
-        if q.get("kind") != "member_quest" or q["status"] != "published" or not self.author_available(q) or member == q["creator"]:
+        if not individual(q) or q["status"] != "published" or not self.author_available(q) or member == q["creator"]:
             raise Denied("This quest is unavailable to you.")
         acceptance = self.acceptance(member, q["logical_id"])
         if acceptance:
@@ -63,7 +68,9 @@ class Quests:
 
     def listing(self, member, search=""):
         rows = []
-        for q in self.l.store.select("ledger_quests", {"kind": "member_quest", "status": "published"}):
+        for q in self.l.store.select("ledger_quests", {"kind": {"$in": list(REVIEWED_KINDS)}, "status": "published"}):
+            if not individual(q):
+                continue
             head = self.l.store.get("ledger_catalog", "quest-head:" + q["logical_id"])
             accepted = self.acceptance(member, q["logical_id"])
             if (not accepted and (not head or head["revision"] != q["_id"])) or (accepted and accepted["quest_revision"] != q["_id"]):
@@ -91,14 +98,19 @@ class Quests:
             return catalog
         if prefix == "g":
             q = self.l.store.get("ledger_quests", key)
-            if not q or q.get("kind") == "member_quest" or q["status"] != "open" or q["creator"] == member:
+            if q and cooperative(q):
+                from .ledger_quests import LedgerQuests
+                return LedgerQuests(self.l).available(member, q)
+            if not q or q.get("kind") in REVIEWED_KINDS or q["status"] != "open" or q["creator"] == member:
                 raise Denied("This group quest is unavailable.")
             return q
         raise ValueError("Choose a published quest title.")
 
     def options(self, member, search=""):
         rows = [("q:" + q["_id"], q["title"]) for q in self.listing(member, search)]
-        for prefix, collection, query in [("c", "ledger_catalog", {"kind": "challenge", "active": True}), ("g", "ledger_quests", {"status": "open"})]:
+        for prefix, collection, query in [("c", "ledger_catalog", {"kind": "challenge", "active": True}),
+                ("g", "ledger_quests", {"$or": [{"status": "open"},
+                    {"kind": "ledger_quest", "quest_type": "cooperative", "status": "published"}]})]:
             for row in self.l.store.select(collection, query):
                 try:
                     self.detail(member, prefix + ":" + row["_id"])
@@ -164,6 +176,12 @@ class Quests:
         return self.l.store.atomic(run)
 
     def publish(self, actor, key, reward, classification="challenge", approve=True, reason="", catalog_id=None):
+        q = self.l.store.get("ledger_quests", key)
+        if q and generated(q):
+            if classification != "challenge" or catalog_id:
+                raise ValueError("Ledger-generated quests use ordinary challenge rewards.")
+            from .ledger_quests import LedgerQuests
+            return LedgerQuests(self.l).review(actor, key, reward, approve, reason)
         def run(s):
             d = Ledger(s, self.l.sources)
             q = s.get("ledger_quests", key)
@@ -290,7 +308,8 @@ class Quests:
                     s.put("ledger_quests", q)
                     d.award(doc["member_id"], completion, str(accepted["reward"]), "quest", facts={"quest_title": q["title"], "summary": "Independently verified quest completion."})
                     d._advance(doc["member_id"])
-                    d.notify(q["creator"], "quest", {"quest_title": q["title"], "summary": "An independent reviewer verified a member's completion."}, completion + ":author")
+                    if not generated(q):
+                        d.notify(q["creator"], "quest", {"quest_title": q["title"], "summary": "An independent reviewer verified a member's completion."}, completion + ":author")
             return doc
         return self.l.store.atomic(run)
 
@@ -309,12 +328,17 @@ class Quests:
         def run(s):
             d = Ledger(s, self.l.sources)
             q = s.get("ledger_quests", key)
-            if not q or q.get("kind") != "member_quest" or not reason.strip():
-                raise ValueError("Choose a member quest and provide a reason.")
+            if not q or q.get("kind") not in REVIEWED_KINDS or not reason.strip():
+                raise ValueError("Choose a reviewed quest and provide a reason.")
             if not Authority.covers(Authority(d).staff_scope(actor), q["shop_ids"]):
                 raise Denied("Only staff with the quest's complete scope may disable it.")
             q.update(status="disabled", disabled_at=now(), disable_reason=reason)
             s.put("ledger_quests", q)
+            if cooperative(q):
+                project = s.get("ledger_relationships", "cooperative:" + q["logical_id"])
+                if project and project["status"] == "open":
+                    project.update(status="disabled", disable_reason=reason)
+                    s.put("ledger_relationships", project)
             s.put("ledger_evidence", {"_id": "quest-disable:" + str(uuid4()), "kind": "quest_disable", "quest": key, "actor": actor, "reason": reason, "at": now()})
             return q
         return self.l.store.atomic(run)

@@ -76,6 +76,7 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
         'conversations_invite': {'groups:write'}, 'conversations_kick': {'groups:write'},
         'conversations_open': {'im:write'}, 'files_upload_v2': {'files:write'},
         'chat_postMessage': {'chat:write'}, 'chat_getPermalink': set(),
+        'chat_update': {'chat:write'},
         'views_open': set(), 'views_update': set(), 'views_publish': set(),
     }
     calls = set()

@@ -78,19 +78,54 @@ class ChatAPI:
         # A separate transport entry point; narration never accepts tool calls.
         return self._request(messages, 0.3, 700, tools, deadline)
 
-    def _request(self, messages, temperature, max_tokens, tools=None, deadline=None):
+    def quest_response(self, messages, schema):
+        """Structured proposals have their own bounds; narration stays unchanged."""
+        return self._request(messages, 0.5, 1536, content_limit=8000,
+            response_format={"type": "json_schema", "json_schema": {
+                "name": "ledger_quest", "strict": True, "schema": schema}})
+
+    def tokenize(self, messages):
+        # /tokenize is at the server root, rather than below /v1.
+        base = self.url.rstrip("/")
+        endpoint = base[:-3] if base.endswith("/v1") else base
+        data = self._exchange(endpoint + "/tokenize", {"model": self.model, "messages": messages,
+            "add_generation_prompt": True, "chat_template_kwargs": {"enable_thinking": False}})
+        count = data.get("count")
+        if type(count) is not int or count < 1:
+            raise ValueError("Tokenizer did not return a valid rendered prompt count")
+        return count
+
+    def _request(self, messages, temperature, max_tokens, tools=None, deadline=None,
+                 content_limit=2400, response_format=None):
+        payload = {"model": self.model, "messages": messages, "stream": False,
+                   "temperature": temperature, "max_tokens": max_tokens,
+                   "chat_template_kwargs": {"enable_thinking": False}}
+        if tools is not None:
+            payload.update(tools=tools, tool_choice="auto")
+        if response_format is not None:
+            payload["response_format"] = response_format
+        data = self._exchange(self.url.rstrip("/") + "/chat/completions", payload, deadline)
+        choice = data["choices"][0]
+        if tools is not None and choice.get("finish_reason") == "tool_calls":
+            message = choice["message"]
+            if message["role"] != "assistant" or not isinstance(message.get("tool_calls"), list) or not 1 <= len(message["tool_calls"]) <= 3:
+                raise ValueError("Invalid tool response")
+            return {"role": "assistant", "content": None, "tool_calls": message["tool_calls"]}
+        content = choice["message"]["content"]
+        if choice.get("finish_reason") != "stop" or choice["message"].get("tool_calls") or not isinstance(content, str) or not content.strip() or len(content) > content_limit:
+            raise ValueError("Incomplete or invalid chat response")
+        if any(s in content.lower() for s in ("<think>", "</think>", "<tool_call>", "<!channel>", "<!here>", "<!everyone>")):
+            raise ValueError("Invalid narration")
+        return {"role": "assistant", "content": content.strip()} if tools is not None else content.strip()
+
+    def _exchange(self, endpoint, payload, deadline=None):
         deadline = min(self.deadline, deadline or self.deadline)
-        url = urlparse(self.url.rstrip("/") + "/chat/completions")
+        url = urlparse(endpoint)
         if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password:
             raise ValueError("Configure an http(s) chat API base URL without embedded credentials")
         started = time.monotonic()
         cls = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
         conn = cls(url.hostname, url.port, timeout=min(2, deadline))
-        payload = {"model": self.model, "messages": messages, "stream": False,
-                           "temperature": temperature, "max_tokens": max_tokens,
-                           "chat_template_kwargs": {"enable_thinking": False}}
-        if tools is not None:
-            payload.update(tools=tools, tool_choice="auto")
         body = json.dumps(payload).encode()
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -129,18 +164,7 @@ class ChatAPI:
             data = json.loads(b"".join(chunks))
             if time.monotonic() - started >= deadline:
                 raise TimeoutError("Chat deadline exceeded")
-            choice = data["choices"][0]
-            if tools is not None and choice.get("finish_reason") == "tool_calls":
-                message = choice["message"]
-                if message["role"] != "assistant" or not isinstance(message.get("tool_calls"), list) or not 1 <= len(message["tool_calls"]) <= 3:
-                    raise ValueError("Invalid tool response")
-                return {"role": "assistant", "content": None, "tool_calls": message["tool_calls"]}
-            content = choice["message"]["content"]
-            if choice.get("finish_reason") != "stop" or choice["message"].get("tool_calls") or not isinstance(content, str) or not content.strip() or len(content) > 2400:
-                raise ValueError("Incomplete or invalid chat response")
-            if any(s in content.lower() for s in ("<think>", "</think>", "<tool_call>", "<!channel>", "<!here>", "<!everyone>")):
-                raise ValueError("Invalid narration")
-            return {"role": "assistant", "content": content.strip()} if tools is not None else content.strip()
+            return data
         finally:
             if timer:
                 timer.cancel()

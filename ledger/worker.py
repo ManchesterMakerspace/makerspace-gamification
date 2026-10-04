@@ -15,6 +15,7 @@ from .community import Community
 from .domain import Denied, Ledger
 from .messages import button, escape, section
 from .prompt_library import EXAMPLE_FACTS
+from .review_notifications import ReviewDeliveryBusy
 from .sources import FIELDS, sid
 from .storage import enqueue, now
 from .views import home
@@ -47,6 +48,8 @@ class Worker:
             if job.get("last_error") != "HistoryImportPending":
                 log.warning("Welcome delivery waiting for history import; check ledger-accounting job=%s", job["_id"])
             self.finish(collection, job, "pending", 15, "HistoryImportPending", deferred=True)
+        except ReviewDeliveryBusy:
+            self.finish(collection, job, "pending", 15, "ReviewDeliveryBusy", deferred=True)
         except Exception as exc:
             # Never log event payloads, prompts, member messages, or provider responses.
             code = getattr(exc, "code", None)
@@ -84,9 +87,15 @@ class Worker:
                 if self.ledger.participant(member_id):
                     self.ledger.reconcile(member_id)
         elif job["kind"] == "reconcile":
+            from .review_notifications import reconcile
+            reconcile(self.store)
             for p in self.store.select("ledger_participants"):
                 self.valid_identity(p["member_id"])
                 self.ledger.reconcile(p["member_id"])
+            from .engagement import Engagement
+            for profile in self.store.select("ledger_relationships", {"kind": "member_preferences"}):
+                self.valid_identity(profile["member_id"])
+                Engagement(self.ledger).notice(profile["member_id"])
             self.reconcile_channels()
         elif job["kind"] == "slack_event":
             outcome = self.event(payload, job["_id"])
@@ -346,7 +355,9 @@ class Worker:
 
     def admin_command(self, actor, args, key):
         l = self.ledger
-        if args and args[0] in ("review", "approve", "reject", "verify-quest"):
+        from .admin_access import require_command, help_text
+        require_command(l, actor)
+        if not args or args[0] in ("help", "review", "approve", "reject", "verify-quest", "complete-quest"):
             pass
         elif args and args[0] == "disable-quest":
             l.staff(actor)
@@ -355,8 +366,8 @@ class Worker:
         if args and args[0] == "disable-quest" and len(args) >= 3:
             from .quests import Quests
             Quests(l).disable(actor, args[1], " ".join(args[2:]))
-            return l.notify(actor, "status", {"summary": "Quest disabled; completed history retained."}, key, exception=True)
-        summary = "Use /ledger-admin ranks, history, rollback <version>, template <type> <audience>, template-library <type> <audience>, template-history, template-rollback <id>, template-test <type> <audience>, reload-prompts, catalog, quest, review, approve <id>, reject <id> <reason>, verify-quest <quest> @member, coverage @member <reason>, correct-rank @member <slot> <reason>, reconcile."
+            return l.notify(actor, "status", {"summary": "Quest disabled; completed history retained."}, key, exception=True, administrative=True)
+        summary = help_text(l, actor)
         if args == ["reload-prompts"]:
             # A stable command key makes retries idempotent. Every composing process
             # observes the revision before its next unreserved message.
@@ -393,7 +404,8 @@ class Worker:
                 except Denied:
                     continue
             summary = "\n".join(f"{r['_id']}: {r['achievement']} — {r['description']}" for r in rows) or "No pending submissions you can review."
-            for q in self.store.select("ledger_quests", {"kind": "member_quest", "status": "pending_review"}):
+            from .quest_policy import REVIEWED_KINDS
+            for q in self.store.select("ledger_quests", {"kind": {"$in": list(REVIEWED_KINDS)}, "status": "pending_review"}):
                 try:
                     Authority(l).authorize(actor, q["creator"], "quest_publish", q["shop_ids"], q["logical_id"])
                     summary += f"\nQuest publication: {q['_id']} — {q['title']}; use /ledger-admin publish-quest {q['_id']} or reject-quest {q['_id']}."
@@ -419,6 +431,8 @@ class Worker:
             target = SlackUI(l, self.composer).resolve(" ".join(args[2:]))
             Community(l).quest(actor, args[1], "verify", member=target)
             summary = "Quest contribution verified."
+        elif args and args[0] == "complete-quest":
+            raise ValueError("Use /ledger-admin complete-quest <quest-id> to open the shared-outcome review form.")
         elif args and args[0] in ("coverage", "correct-rank", "release-rank"):
             from .slack_app import SlackUI
             target = SlackUI(l, self.composer).resolve(" ".join(args[1:]))
@@ -445,7 +459,7 @@ class Worker:
         elif args and args[0] == "metrics":
             from .metrics import snapshot
             summary = json.dumps(snapshot(self.store), default=str)
-        l.notify(actor, "status", {"summary": summary}, key, exception=True)
+        l.notify(actor, "status", {"summary": summary}, key, exception=True, administrative=True)
 
     def persist_composition(self, job, kind, audience, facts, conversation=None):
         current = self.store.get("ledger_outbox", job["_id"])
@@ -511,7 +525,15 @@ class Worker:
         p = job["payload"]
         kind = job["kind"]
         member_id = p.get("member_id")
+        if kind in ("review_notice", "quest_review_notice"):
+            from .review_notifications import deliver
+            return deliver(self, job)
         if kind == "remove":
+            if p.get("review_channel"):
+                from .admin_access import review_eligible
+                from .review_notifications import channel_id
+                if p["channel"] == channel_id() and review_eligible(self.ledger, member_id):
+                    return  # A rejoin supersedes a delayed opt-out removal.
             uid = p.get("slack_id") or self.ledger.sources.slack_id(member_id)
             if uid:
                 try:
@@ -520,6 +542,12 @@ class Worker:
                     if e.response.get("error") not in ("not_in_channel", "user_not_found"):
                         raise
             return
+        if kind == "review_channel_invite":
+            from .admin_access import deliver_review_invite
+            return deliver_review_invite(self, job)
+        if kind == "admin_invitation":
+            from .admin_access import deliver_invitation
+            return deliver_invitation(self, job)
         if (self.store.get("ledger_catalog", "control") or {}).get("paused") and not p.get("exception"):
             raise Denied("Game delivery paused by an operator.")
         if kind == "provision_slot":
@@ -571,25 +599,35 @@ class Worker:
         uid = self.valid_identity(member_id)
         if not uid or not self.ledger.sources.permitted(member_id):
             raise Denied("Recipient cannot receive this message.")
-        if not p.get("exception") and not self.ledger.active(member_id):
+        if kind != "engagement_notice" and not p.get("exception") and not self.ledger.active(member_id):
             raise Denied("Recipient opted out.")
         if kind == "engagement_notice":
             from .engagement import enabled
-            if not enabled("OBSERVATION"):
+            participant = self.ledger.preference_profile(member_id)
+            if (not enabled("OBSERVATION") or not self.ledger.member_eligible(member_id)
+                    or (self.store.get("ledger_catalog", "control") or {}).get("paused")
+                    or not participant.get("preferences", {}).get("observation", True)):
                 raise Denied("Observation is disabled.")
-            generation = self.ledger.participant(member_id).get("consent_generation", 0)
+            generation = participant.get("consent_generation", 0)
             if generation != p["consent_generation"]:
-                raise Denied("Observation consent changed.")
-            text = "The Ledger can observe new messages in registered Ledger channels, kudos issuance metadata, and verified volunteer activity. The System excludes DMs and original kudos text. Observation suggestions are recorded for audit only: they do not award or deduct XP, advance ranks, or send recognition messages. Preferences disable observation or arrival mentions independently. Ask staff about the audit process."
+                raise Denied("Observation settings changed.")
+            text = "Observation is on by default for eligible members, whether or not you join The Ledger, after receiving this notice. The System observes only new messages in configured Ledger channels, kudos issuance metadata, and verified volunteer activity. DMs and original kudos text are excluded. Suggestions are audit-only: they do not change XP or ranks or send recognition messages. To opt out, use /ledger preferences and uncheck Allow observation. Game participation and arrival mentions are separate. Ask staff about the audit process."
             dm = self.slack.conversations_open(users=uid)["channel"]["id"]
             self.assert_live_job(job)
+            latest = self.ledger.preference_profile(member_id)
+            if (not enabled("OBSERVATION") or not self.ledger.member_eligible(member_id)
+                    or not latest.get("preferences", {}).get("observation", True)
+                    or latest.get("consent_generation", 0) != p["consent_generation"]):
+                raise Denied("Observation settings changed.")
             response = self.post_message(channel=dm, text=text, blocks=[section(text), {"type": "actions", "elements": [button("Preferences", "preferences", "")]}], client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"])))
             def notice_receipt(s):
                 d = Ledger(s, self.ledger.sources)
-                participant = d.participant(member_id)
-                if d.active(member_id) and participant.get("consent_generation", 0) == p["consent_generation"]:
+                participant = d.preference_profile(member_id)
+                if (d.member_eligible(member_id) and enabled("OBSERVATION") and not (s.get("ledger_catalog", "control") or {}).get("paused")
+                        and participant.get("preferences", {}).get("observation", True)
+                        and participant.get("consent_generation", 0) == p["consent_generation"]):
                     participant.update(observation_notice_delivered_at=now(), observation_notice_ts=response["ts"])
-                    s.put("ledger_participants", participant)
+                    d.save_preference_profile(participant)
             self.store.atomic(notice_receipt)
             return
         if kind == "quest_draft":
@@ -705,6 +743,9 @@ class Worker:
                 "at": response["ts"], "expires_at": now() + timedelta(days=30)}))
             return
         audience, facts = p["audience"], p.get("facts", {})
+        if p.get("administrative") or "/ledger-admin" in json.dumps(facts):
+            from .admin_access import require_command
+            require_command(self.ledger, member_id)
         if p.get("ai_decision"):
             from .engagement import observe_allowed, enabled
             decision = self.store.get("ledger_evidence", p["ai_decision"])
@@ -732,6 +773,12 @@ class Worker:
         facts = current_labels(facts)
         composed = self.persist_composition(job, p["type"], audience, facts)
         self.assert_live_job(job)
+        if p.get("administrative") or "/ledger-admin" in json.dumps(facts):
+            from .admin_access import require_command
+            require_command(self.ledger, member_id)
+        from .admin_access import command_eligible
+        if "/ledger-admin" in composed["text"] and (audience == "shared" or not command_eligible(self.ledger, member_id)):
+            composed = {**composed, "text": "Use /ledger for available member actions."}
         if not p.get("exception") and not self.ledger.active(member_id):
             raise Denied("Member opted out during generation.")
         if p.get("ai_decision"):

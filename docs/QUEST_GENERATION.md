@@ -1,0 +1,64 @@
+# The Ledger quest generator
+
+Run the one-shot module from this repository with the normal Mongo, Slack, inference and Prompt Matrix environment. Python does not load `.env` automatically. The module connects directly to those services; it does not start Slack ingress, workers, MQTT, initialization or scheduling.
+
+```powershell
+python -m ledger.generate_quest
+python -m ledger.generate_quest --type cooperative
+python -m ledger.generate_quest --type individual --rank 3
+python -m ledger.generate_quest --dry-run --seed 42
+python -m ledger.generate_quest --type cooperative --rank 3 --seed 42 --request-id workshop-jig-001
+```
+
+`--type` defaults to `individual`. `--rank` is an enabled numeric slot. `--seed` reproduces rank/example sampling for the same source snapshot, not inference output. Each invocation produces one proposal. `--dry-run` displays a validated proposal and coverage/selection details without owned-store writes or Slack posts. Without `--request-id`, the CLI prints a new UUID before making service calls. Exit status is zero on successful generation/submission and nonzero on failure; unsafe provider/source error bodies are not printed.
+
+## Configuration and channel-use notice
+
+Set `LEDGER_QUEST_REVIEW_CHANNEL_ID` to a private, unarchived staff channel, accessible to the bot and not externally shared. It must be separate from registered game channels. Limit membership to humans authorized to see review evidence; channel membership does not grant approval authority. Set `LEDGER_QUEST_CONTEXT_LIMIT` to the actual deployed model context window (default 8192). Reuse `LEDGER_LLM_BASE_URL`, `LEDGER_LLM_MODEL`, `LEDGER_LLM_API_KEY`, `MLAB_URI`, `LEDGER_URI` and optional matrix override settings. The served model must support structured JSON generation and rendered-message tokenization.
+
+Before operators use this feature, publish a channel-use explanation in registered Ledge Chat and every rank channel that may be selected. Suggested text for a human operator to publish:
+
+> The Ledger can use recent human conversation in this channel, including messages from people who have not joined the game, as inspiration for a new makerspace quest. Operators invoke this feature separately from audit-only observation. It considers bounded recent text, removes identities and sensitive material, and does not quote or identify speakers. Proposals require independent human review before becoming available. This use does not enroll anyone, award XP, or grant tool access. Attachments, direct messages and unrelated private conversations are excluded. Sanitized generation snapshots expire after 30 days.
+
+Observation preferences control the separate observation feature. They do not authorize historical quest generation. This script deliberately uses the selected two channels' human history, including nonparticipants, under the published explanation. The implementation does not publish this explanation or modify an external Google Doc automatically.
+
+## Rank demand and bounded inputs
+
+Random selection considers enabled ranks with active opted-in members and a registered rank channel. An explicit enabled rank may have no current members but still requires its registered source channel. The script prints each candidate's population `N`, verified activity fraction `V`, chat participation fraction `C`, open supply `O`, pending supply `P`, completeness and weight:
+
+```text
+A = (V + C) / 2
+weight = N * (2 - A) / (1 + O + P)
+```
+
+Activity uses a 30-day window and original checkout, approved credit and independently approved evidence timestamps. Kudos, imports' processing timestamps, recruitment and reversed activity are excluded. Chat participation uses human message metadata from registered Ledger channels, grouped by members' current ranks. Each channel history is capped at 1000 messages with cursor pagination; bounded source activity reads allow up to 5000 records. Incomplete coverage gives the affected component a neutral `0.5`. Missing required APIs are failures, rather than empty or inactive cohorts. Channel history measures channel messages; when it contains active threads whose 30-day replies are not exhaustively retrieved, chat coverage is incomplete and `C` uses neutral `0.5`, with a printed coverage note. The smaller optional inspiration-thread sample cannot establish complete activity coverage. A published reusable individual quest stays open until withdrawn/disabled, whereas a finalized cooperative project is closed. Logical revisions count once; untargeted legacy quests add no rank supply.
+
+The inspiration context samples up to eight distinct logical completed quests across ranks and types, joining completion receipts to reviewed definitions and available outcome evidence. It uses the latest 14 days of human conversation from registered `chat` and the selected `rank:N`, up to 40 recent messages per channel plus at most ten replies from each of five recent active threads. Optional replies may be unavailable or truncated and are reported separately. Empty sources are valid. Required history failures stop submission. All source channels must be private, unarchived, joined by the bot and not externally shared. Slack `Retry-After` is honored with bounded retries; an exhausted retry is a required-source failure. See [Slack history](https://docs.slack.dev/reference/methods/conversations.history/) and [rate limits](https://docs.slack.dev/apis/web-api/rate-limits/).
+
+Only text enters context. Known names, mentions, addresses, phone numbers, identity syntax and link destinations are removed; messages matching credential, billing, access-code or internal/private-note patterns are discarded. Bot-authored kudos, attachments, forwarded content and unrelated private conversations are excluded. Samples are untrusted inspiration, never policy or authorization. Local rank presentation, policy, available resources and brief existing supply ground the proposal.
+
+The generator uses the matrix persona and a separate six-field JSON schema, non-thinking inference, temperature 0.5 and a 1536-token output budget. It calls the server-root `/tokenize` endpoint with rendered chat messages and the same template options, reserving output space and trimming inspiration before policy or authoritative rank facts. Tokenization is a deployment prerequisite; no character-count fallback is used. See [vLLM tokenizer API](https://docs.vllm.ai/en/v0.15.0/serving/openai_compatible_server/#tokenizer-api). Python validates exact fields, resources, 100/2000/2000 text limits, identity/control syntax and cooperative disciplines. One repair request uses the same context; another invalid output stops without a proposal.
+
+## Submission, retries and retention
+
+Python supplies `kind=ledger_quest`, `creator=system:ledger`, type, rank, IDs and lifecycle. The model cannot publish or set rewards. A successful submission atomically saves a `pending_review` proposal and its deterministic staff review notice. It does not award XP or make the quest publicly available. The review worker delivers the notice independently and updates it after human decisions, without source chat excerpts.
+
+Use the same request ID and original type/rank/seed after a failed invocation. A ten-minute lease fences concurrent processes. Saved selection, sanitized context, matrix identity, prompt version, model parameters and validated text are reused; submission/delivery retries do not reroll or regenerate already validated text. A model/context-limit change requires the original settings or a new request ID. An expired unfinished input snapshot requires a new request ID. Submitted requests remain resumable after input expiry. `ledger_context` TTL removes sanitized input snapshots after 30 days; durable generation audits retain references/counts, hashes, versions and validated output, not conversation excerpts.
+
+Proposals and revisions use `ledger_quests`; generation/review/completion audits use `ledger_evidence`; input snapshots use `ledger_context`; notices use `ledger_outbox`; acceptances and mutable shared projects use `ledger_relationships`. No collection is added. Existing Mongo role examples cover these collections and their new indexes. Source reads stay on `MLAB_URI`, owned writes on `LEDGER_URI`.
+
+## Human review and participation
+
+Use the staff notice's **Review quest** button or `/ledger-admin review`, then `/ledger-admin publish-quest <id>` or `/ledger-admin reject-quest <id>`. Publication forms allow editing title, instructions, criteria, shop/tool prerequisites and cooperative disciplines. Edits create a new reviewed revision while preserving the original proposal. Reviewers select a whole-number ordinary challenge reward from 0 to 500 XP, initially 100. Current identity, capability, original/edited scope, target rank and resources are rechecked at approval. Published definition fields are immutable. The service author has no member record, rank, staff permissions, publication, accounting or safety authority.
+
+Individual quests reuse exact-rank acceptance, saved revision/reward, promotion-safe completion and one reward per member/logical quest. Existing submission and independent verification flows apply.
+
+A cooperative quest represents one shared project. Any opted-in participant meeting actual prerequisites and clearances may join a predefined discipline, regardless of rank; the target slot describes the intended audience. Use existing join/contribute/verify interactions. Contributors cannot verify or finalize their own project. Verification records a contribution without awarding XP or automatically closing the project.
+
+An authorized independent reviewer uses `/ledger-admin complete-quest <id>` and supplies shared outcome evidence. Finalization requires at least two independently verified, currently eligible contributors covering every predefined discipline. It closes the project and awards the saved approved reward once to each eligible verified contributor. Other contributions close with an explanation and no award. Cooperative work does not automatically grant Boss Fight credit. Existing member-authored and volunteer-task behavior is preserved.
+
+## Deployment verification
+
+Run `python -m ledger.prompt_matrix`, `python -m ledger.prompt_library` and `python -m pytest`. Existing optional replica-set tests use an explicitly supplied disposable `LEDGER_TEST_MONGO_URI`. The matrix includes required `ledger_quest_author`; the checkout's current policy also includes concurrent observation/review delivery updates. Update any Google Doc override to the complete current bundled policy and explicitly reload it; the 23 narration prompt sets remain separate and reserved deliveries retain their snapshots.
+
+Before enabling production use, publish the channel-use explanation, initialize indexes through the ordinary operator command, verify private source/review channel access and history/thread scopes, and run a dry-run against the actual Qwen/tokenizer endpoint. Confirm a submitted proposal and exactly one review notice under real Mongo transactions, review edits/rejection and notice retries, individual completion, and cooperative gates/once-only accounting. Optional Slack thread access may require a token supported for `conversations.replies`; failed optional replies are reported. No live Mongo, Slack, inference or Google Doc verification is implied by local tests. No automatic schedule is installed.
