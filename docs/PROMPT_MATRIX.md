@@ -7,7 +7,7 @@ The matrix is an application system prompt, not a replacement tokenizer chat tem
 ## Matrix layout
 
 ```xml
-<prompt_matrix schema_version="1" id="the-ledger" version="3">
+<prompt_matrix schema_version="1" id="the-ledger" version="5">
   <identity><![CDATA[# Identity, personality, and human motivation]]></identity>
   <authority><![CDATA[## Evidence, application authority, and uncertainty]]></authority>
   <roles>
@@ -45,7 +45,7 @@ The matrix explicitly covers `ledger`, `member`, `participant`, `nonparticipant`
 
 Admins and board members retain global Ledger administration. Resource managers remain shop-scoped reviewers. Nobody approves their own evidence. Rank and descriptive titles grant no staff or safety authority. Future roles must be added to the canonical matrix, required-role validation, and tests in the same change, as required by [AGENTS.md](../AGENTS.md).
 
-The Ledger speaks as a seasoned leatherbound grimoire: precise, patient, occasionally dry-witted, never cute or coercive. A DM addresses its recipient directly. Shared recognition addresses the community briefly. Bot conversations answer the member's actual question and stay in the authorized thread. Clear self-directed progress questions in registered channels receive contextual replies with private-detail controls; other ambient chatter receives no reply. Nonparticipants get plain-language peer thanks/invitations without retained rank claims. Safety procedures and human appointments remain outside game authority.
+The Ledger speaks as a seasoned leatherbound grimoire: precise, patient, occasionally dry-witted, never cute or coercive. A DM addresses its recipient directly. Shared recognition addresses the community briefly. Bot conversations answer the member's actual question and stay in the authorized thread. Clear self-directed progress questions in registered channels receive contextual replies with private-detail controls; question-mark messages in joined channels are examined and may receive a relevant answer; ordinary ambient chatter receives no reply. Names/Slack mentions and existing bot threads (including bot-authored root posts) receive contextual replies. Nonparticipants can send/receive kudos and chat about The Ledger, general XP and known shops/tools; optional `/ledger join` invitations confer no consent. Rules, specific ranks and quests are unavailable. Participant conversation facts include only current/lower rank details and next requirements, without future names or inaccessible quests. The conversation path excludes global seed tables and rank/quest examples from inference. Unknown facts receive "I don't know." Safety procedures and human appointments remain outside game authority.
 
 ## Google Doc configuration
 
@@ -106,4 +106,8 @@ Delivery stages and acceptance:
 
 The 16-KiB document cap is a byte limit, not a tokenizer guarantee. The matrix shares the configured model context window with variations, facts, current-thread history, and output tokens. Check actual token usage against `VLLM_MAX_MODEL_LEN` during the pilot, especially with long custom prompts or non-English text. Do not silently truncate policy sections to fit. Provider/context-limit failures use canned fallbacks. Automated tests cover transport and request construction using mocks/local stubs; they do not certify live model obedience.
 
-Policy version 3 adds required quest author, observer, and delegated reviewer coverage. Engagement proposals are the sole model-proposal exception: Python independently validates and commits them; narration and policy confer no authority. The expanded matrix export remains bounded at 24 KiB. Existing Google Doc overrides must receive the same complete version-3 policy and an explicit operator reload. No external document is published by implementation. See [rollout and limits](ENGAGEMENT_QUESTS.md).
+Policy version 3 adds required quest author, observer, and delegated reviewer coverage. Engagement proposals are the sole model-proposal exception: Python independently validates and commits them; narration and policy confer no authority. The expanded matrix export remains bounded at 24 KiB. Existing Google Doc overrides must receive the same complete version-5 policy and an explicit operator reload. No external document is published by implementation. See [rollout and limits](ENGAGEMENT_QUESTS.md).
+
+Policy version 4 updates nonparticipant kudos/chat access, selected kudos emoji attribution, joined-channel question routing, caller-specific rank/quest visibility, and honest shop/tool answers. Operators using a Google Doc override must update it to this complete policy and explicitly reload it; no external document was edited or published. Conversation prompt pairs are now version 2.
+
+Policy version 5 specifies recipient-aware varied sender acknowledgments and receipts from `delivery.json` version 2. Validated mentions and overall/per-destination outcomes drive narration; pending or partial delivery cannot be presented as complete success, and Slack delivery does not establish reading. Deterministic receipt facts and once-only XP remain authoritative. Update any Google Doc override to the complete version-5 policy and reload explicitly.

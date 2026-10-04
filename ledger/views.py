@@ -103,6 +103,10 @@ def kudos_form(ledger, recipient, key, draft=None):
         blocks.append(select_input("invitation", "Also invite this member?", [option("Send kudos only", "no"), option("Send kudos and invite them to The Ledger", "yes")],
                                    selected=option("Send kudos and invite them to The Ledger" if draft.get("invitation") == "yes" else "Send kudos only", draft["invitation"]) if draft.get("invitation") else None))
     blocks.append(text_input("message", "Your kudos message", draft.get("message", ""), multiline=True))
+    from .kudos import EMOJI, selected_emoji
+    selected = selected_emoji(draft.get("emoji"))
+    blocks.append(select_input("emoji", "Emoji (optional)", [option(label, value) for label, value in EMOJI],
+                               selected=next((option(label, value) for label, value in EMOJI if value == selected), None), optional=True))
     blocks.append(section("Slack formatting and emoji are welcome. Your message is delivered as written."))
     shop = ledger.sources.shop(draft.get("shop")) if draft.get("shop") else None
     blocks.append(select_input("shop", "Shop (optional)", selected=option(shop["name"], str(shop["_id"])) if shop else None, optional=True, dispatch=True))

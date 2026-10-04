@@ -7,8 +7,8 @@ from .storage import matches, now
 FIELDS = {
     "members": "firstname lastname status expirationTime subscription subscription_id groupName merged_at role resource_manager_shop_ids",
     "slack_users": "member_id slack_id invalidated_at",
-    "shops": "name disabled",
-    "tools": "name shop_id prerequisite_ids disabled open out_of_service",
+    "shops": "name disabled wiki_url out_of_service out_of_service_note",
+    "tools": "name description wiki_url shop_id prerequisite_ids disabled open out_of_service",
     "tool_checkouts": "member_id tool_id approved_by_id checked_out_at revoked_at volunteer_credit_id",
     "checkout_approvers": "member_id shop_ids tool_ids",
     "volunteer_credits": "member_id credit_value status tool_checkout_id task_id created_at reversed reversal_of_id",

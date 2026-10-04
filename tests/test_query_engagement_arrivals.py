@@ -359,7 +359,7 @@ def test_tool_conversation_reserves_prompt_policy_and_reuses_text_on_retry(joine
     job = claim(s, key)
     w.outbox(job)
     saved = s.get('ledger_outbox', key)
-    assert saved['prompt_selection']['matrix']['version'] == '3'
+    assert saved['prompt_selection']['matrix']['version'] == '5'
     assert saved['composed']['prompt_variation'] in ('archivist', 'mentor', 'wry_grimoire')
     assert saved['composed']['prompt_scope'] == 'member:' + member(1)
     api.tool_response.reset_mock()

@@ -62,6 +62,14 @@ class Ledger:
             raise Denied("Opt in to The Ledger with a valid linked Slack account first.")
         return self.participant(member_id)
 
+    def require_member(self, member_id):
+        """Peer kudos/chat require a live human identity, not game consent."""
+        if (self.store.get("ledger_catalog", "control") or {}).get("paused"):
+            raise Denied("The Ledger is paused for maintenance. Opt-out remains available.")
+        identity = self.store.get("ledger_catalog", f"identity:{member_id}") or {}
+        if not self.sources.permitted(member_id) or identity.get("deactivated") or identity.get("bot"):
+            raise Denied("A valid linked human Slack account is required.")
+
     def admin(self, actor):
         if not self.sources.permitted(actor) or self.sources.role(actor) not in ("admin", "board_member"):
             raise Denied("Only admins and board members may perform this action.")
@@ -223,12 +231,13 @@ class Ledger:
             self.notify(member_id, kind if delta > 0 else "correction", {**(facts or {}), "xp_change": str(delta), "xp_total": p["xp"]}, award_id)
         return True
 
-    def kudos(self, giver, recipient, message, *, key, shop=None, tool=None, public=False, invite=False, expected_participation=None):
+    def kudos(self, giver, recipient, message, *, key, shop=None, tool=None, public=False, invite=False, expected_participation=None, emoji=None):
         return self.tx("_kudos", giver, recipient, message, key=key, shop=shop, tool=tool, public=public,
-                       invite=invite, expected_participation=expected_participation)
+                       invite=invite, expected_participation=expected_participation, emoji=emoji)
 
-    def _kudos(self, giver, recipient, message, *, key, shop, tool, public, invite, expected_participation):
-        self.require(giver)
+    def _kudos(self, giver, recipient, message, *, key, shop, tool, public, invite, expected_participation, emoji):
+        from .kudos import selected_emoji
+        self.require_member(giver)
         existing = self.store.get("ledger_evidence", f"kudos:{key}")
         if existing:
             if existing["giver"] != giver:
@@ -259,7 +268,7 @@ class Ledger:
         daily_receipts = self.store.select("ledger_evidence", {"kind": "kudos", "recipient": recipient, "day": day, "xp_awarded": True})
         eligible = participating and not pair_receipts and len(daily_receipts) < 5
         evidence = {"_id": f"kudos:{key}", "kind": "kudos", "giver": giver, "recipient": recipient,
-                    "message": message, "shop": shop, "tool": tool, "shop_name": (shop_doc or {}).get("name"),
+                    "message": message, "emoji": selected_emoji(emoji), "shop": shop, "tool": tool, "shop_name": (shop_doc or {}).get("name"),
                     "tool_name": (tool_doc or {}).get("name"), "public": bool(public), "invite": bool(invite),
                     "participating_at_submission": participating, "xp_awarded": bool(eligible),
                     "at": now(), "day": day, "week": week, "deliveries": {}}
@@ -269,7 +278,7 @@ class Ledger:
         if eligible:
             self.award(recipient, evidence["_id"], "17", "kudos")
             self._advance(recipient)
-        if invite and not participating:
+        if invite and not participating and self.active(giver):
             self._sponsor(giver, recipient, notify=False)
         for audience in ["recipient"] + (["shared"] if public else []):
             enqueue(self.store, "ledger_outbox", f"{evidence['_id']}:{audience}", "kudos",

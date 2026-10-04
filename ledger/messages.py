@@ -222,6 +222,10 @@ class Composer:
                 system += "\nDelivery surface: " + ("shared audience preview" if audience == "shared" else "private DM") + "."
             if kind == "kudos":
                 system += "\nNever state ranks, XP, or participation status in a kudos introduction. Never rewrite or invent the original kudos body."
+            if kind == "delivery":
+                system += "\nThis is a receipt to the sender, not the kudos recipient. Vary its wording using only supplied receipt metadata. "
+                system += "A delivered status confirms Slack accepted the message, not that anyone read it. Never claim queued, pending, failed, cancelled, or partial delivery was wholly successful. "
+                system += "Use only the validated recipient mention if provided; no other mentions or invented destinations, retries, delivery outcomes or XP awards. The application appends exact receipt facts."
             messages = [{"role": "system", "content": system}]
             if kind == "conversation":
                 messages.extend(conversation or [])

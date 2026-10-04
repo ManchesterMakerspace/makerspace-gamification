@@ -125,7 +125,7 @@ class Arrivals:
             current.update(status="attempted", attempted_at=now())
             s.put("ledger_evidence", current)
         self.l.store.atomic(begin)
-        receipt = worker.slack.chat_postMessage(channel=arrival["channel"], text=text + f" <@{uid}>", unfurl_links=False, unfurl_media=False)
+        receipt = worker.post_message(channel=arrival["channel"], text=text + f" <@{uid}>", unfurl_links=False, unfurl_media=False)
         def complete(s):
             saved = s.get("ledger_evidence", arrival["_id"])
             saved.update(status="delivered", delivered_at=now(), ts=receipt["ts"])

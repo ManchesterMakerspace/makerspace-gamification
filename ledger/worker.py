@@ -121,6 +121,13 @@ class Worker:
         self.store.atomic(lambda s: s.put("ledger_catalog", {"_id": f"identity:{member_id}", "deactivated": invalid, "bot": bool(user.get("is_bot")), "at": now()}))
         return None if invalid else slack_id
 
+    def post_message(self, **kwargs):
+        response = self.slack.chat_postMessage(**kwargs)
+        thread = kwargs.get("thread_ts") or response["ts"]
+        self.store.atomic(lambda s: s.put("ledger_context", {"_id": f"thread:{kwargs['channel']}:{thread}",
+            "kind": "thread", "expires_at": now() + timedelta(days=30)}))
+        return response
+
     def reconcile_channels(self):
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
             present = self.channel_members(channel["channel_id"])
@@ -193,6 +200,9 @@ class Worker:
             ts = event.get("deleted_ts") or event.get("message", {}).get("ts")
             context_key = f"message:{channel}:{ts}"
             prior = self.store.get("ledger_context", context_key)
+            if not prior:
+                context_key = f"reply:{channel}:{ts}"
+                prior = self.store.get("ledger_context", context_key)
             if prior:
                 if event["subtype"] == "message_deleted":
                     self.store.atomic(lambda s: s.delete("ledger_context", context_key))
@@ -200,7 +210,13 @@ class Worker:
                     prior["text"] = event["message"].get("text", "")[:6000]
                     self.store.atomic(lambda s: s.put("ledger_context", prior))
             return
-        if event.get("bot_id") or event.get("user") == self.bot_id or event.get("subtype"):
+        if event.get("user") == self.bot_id:
+            if event.get("ts"):
+                thread = event.get("thread_ts") or event["ts"]
+                self.store.atomic(lambda s: s.put("ledger_context", {"_id": f"thread:{channel}:{thread}",
+                    "kind": "thread", "expires_at": now() + timedelta(days=30)}))
+            return "ignored_bot_or_subtype"
+        if event.get("bot_id") or event.get("subtype"):
             return "ignored_bot_or_subtype"
         if not member:
             return "ignored_unlinked_identity"
@@ -210,31 +226,35 @@ class Worker:
         if is_dm and text.strip().lower() in ("opt out", "opt-out", "leave"):
             self.ledger.leave(member_id)
             return "opt_out_saved"
-        if not self.ledger.active(member_id):
-            if is_dm:
-                self.ledger.notify(member_id, "onboarding", {"summary": "Choose Opt in to participate in The Ledger."}, key, exception=True)
-                return "onboarding_queued"
-            return "ignored_inactive_participant"
+        self.ledger.require_member(member_id)
         managed = {c["channel_id"] for c in self.store.select("ledger_channels", {"kind": "channel"})}
-        if not is_dm and channel not in managed:
-            return "ignored_unregistered_channel"
         thread = event.get("thread_ts") or event.get("ts")
-        addressed = is_dm or kind == "app_mention" or (self.bot_id and f"<@{self.bot_id}>" in text)
+        addressed = is_dm or kind == "app_mention" or (self.bot_id and re.search(r"<@" + re.escape(self.bot_id) + r"(?:\|[^>]+)?>", text)) or bool(re.search(r"\b(?:the\s+)?ledger\b|\bthe\s+system\b", text, re.I))
         continuing = self.store.get("ledger_context", f"thread:{channel}:{thread}")
+        if not is_dm and channel not in managed:
+            # Slack may deliver mentions from channels the bot has not joined.
+            info = self.slack.conversations_info(channel=channel)["channel"]
+            if info.get("is_member") is not True:
+                return "ignored_unjoined_channel"
         message_id = f"message:{channel}:{event['ts']}"
         self.store.atomic(lambda s: s.put("ledger_context", {"_id": message_id, "kind": "message", "member_id": member_id,
-            "channel": channel, "thread": thread, "text": text[:6000], "at": event["ts"], "expires_at": now() + timedelta(days=30)}))
+            "channel": channel, "thread": thread, "text": text[:6000], "at": event["ts"],
+            "participating": self.ledger.active(member_id), "consent_generation": (self.ledger.participant(member_id) or {}).get("consent_generation", 0),
+            "expires_at": now() + timedelta(days=30)}))
         from .conversations import self_progress_question
-        progress_request = self_progress_question(text)
+        progress_request = self.ledger.active(member_id) and self_progress_question(text)
         if not is_dm:
             from .engagement import Engagement
             Engagement(self.ledger).capture(member_id, message_id, "message", text, channel, datetime.fromtimestamp(float(event["ts"]), timezone.utc))
-        if addressed or continuing or progress_request:
+        question = "?" in text
+        if addressed or continuing or progress_request or question:
             def write(s):
-                s.put("ledger_context", {"_id": f"thread:{channel}:{thread}", "kind": "thread", "expires_at": now() + timedelta(days=30)})
                 enqueue(s, "ledger_outbox", f"reply:{channel}:{event['ts']}", "conversation", {"member_id": member_id, "channel": channel,
                         "thread": thread, "text": text[:6000], "message_id": message_id, "progress_request": progress_request,
-                        "use_tools": progress_request or bool(re.search(r"\b(shop|shops|tool|tools|clearances|volunteer|downtime)\b", text, re.I))})
+                        "exception": True, "participating": self.ledger.active(member_id),
+                        "consent_generation": (self.ledger.participant(member_id) or {}).get("consent_generation", 0),
+                        "ambient": not (addressed or continuing or progress_request),
+                        "use_tools": question or progress_request or bool(re.search(r"\b(shop|shops|tool|tools|clearances|volunteer|downtime|what|where|when|how|can|does|tell me about)\b", text, re.I))})
             self.store.atomic(write)
             return "reply_queued"
         return "ignored_unaddressed_channel_message"
@@ -463,7 +483,7 @@ class Worker:
         facts = {**facts, **self.identity_facts(member_id)}
         # Kudos and invitations must remain safe if participation changes after
         # composition; never include retained rank, XP, or skill projections.
-        if kind not in ("kudos", "invitation") and self.ledger.active(member_id):
+        if kind not in ("kudos", "invitation", "delivery") and self.ledger.active(member_id):
             participant = self.ledger.participant(member_id)
             facts["current_rank"] = self.ledger.presentation(participant["rank"])["name"]
             facts.setdefault("xp_total", participant["xp"])
@@ -555,7 +575,7 @@ class Worker:
             text = "The Ledger can observe new messages in registered Ledger channels, kudos issuance metadata, and verified volunteer activity. The System excludes DMs and original kudos text. Discretionary XP is capped at +13/−7 per member/day and +100 positive XP across the workspace/day. Suspected imitation gets a delivered warning before any repeat deduction. Preferences disable observation/discretionary XP or arrival mentions independently. Ask staff to review any decision."
             dm = self.slack.conversations_open(users=uid)["channel"]["id"]
             self.assert_live_job(job)
-            response = self.slack.chat_postMessage(channel=dm, text=text, blocks=[section(text), {"type": "actions", "elements": [button("Preferences", "preferences", "")]}], client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"])))
+            response = self.post_message(channel=dm, text=text, blocks=[section(text), {"type": "actions", "elements": [button("Preferences", "preferences", "")]}], client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"])))
             def notice_receipt(s):
                 d = Ledger(s, self.ledger.sources)
                 participant = d.participant(member_id)
@@ -599,51 +619,74 @@ class Worker:
                                           title=display["name"], channel=dm)
             return
         if kind == "conversation":
+            self.ledger.require_member(member_id)
+            if not p["channel"].startswith("D") and self.slack.conversations_info(channel=p["channel"])["channel"].get("is_member") is not True:
+                raise Denied("The Ledger is no longer in this channel.")
             request = self.store.get("ledger_context", p["message_id"])
             if not request:
                 raise Denied("The original request was deleted.")
-            context = [c for c in self.store.select("ledger_context", {"kind": "message", "channel": p["channel"], "thread": p["thread"]})
-                       if c["_id"] != p["message_id"] and self.ledger.active(c["member_id"])]
-            context.sort(key=lambda c: c["at"])
-            history = [{"role": "user", "content": f"Author {self.ledger.sources.slack_id(c['member_id'])}: {c['text'][:600]}"} for c in context[-6:]]
-            participant = self.ledger.participant(member_id)
-            facts = {"request": request["text"], "rank": self.ledger.presentation(participant["rank"])["name"], "xp": participant["xp"], "metrics": participant["metrics"]}
-            if p.get("use_tools"):
-                from .conversations import converse
-                current = self.store.get("ledger_outbox", job["_id"])
-                composed = current.get("composed")
-                if not composed:
-                    if not current.get("prompt_selection"):
-                        self.composer.refresh_matrix()
-                    def reserve_tools(s):
-                        saved = s.get("ledger_outbox", job["_id"])
-                        if saved.get("lease") != job["lease"] or saved["status"] != "working":
-                            raise Denied("Conversation was cancelled.")
-                        if not saved.get("prompt_selection"):
-                            scope = "member:" + member_id if p["channel"].startswith("D") else "shared"
-                            saved["prompt_selection"] = self.composer.reserve(s, "conversation", "member", scope)
-                            s.put("ledger_outbox", saved)
-                        return saved["prompt_selection"]
-                    selection = self.store.atomic(reserve_tools)
-                    composed = converse(self.ledger, self.composer, member_id, request["text"], history, p["channel"].startswith("D"), selection)
-                    composed.update(matrix_version=selection["matrix"]["version"], matrix_sha256=selection["matrix"]["sha256"],
-                        prompt_variation=(selection["template"].get("variations") or [{}])[0].get("id"), prompt_scope=selection["scope"])
-                    def save(s):
-                        saved = s.get("ledger_outbox", job["_id"])
-                        if saved.get("lease") != job["lease"] or saved["status"] != "working":
-                            raise Denied("Conversation was cancelled.")
-                        saved["composed"] = composed
+            query = {"kind": {"$in": ["message", "reply"]}, "channel": p["channel"]}
+            if not p["channel"].startswith("D"):
+                query["thread"] = p["thread"]
+            context = [c for c in self.store.select("ledger_context", query) if c["_id"] != p["message_id"]
+                       and (c["kind"] == "reply" or self.ledger.sources.permitted(c["member_id"]))]
+            from .conversations import restricted_answer
+            context = [c for c in context if not restricted_answer(self.ledger, member_id, c["text"])
+                       and (c["member_id"] != member_id or (c.get("consent_generation", 0) == p.get("consent_generation", 0)
+                            and c.get("participating", True) == p.get("participating", True)))]
+            context.sort(key=lambda c: float(c["at"]))
+            history = [{"role": "assistant" if c["kind"] == "reply" else "user", "content": c["text"][:600] if c["kind"] == "reply" else
+                       f"Author {self.ledger.sources.slack_id(c['member_id'])}: {c['text'][:600]}"} for c in context[-6:]]
+            from .conversations import converse
+            current = self.store.get("ledger_outbox", job["_id"])
+            composed = current.get("composed")
+            if not composed:
+                if not current.get("prompt_selection"):
+                    self.composer.refresh_matrix()
+                def reserve_tools(s):
+                    saved = s.get("ledger_outbox", job["_id"])
+                    if saved.get("lease") != job["lease"] or saved["status"] != "working":
+                        raise Denied("Conversation was cancelled.")
+                    if not saved.get("prompt_selection"):
+                        scope = "member:" + member_id if p["channel"].startswith("D") else "shared"
+                        audience = "member" if self.ledger.active(member_id) else "nonparticipant"
+                        saved["prompt_selection"] = self.composer.reserve(s, "conversation", audience, scope)
                         s.put("ledger_outbox", saved)
-                    self.store.atomic(save)
-            else:
-                composed = self.persist_composition(job, "conversation", "member", facts, history)
+                    return saved["prompt_selection"]
+                selection = self.store.atomic(reserve_tools)
+                composed = converse(self.ledger, self.composer, member_id, request["text"], history,
+                    p["channel"].startswith("D"), selection, use_tools=p.get("use_tools", False), ambient=p.get("ambient", False))
+                composed.update(matrix_version=selection["matrix"]["version"], matrix_sha256=selection["matrix"]["sha256"],
+                    prompt_variation=(selection["template"].get("variations") or [{}])[0].get("id"), prompt_scope=selection["scope"])
+                def save(s):
+                    saved = s.get("ledger_outbox", job["_id"])
+                    if saved.get("lease") != job["lease"] or saved["status"] != "working":
+                        raise Denied("Conversation was cancelled.")
+                    saved["composed"] = composed
+                    s.put("ledger_outbox", saved)
+                self.store.atomic(save)
             self.assert_live_job(job)
             latest_request = self.store.get("ledger_context", p["message_id"])
-            if not self.ledger.active(member_id) or not latest_request or latest_request["text"] != request["text"]:
+            self.ledger.require_member(member_id)
+            if (self.ledger.active(member_id) != p.get("participating", True) or
+                    (self.ledger.participant(member_id) or {}).get("consent_generation", 0) != p.get("consent_generation", 0) or
+                    not latest_request or latest_request["text"] != request["text"]):
                 raise Denied("Member opted out during generation.")
-            blocks = [section(composed["text"]), {"type": "actions", "elements": [button("Private progress detail", "progress", ""), button("Explore quests", "browse_quests", "")]}]
-            self.slack.chat_postMessage(channel=p["channel"], thread_ts=p["thread"], text=composed["text"], blocks=blocks,
+            if not composed["text"]:
+                return
+            from .conversations import restricted_answer
+            if restricted_answer(self.ledger, member_id, composed["text"]):
+                raise Denied("Rank visibility changed during generation.")
+            blocks = [section(composed["text"])]
+            elements = ([button("Private progress detail", "progress", ""), button("Explore quests", "browse_quests", "")] if self.ledger.active(member_id)
+                        else [button("Join The Ledger", "join", "")])
+            blocks.append({"type": "actions", "elements": elements})
+            response = self.post_message(channel=p["channel"], thread_ts=p["thread"], text=composed["text"], blocks=blocks,
                 client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"])))
+            self.store.atomic(lambda s: s.put("ledger_context", {"_id": f"reply:{p['channel']}:{response['ts']}", "kind": "reply",
+                "member_id": member_id, "channel": p["channel"], "thread": p["thread"], "text": composed["text"],
+                "participating": self.ledger.active(member_id), "consent_generation": p.get("consent_generation", 0),
+                "at": response["ts"], "expires_at": now() + timedelta(days=30)}))
             return
         audience, facts = p["audience"], p.get("facts", {})
         if p.get("ai_decision"):
@@ -680,7 +723,8 @@ class Worker:
             if not observe_allowed(self.ledger, member_id):
                 raise Denied("Observation preferences changed during generation.")
         channel = self.shared_channel() if audience == "shared" else self.slack.conversations_open(users=uid)["channel"]["id"]
-        visible = {k: v for k, v in facts.items() if k not in ("sponsor", "buddy", "submission")}
+        visible = ({"summary": facts["summary"]} if p["type"] == "delivery" and facts.get("delivery_status") else
+                   {k: v for k, v in facts.items() if k not in ("sponsor", "buddy", "submission")})
         canonical = "\n".join(([visible["summary"]] if visible.get("summary") else []) +
                               [f"{k.replace('_', ' ').title()}: {json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (list, dict)) else v}" for k, v in visible.items() if k != "summary"])
         if not canonical:
@@ -699,7 +743,7 @@ class Worker:
             blocks.append({"type": "actions", "elements": [button("Accept Success Buddy", "buddy_accept", facts["buddy"])]})
         if facts.get("explore_quests"):
             blocks.append({"type": "actions", "elements": [button("Explore quests", "browse_quests", "")]})
-        response = self.slack.chat_postMessage(channel=channel, text=composed["text"] + "\n" + canonical, blocks=blocks,
+        response = self.post_message(channel=channel, text=composed["text"] + "\n" + canonical, blocks=blocks,
                                    client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"])), unfurl_links=False, unfurl_media=False)
         if p.get("ai_decision") and audience == "member":
             def receipt(s):
@@ -727,25 +771,23 @@ class Worker:
         if not uid or not giver_uid:
             raise Denied("A linked human Slack identity is required.")
         public = p["audience"] == "shared"
-        if public and not self.ledger.active(giver):
-            raise Denied("Giver no longer participates; public delivery cancelled.")
+        self.ledger.require_member(giver)
         audience = "shared" if public else "recipient" if self.ledger.active(recipient) else "nonparticipant"
         composed = self.persist_composition(job, "kudos", audience, {"giver": giver_uid, "recipient": uid,
                     **self.identity_facts(giver, "giver"), **self.identity_facts(recipient, "recipient"),
                     "shop": e.get("shop_name"), "tool": e.get("tool_name")})
         self.assert_live_job(job)
-        if not self.ledger.sources.good_standing(recipient) or (public and not self.ledger.active(giver)):
+        self.ledger.require_member(giver)
+        if not self.ledger.sources.good_standing(recipient):
             raise Denied("Kudos delivery is no longer permitted.")
         identity = self.store.get("ledger_catalog", f"identity:{recipient}") or {}
         if identity.get("deactivated") or identity.get("bot"):
             raise Denied("Recipient identity is no longer active.")
-        giver_rank = self.ledger.presentation(self.ledger.participant(giver)["rank"])
-        recipient_rank = self.ledger.presentation(self.ledger.participant(recipient)["rank"]) if self.ledger.active(recipient) else None
-        header = f"{giver_rank['emoji']} <@{giver_uid}> → "
-        if recipient_rank:
-            header += recipient_rank["emoji"] + " "
-        header += f"<@{uid}>"
-        accessible = f"{giver_rank['name']} <@{giver_uid}> gives kudos to " + (recipient_rank["name"] + " " if recipient_rank else "") + f"<@{uid}>"
+        from .kudos import selected_emoji
+        emoji = selected_emoji(e.get("emoji"))
+        prefix = emoji + " " if emoji else ""
+        header = prefix + (f"<@{uid}> has received kudos from <@{giver_uid}>" if public else f"You have received kudos from <@{giver_uid}>")
+        accessible = header
         blocks = [section(header), section(composed["text"]), section(e["message"])]
         if e.get("shop_name"):
             blocks.append(section("Context: " + escape(e["shop_name"]) + (" / " + escape(e["tool_name"]) if e.get("tool_name") else "")))
@@ -753,7 +795,7 @@ class Worker:
             rel = self.store.get("ledger_relationships", f"sponsor:{recipient}") or {}
             blocks.append({"type": "actions", "elements": [button("Explore The Ledger and opt in", "join", rel.get("giver", giver))]})
         channel = self.shared_channel() if public else self.slack.conversations_open(users=uid)["channel"]["id"]
-        response = self.slack.chat_postMessage(channel=channel, text=accessible + "\n" + e["message"], blocks=blocks,
+        response = self.post_message(channel=channel, text=accessible + "\n" + e["message"], blocks=blocks,
             client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"])), unfurl_links=False, unfurl_media=False)
         def receipt(s):
             self.kudos_receipt(s, job, {"status": "delivered", "channel": channel, "ts": response["ts"], "at": now()})
@@ -766,12 +808,9 @@ class Worker:
             return
         e["deliveries"][audience] = receipt
         s.put("ledger_evidence", e)
-        destinations = [("recipient", "DM")] + ([("shared", "Ledge Chat")] if e["public"] else [])
-        statuses = [e["deliveries"].get(key, {}).get("status", "pending") for key, _ in destinations]
-        outcome = "delivered" if all(x == "delivered" for x in statuses) else "partial" if "delivered" in statuses else "pending" if "pending" in statuses else "failed" if "failed" in statuses else "cancelled"
-        summary = outcome + "; " + "; ".join(label + ": " + e["deliveries"].get(key, {}).get("status", "pending") for key, label in destinations)
-        summary += "; once-only XP result: " + ("17 XP awarded" if e["xp_awarded"] else "0 XP")
-        Ledger(s, self.ledger.sources).notify(e["giver"], "delivery", {"summary": summary}, f"receipt:{e['_id']}:{audience}:{receipt['status']}")
+        from .kudos import delivery_facts
+        ledger = Ledger(s, self.ledger.sources)
+        ledger.notify(e["giver"], "delivery", delivery_facts(ledger, e), f"receipt:{e['_id']}:{audience}:{receipt['status']}", exception=True)
 
     def deliver_project(self, job):
         p = job["payload"]
@@ -793,7 +832,7 @@ class Worker:
         channel = self.shared_channel()
         people = [project["owner"]] + [m for m in project["collaborators"] if m != project["owner"] and self.ledger.active(m)]
         credit = "Contributors: " + ", ".join(f"<@{self.ledger.sources.slack_id(m)}>" for m in people)
-        response = self.slack.chat_postMessage(channel=channel, thread_ts=project.get("thread_ts"),
+        response = self.post_message(channel=channel, thread_ts=project.get("thread_ts"),
             text=project["title"] + "\n" + credit + "\n" + update["description"], blocks=[section("*" + escape(project["title"]) + "*"), section(credit), section(composed["text"]), section(update["description"])],
             client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"])))
         def save_receipt(s):

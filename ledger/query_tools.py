@@ -14,8 +14,8 @@ from .sources import object_id, sid
 from .storage import now
 
 PROJECTIONS = {
-    "shops": ["name", "disabled"],
-    "tools": ["name", "shop_id", "prerequisite_ids", "open", "out_of_service", "disabled"],
+    "shops": ["name", "disabled", "wiki_url", "out_of_service", "out_of_service_note"],
+    "tools": ["name", "description", "wiki_url", "shop_id", "prerequisite_ids", "open", "out_of_service", "disabled"],
     "tool_checkouts": ["tool_id", "checked_out_at"],
     "volunteer_tasks": ["title", "description", "shop_id", "status", "prerequisite_tool_ids", "next_available", "days"],
     "volunteer_events": ["title", "description", "shop_id", "status", "event_date", "prerequisite_tool_ids"],
@@ -51,11 +51,13 @@ class QueryTools:
         if self.calls > 3 or time.monotonic() - self.started >= 30:
             raise ValueError("The Ledger query budget is exhausted.")
         with timeout(max(0.001, 30 - (time.monotonic() - self.started))):
-            self.l.require(self.member)
+            self.l.require_member(self.member)
             if name == "my_progress":
+                self.l.require(self.member)
                 if arguments != {}:
                     raise ValueError("Progress accepts no member IDs or arguments.")
                 facts = progress(self.l, self.member)
+                facts.pop("next_rank", None)  # Next requirements are visible, future names are not.
                 if not self.private:
                     facts.pop("blockers", None)
                 return facts
@@ -69,6 +71,9 @@ class QueryTools:
         collection = args.get("collection")
         if not isinstance(collection, str) or collection not in PROJECTIONS:
             raise ValueError("Choose an enabled query collection.")
+        self.l.require_member(self.member)
+        if not self.l.active(self.member) and collection not in ("shops", "tools"):
+            raise Denied("Join The Ledger before using personal game queries.")
         search = args.get("search", "")
         limit = args.get("limit", 10)
         if not isinstance(search, str) or len(search) > 100 or type(limit) is not int or not 1 <= limit <= 25:
@@ -139,8 +144,9 @@ class QueryTools:
             truncated = len(rows) > limit
             rows = rows[:limit]
             for r in rows:
-                for field in ("name", "title", "description"):
+                for field in ("name", "title", "description", "wiki_url", "out_of_service_note"):
                     if isinstance(r.get(field), str):
+                        truncated = truncated or len(r[field]) > 400
                         r[field] = r[field][:400]
                 if collection == "volunteer_events":
                     r["schedule"] = "unscheduled" if not r.get("event_date") else r["event_date"].date().isoformat()

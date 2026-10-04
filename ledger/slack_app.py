@@ -80,6 +80,8 @@ class SlackUI:
                 self.ledger.staff(actor)
             else:
                 self.ledger.admin(actor)
+        elif command == "/kudos":
+            self.ledger.require_member(actor)
         else:
             self.ledger.require(actor)
         if command == "/kudos":
@@ -217,6 +219,8 @@ class SlackUI:
             self.ledger.admin(actor)
         elif callback in ("member_quest_review", "delegate_grant", "delegate_revoke_submit"):
             pass  # Domain methods recheck current grants/scope transactionally.
+        elif callback in ("kudos_recipient", "kudos_send"):
+            self.ledger.require_member(actor)
         else:
             self.ledger.require(actor)
         if callback == "preferences_save":
@@ -268,13 +272,14 @@ class SlackUI:
             try:
                 result = self.ledger.kudos(actor, meta["recipient"], data.get("message", ""), key=meta["key"],
                     shop=data.get("shop"), tool=data.get("tool"), public=data.get("public", False),
-                    invite=data.get("invitation") == "yes", expected_participation=meta["participating"])
+                    invite=data.get("invitation") == "yes", expected_participation=meta["participating"], emoji=data.get("emoji"))
             except ConsentChanged:
                 data.pop("invitation", None)
                 return {"response_action": "update", "view": views.kudos_form(self.ledger, meta["recipient"], meta["key"], data)}
+            from .kudos import delivery_facts
             self.ledger.store.atomic(lambda s: enqueue(s, "ledger_outbox", f"ack:{result['_id']}", "message", {
-                "member_id": actor, "type": "delivery", "audience": "member", "facts": {"summary": "Kudos accepted; DM: queued" +
-                    ("; Ledge Chat: queued" if result["public"] else "") + "; once-only XP result: " + ("17 XP awarded" if result["xp_awarded"] else "0 XP")}}))
+                "member_id": actor, "type": "delivery", "audience": "member", "exception": True, "peer_kudos": True,
+                "facts": delivery_facts(self.ledger, result, acknowledged=True)}))
         elif callback == "ranks_preview":
             ranks = []
             for i in range(1, 8):
@@ -325,7 +330,10 @@ class SlackUI:
             return self.ledger.acknowledge(actor, value)
         if name == "delegate_revoke":
             return self.open(client, body, views.modal("delegate_revoke_submit", "Revoke review grant", [views.text_input("reason", "Required reason", multiline=True)], {"grant": value}, "Revoke"))
-        self.ledger.require(actor)
+        if name in ("shop", "kudos_change") and body.get("view", {}).get("callback_id") == "kudos_send":
+            self.ledger.require_member(actor)
+        else:
+            self.ledger.require(actor)
         if name in ("stats", "progress", "achievements", "preferences", "browse_quests", "quest_author"):
             fn = {"stats": views.character_sheet, "progress": views.progress_view, "achievements": views.achievements,
                   "preferences": views.preferences, "browse_quests": views.quest_browser, "quest_author": views.quest_author}[name]
@@ -391,7 +399,10 @@ class SlackUI:
             return {"options": [views.option(self.ledger.sources.slack_id(p["member_id"]) or "Member", p["member_id"])
                 for p in self.ledger.store.select("ledger_participants", {"opted_in": True}) if p["member_id"] != actor and self.ledger.active(p["member_id"])
                 and self.ledger.sources.good_standing(p["member_id"]) and search in (self.ledger.sources.slack_id(p["member_id"]) or "").casefold()][:100]}
-        self.ledger.require(actor)
+        if name in ("recipient", "shop", "tool") and body.get("view", {}).get("callback_id") in ("kudos_recipient", "kudos_send"):
+            self.ledger.require_member(actor)
+        else:
+            self.ledger.require(actor)
         if name == "quest_selection":
             from .quests import Quests
             return {"options": [views.option(title, key) for key, title in Quests(self.ledger).options(actor, search)]}

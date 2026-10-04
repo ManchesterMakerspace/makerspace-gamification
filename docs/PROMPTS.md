@@ -65,6 +65,10 @@ Placeholders work in **both** `system` and `user`. String values are inserted as
 | `project_title`, `quest_title` | Title when the originating project/quest notification supplies one |
 | `giver_full_name`, `giver_slack_id` | Kudos giver's projected name and validated Slack mapping |
 | `recipient_full_name`, `recipient_slack_id` | Kudos recipient's projected name and validated Slack mapping |
+| `recipient_mention` | Validated kudos recipient Slack mention, including sender delivery acknowledgments and receipts |
+| `delivery_status` | Recorded overall kudos delivery result: queued, pending, partial, delivered, failed or cancelled |
+| `dm_status`, `public_status` | Recorded destination status; public status is `not requested` when sharing is off |
+| `xp_result` | Once-only kudos XP result: `17 XP awarded` or `0 XP`; a receipt never awards XP again |
 | `sponsor_full_name`, `sponsor_slack_id` | Invitation sponsor's projected name and validated Slack mapping |
 | `summary` | Application-authored summary, when supplied by the originating message |
 | `message_type`, `audience` | Current routing type and audience |
@@ -100,3 +104,7 @@ For example, `/ledger-admin template-library rank_up shared` adopts the shared r
 Existing database versions with a single `system`/`prompt` pair remain readable as one `legacy` variation; they are not silently overwritten. Adopt the library to enable its packaged voices for those overrides. Database version IDs identify published configurations; library-adoption records also retain the source file digest. Original event/audit rank labels stay historical even when current names are used in newly composed text.
 
 The five completion files `shop_complete`, `rank_up`, `quest`, `volunteer_credit`, and `develop_mentor` are version 2 with five paired variations. New Achievement framing applies only to verified completion, never acceptance, pending evidence, or corrections. Original System humor uses absurd titles, bureaucracy, and short grounded punchlines. All member-facing model text uses The Ledger/The System; original member-authored content is preserved. `delivery.json` remains the source of varied kudos acknowledgments/receipts; deterministic delivery facts include the once-only XP result.
+
+`delivery.json` version 2 also supplies recipient-aware variations for DMs to kudos senders. A confirmed DM may say "The delivery to <RECIPIENT> was successful," using `{recipient_mention}`; queued acknowledgments and partial/failed/cancelled receipts use their recorded statuses instead. Public-post status is independent, and delivery does not confirm reading. Recipient identity and receipt metadata are supplied without the original kudos body or personal rank/XP totals. The exact receipt facts remain visible below the varied text, even when generation falls back.
+
+Customize these DMs with `/ledger-admin template delivery member`, or adopt the updated file using `/ledger-admin template-library delivery member`. Preview with `/ledger-admin template-test delivery member`. Stable paired voice IDs share the sender's existing DM history; reserved prompts and saved text survive retries without rerolling. Existing database overrides require explicit publication to adopt version 2.

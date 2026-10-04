@@ -213,11 +213,13 @@ def test_signed_consent_submission_saves_before_success_response(env):
     ('DU1', 'message', 'Help me choose a first build', 'reply_queued'),
     ('CCHAT', 'app_mention', '<@UBOT> Help me choose a first build', 'reply_queued'),
     ('CCHAT', 'message', 'Chatting with another maker', 'ignored_unaddressed_channel_message'),
-    ('COTHER', 'app_mention', '<@UBOT> Hello', 'ignored_unregistered_channel'),
+    ('COTHER', 'app_mention', '<@UBOT> Hello', 'ignored_unjoined_channel'),
 ])
 def test_signed_chat_flows_through_accounting_and_delivery(joined, caplog, channel, event_type, text, outcome):
     from ledger.worker import Worker
     ledger, store, _, composer, api, slack = joined
+    if channel == 'COTHER':
+        slack.conversations_info.return_value = {'channel': {'is_member': False}}
     app = HTTPApp(build_app(SlackUI(ledger, composer), 'xoxb-test', 'test-signing-secret', 'T1', 'UBOT', WebClient(token='xoxb-test')), store)
     payload = {'type': 'event_callback', 'team_id': 'T1', 'event_id': 'EvChat', 'event': {
         'type': event_type, 'user': 'U1', 'channel': channel, 'text': text, 'ts': '100.001'}}

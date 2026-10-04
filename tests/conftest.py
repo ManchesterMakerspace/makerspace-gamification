@@ -40,6 +40,7 @@ def env():
     slack.conversations_open.side_effect = lambda users: {"channel": {"id": "D" + users}}
     slack.chat_postMessage.return_value = {"ts": "123.456"}
     slack.conversations_members.return_value = {"members": [], "response_metadata": {}}
+    slack.conversations_info.return_value = {"channel": {"is_member": True}}
     slack.chat_getPermalink.return_value = {"permalink": "https://example.slack.com/archives/thread"}
     return ledger, store, source, Composer(store, api), api, slack
 

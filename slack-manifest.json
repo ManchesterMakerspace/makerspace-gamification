@@ -69,6 +69,8 @@
       "bot": [
         "app_mentions:read",
         "chat:write",
+        "channels:read",
+        "channels:history",
         "commands",
         "groups:history",
         "groups:read",
@@ -86,6 +88,7 @@
       "bot_events": [
         "app_home_opened",
         "app_mention",
+        "message.channels",
         "message.groups",
         "message.im",
         "member_joined_channel",
