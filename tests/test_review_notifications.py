@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import timedelta
 from itertools import count
 from threading import Event
+from unittest.mock import patch
 
 import pytest
 from slack_sdk.errors import SlackApiError
@@ -53,6 +54,52 @@ def slack_error(code, status=200):
     response = SlackResponse(client=None, http_verb='POST', api_url='https://slack.com/api/chat.update',
         req_args={}, data={'ok': False, 'error': code}, headers={}, status_code=status)
     return SlackApiError(code, response)
+
+
+@pytest.mark.parametrize('configured', [True, False])
+@pytest.mark.parametrize('collection,kind', [('ledger_quests', None), ('ledger_relationships', 'quest_project')])
+@pytest.mark.parametrize('fields', [{}, {'contributions': None}, {'contributions': []},
+                                  {'contributions': 'invalid'}, {'contributions': {'invalid-member': None}}])
+def test_malformed_contributions_preserve_record_without_review_work(reviews, monkeypatch, configured, collection, kind, fields):
+    _, store, _, _, _, slack = reviews
+    if not configured:
+        monkeypatch.delenv('LEDGER_QUEST_REVIEW_CHANNEL_ID')
+    doc = {'_id': 'legacy-malformed', 'kind': kind, 'status': 'open', **deepcopy(fields)}
+    store.put(collection, doc)
+    assert store.get(collection, doc['_id']) == doc
+    assert not store.legacy_review_channels(collection, 'CREVIEW')
+    reconcile(store)
+    drain(reviews)
+    assert not store.select('ledger_outbox', {'kind': 'review_notice'})
+    slack.chat_postMessage.assert_not_called()
+
+
+@pytest.mark.parametrize('collection,kind', [('ledger_quests', None), ('ledger_relationships', 'quest_project')])
+def test_valid_contribution_notice_survives_malformed_sibling(reviews, collection, kind):
+    _, store, _, _, _, slack = reviews
+    store.put(collection, {'_id': 'mixed-contributions', 'kind': kind, 'status': 'open',
+        'contributions': {'invalid-member': None, member(1): {'status': 'pending', 'description': 'Working cabinet.'}}})
+    drain(reviews)
+    saved = store.get(collection, 'mixed-contributions')['contributions']
+    assert saved['invalid-member'] is None
+    assert saved[member(1)]['review_message_ts'] == '100.1'
+    slack.chat_postMessage.assert_called_once()
+    assert 'Working cabinet.' in slack.chat_postMessage.call_args.kwargs['text']
+
+
+def test_legacy_channel_lookup_preserves_existing_addresses_with_notices_disabled(reviews, monkeypatch):
+    _, store, *_ = reviews
+    monkeypatch.delenv('LEDGER_QUEST_REVIEW_CHANNEL_ID')
+    for key, fields in (
+        ('legacy-channel', {'contributions': {member(1): {'review_channel_id': 'COLD'}}}),
+        ('legacy-current', {'contributions': {member(1): {'review_channel_id': 'CNEW'}}}),
+        ('indexed-parent', {'review_notice_channel': 'CNEW', 'contributions': {member(1): {'review_channel_id': 'COLD'}}}),
+        ('no-contributions', {}), ('null-contributions', {'contributions': None}),
+        ('list-contributions', {'contributions': []})):
+        store.put('ledger_quests', {'_id': key, 'status': 'completed'})
+        store.put('ledger_quests', {'_id': key, 'status': 'completed', **fields})
+    assert store.get('ledger_quests', 'legacy-channel')['contributions'][member(1)]['review_channel_id'] == 'COLD'
+    assert {row['_id'] for row in store.legacy_review_channels('ledger_quests', 'CNEW')} == {'legacy-channel'}
 
 
 @pytest.mark.parametrize('approve', [True, False])
@@ -169,6 +216,33 @@ def test_group_contribution_has_its_own_saved_ts_and_verified_update(reviews):
     assert 'verified' in slack.chat_update.call_args.kwargs['text']
 
 
+def test_reconciliation_recovers_legacy_closed_nested_notices(reviews, monkeypatch):
+    l, s, src, _, _, slack = reviews
+    src.data['volunteer_tasks'].append({'_id': oid(900), 'title': 'Build arcade'})
+    service = Community(l)
+    q = service.create_quest(member(10), 'Build arcade', 'Working cabinet', ['wood', 'electronics'], member(900))
+    service.quest(member(1), q['_id'], 'join', role='wood')
+    service.quest(member(1), q['_id'], 'submit', description='Built the cabinet.')
+    drain(reviews)
+    current = s.get('ledger_quests', q['_id'])
+    current.update(status='disabled', disable_reason='Closed project.')
+    s.put('ledger_quests', current)
+    drain(reviews)
+    # Before the parent marker existed only contributions carried addresses.
+    s.data['ledger_quests'][q['_id']].pop('review_notice_channel')
+    monkeypatch.setenv('LEDGER_QUEST_REVIEW_CHANNEL_ID', 'CNEWREVIEW')
+    reconcile(s)
+    drain(reviews)
+    current = s.get('ledger_quests', q['_id'])
+    assert current['contributions'][member(1)]['review_channel_id'] == 'CNEWREVIEW'
+    assert current['review_notice_channel'] == 'CNEWREVIEW'
+    assert 'closed' in slack.chat_postMessage.call_args.kwargs['text']
+    assert slack.chat_postMessage.call_count == 2
+    with patch.object(s, 'atomic', wraps=s.atomic) as transactions:
+        reconcile(s)
+        transactions.assert_not_called()
+
+
 def test_mentoring_acknowledgments_refresh_pending_message_without_new_post(reviews):
     l, s, _, _, _, slack = reviews
     doc = pending(reviews, catalog='mentoring-session', learners=[member(2)])
@@ -229,6 +303,59 @@ def test_backfill_after_configuration_and_terminal_failure_retry(reviews, monkey
     drain(reviews)
     slack.chat_postMessage.assert_called_once()
     assert s.get('ledger_evidence', doc['_id'])['review_message_ts'] == '100.1'
+
+
+def test_reconciliation_does_not_scan_or_rewrite_settled_history(reviews, monkeypatch):
+    l, s, *_ = reviews
+    doc = pending(reviews)
+    drain(reviews)
+    l.review(member(10), doc['_id'], False, 'Closed review')
+    drain(reviews)
+    monkeypatch.delenv('LEDGER_QUEST_REVIEW_CHANNEL_ID')
+    for i in range(100):
+        s.put('ledger_evidence', {'_id': f'historical-{i}', 'kind': 'submission', 'status': 'approved', 'description': 'Old evidence'})
+    monkeypatch.setenv('LEDGER_QUEST_REVIEW_CHANNEL_ID', 'CREVIEW')
+    with patch.object(s, 'select', wraps=s.select) as selects, patch.object(s, 'atomic', wraps=s.atomic) as transactions:
+        reconcile(s)
+    assert transactions.call_count == 0
+    assert all(call.args[1] or call.kwargs.get('query') for call in selects.call_args_list)
+
+
+def test_reconciliation_refreshes_closed_notices_after_channel_change(reviews, monkeypatch):
+    l, s, _, _, _, slack = reviews
+    doc = pending(reviews)
+    drain(reviews)
+    l.review(member(10), doc['_id'], False, 'Closed review')
+    drain(reviews)
+    monkeypatch.setenv('LEDGER_QUEST_REVIEW_CHANNEL_ID', 'CNEWREVIEW')
+    reconcile(s)
+    drain(reviews)
+    assert s.get('ledger_evidence', doc['_id'])['review_channel_id'] == 'CNEWREVIEW'
+    assert slack.chat_postMessage.call_count == 2
+    with patch.object(s, 'atomic', wraps=s.atomic) as transactions:
+        reconcile(s)
+    assert transactions.call_count == 0
+
+
+@pytest.mark.parametrize('approve', [True, False])
+def test_closed_notice_recovers_when_same_channel_configuration_returns(reviews, monkeypatch, approve):
+    l, s, _, _, _, slack = reviews
+    doc = pending(reviews)
+    drain(reviews)
+    monkeypatch.delenv('LEDGER_QUEST_REVIEW_CHANNEL_ID')
+    l.review(member(10), doc['_id'], approve, 'Reviewed while notices were disabled.')
+    assert s.get('ledger_evidence', doc['_id'])['review_notice_dirty'] is True
+    assert not s.select('ledger_outbox', {'kind': 'review_notice', 'status': 'pending'})
+    monkeypatch.setenv('LEDGER_QUEST_REVIEW_CHANNEL_ID', 'CREVIEW')
+    reconcile(s)
+    drain(reviews)
+    assert ('approved' if approve else 'rejected') in slack.chat_update.call_args.kwargs['text']
+    assert slack.chat_update.call_args.kwargs['ts'] == '100.1'
+    assert 'review_notice_dirty' not in s.get('ledger_evidence', doc['_id'])
+    slack.chat_postMessage.assert_called_once()
+    with patch.object(s, 'atomic', wraps=s.atomic) as transactions:
+        reconcile(s)
+        transactions.assert_not_called()
 
 
 @pytest.mark.parametrize('info', [{'is_private': False}, {'is_private': True, 'is_ext_shared': True}, {'is_private': True, 'is_member': False}])

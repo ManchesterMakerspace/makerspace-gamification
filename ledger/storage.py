@@ -33,6 +33,18 @@ class MongoStore:
     def select(self, collection, query=None):
         return list(self.db[owned(collection)].find(query or {}, session=self.session))
 
+    def legacy_review_channels(self, collection, destination):
+        """Select old parents with mismatched addresses in dynamic contribution keys."""
+        address = {"$ifNull": ["$$contribution.v.review_channel_id", None]}
+        contributions = {"$cond": [{"$eq": [{"$type": "$contributions"}, "object"]}, "$contributions", {}]}
+        mismatched = {"$map": {"input": {"$objectToArray": contributions}, "as": "contribution",
+            "in": {"$and": [{"$ne": [address, None]}, {"$ne": [address, destination]}]}}}
+        query = {"review_notice_channel": None, "contributions": {"$type": "object"},
+                 "$expr": {"$anyElementTrue": [mismatched]}}
+        if collection == "ledger_relationships":
+            query["kind"] = "quest_project"
+        return self.select(collection, query)
+
     def put(self, collection, doc):
         from .review_notifications import prepare, watched
         if watched(collection):
@@ -82,6 +94,12 @@ class MongoStore:
         self.db.ledger_participants.create_index("member_id", unique=True)
         self.db.ledger_inbox.create_index([("status", 1), ("available_at", 1)])
         self.db.ledger_outbox.create_index([("status", 1), ("available_at", 1)])
+        self.db.ledger_outbox.create_index([("kind", 1), ("status", 1), ("review_reconcile_resolved", 1)])
+        for collection in ("ledger_evidence", "ledger_quests", "ledger_relationships"):
+            self.db[collection].create_index("review_notice_channel")
+            self.db[collection].create_index("review_channel_id")
+            self.db[collection].create_index("review_notice_dirty")
+        self.db.ledger_quests.create_index("status")
         self.db.ledger_evidence.create_index([("recipient", 1), ("kind", 1)])
         self.db.ledger_evidence.create_index([("recipient", 1), ("kind", 1), ("day", 1), ("xp_awarded", 1)])
         self.db.ledger_evidence.create_index([("recipient", 1), ("giver", 1), ("week", 1), ("xp_awarded", 1)])
@@ -113,6 +131,8 @@ def matches(doc, query):
         actual = doc.get(key)
         if isinstance(val, dict):
             for op, target in val.items():
+                if op == "$exists" and (key in doc) != bool(target):
+                    return False
                 if op == "$in" and actual not in target:
                     return False
                 if op == "$nin" and actual in target:
@@ -140,6 +160,15 @@ class MemoryStore:
 
     def select(self, collection, query=None):
         return [deepcopy(x) for x in self.data.get(owned(collection), {}).values() if matches(x, query or {})]
+
+    def legacy_review_channels(self, collection, destination):
+        query = {"review_notice_channel": None, "contributions": {"$exists": True}}
+        if collection == "ledger_relationships":
+            query["kind"] = "quest_project"
+        return [doc for doc in self.select(collection, query)
+                if isinstance(doc.get("contributions"), dict) and any(
+                    isinstance(c, dict) and c.get("review_channel_id") not in (None, destination)
+                    for c in doc["contributions"].values())]
 
     def put(self, collection, doc):
         from .review_notifications import prepare, watched

@@ -26,12 +26,17 @@ def channel_id():
 
 
 def watched(collection):
-    return bool(channel_id() and collection in COLLECTIONS)
+    # Preserve notice addresses and closure recovery through configuration gaps.
+    return collection in COLLECTIONS
 
 
 def activities(store, collection, doc):
     """Yield activity locators, mutable field owners, and bounded review facts."""
     kind = doc.get("kind")
+    raw_contributions = doc.get("contributions")
+    # Sparse legacy records are data, not evidence of a reviewable contribution.
+    contributions = {m: c for m, c in (raw_contributions.items() if isinstance(raw_contributions, dict) else ())
+                     if isinstance(c, dict)}
     if collection == "ledger_evidence" and kind in ("submission", "quest_submission"):
         if doc.get("quest_link"):
             return  # The top-level quest submission owns its specialized review.
@@ -54,7 +59,7 @@ def activities(store, collection, doc):
         parent = doc
     elif collection == "ledger_relationships" and kind == "quest_project":
         parent = store.get("ledger_quests", doc.get("quest_revision")) or {}
-        verified = [c for c in doc.get("contributions", {}).values() if c.get("status") == "verified"]
+        verified = [c for c in contributions.values() if c.get("status") == "verified"]
         ready = len(verified) >= 2 and {d["name"] for d in parent.get("disciplines", [])} <= {c.get("role") for c in verified}
         status = "pending_completion" if doc.get("status") == "open" and ready else doc.get("status")
         yield None, doc, {"type": "Shared project completion", "title": parent.get("title", "Quest"),
@@ -63,7 +68,7 @@ def activities(store, collection, doc):
             "member": None, "reviewer": doc.get("reviewer"), "reason": doc.get("disable_reason", "")}
     else:
         return
-    for member, contribution in doc.get("contributions", {}).items():
+    for member, contribution in contributions.items():
         status = contribution.get("status")
         if doc.get("status") not in ("open", "completed") or parent.get("status") in ("disabled", "withdrawn", "rejected"):
             status = "closed"
@@ -79,9 +84,20 @@ def fingerprint(facts, destination=None):
     return hashlib.sha256(json.dumps({"channel": channel_id() if destination is None else destination, **facts}, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def needs_refresh(store, owner, facts, was_pending=False):
+    if not (facts["pending"] or was_pending or owner.get("review_notice_job_id") or owner.get("review_message_ts")):
+        return False
+    current = fingerprint(facts)
+    if owner.get("review_message_fingerprint") == current and owner.get("review_channel_id") == channel_id():
+        return False
+    job = store.get("ledger_outbox", owner.get("review_notice_job_id")) if owner.get("review_notice_job_id") else None
+    return not (owner.get("review_notice_fingerprint") == current and job and job["status"] in ("pending", "working"))
+
+
 def prepare(store, collection, doc, previous):
     """Called by owned-store puts inside their transaction; never calls Slack or AI."""
     old = {path: (owner, facts) for path, owner, facts in activities(store, collection, previous or {})}
+    tracked = False
     for path, owner, facts in activities(store, collection, doc):
         prior, before = old.get(path, ({}, {}))
         if previous is None:
@@ -94,19 +110,27 @@ def prepare(store, collection, doc, previous):
             for field in FIELDS[:-2]:
                 if field not in owner and field in prior:
                     owner[field] = prior[field]
-        if not (facts["pending"] or before.get("pending") or owner.get("review_notice_job_id") or owner.get("review_message_ts")):
+        tracked |= bool(facts["pending"] or before.get("pending") or owner.get("review_notice_job_id") or owner.get("review_message_ts"))
+        if not channel_id():
+            if owner.get("review_notice_job_id") or owner.get("review_message_ts"):
+                doc["review_notice_dirty"] = True
+            continue
+        if not needs_refresh(store, owner, facts, before.get("pending", False)):
             continue
         current = fingerprint(facts)
-        if owner.get("review_message_fingerprint") == current and owner.get("review_channel_id") == channel_id():
-            continue
-        job = store.get("ledger_outbox", owner.get("review_notice_job_id")) if owner.get("review_notice_job_id") else None
-        if owner.get("review_notice_fingerprint") == current and job and job["status"] in ("pending", "working"):
-            continue
         key = ("quest-review-notice:" + doc["generation_id"].removeprefix("quest-generation:")
                if previous is None and collection == "ledger_quests" and doc.get("generation_id")
                else "review-notice:" + str(uuid4()))
         owner.update(review_notice_job_id=key, review_notice_fingerprint=current)
         enqueue(store, "ledger_outbox", key, "review_notice", {"collection": collection, "activity_id": doc["_id"], "contributor": path})
+    if not channel_id():
+        return
+    doc.pop("review_notice_dirty", None)
+    if tracked:
+        # One indexed parent field also covers dynamically keyed contributions.
+        doc["review_notice_channel"] = channel_id()
+    else:
+        doc.pop("review_notice_channel", None)
 
 
 def locate(store, payload):
@@ -125,15 +149,44 @@ def reconcile(store):
     """Backfill pending activities and retry terminal failures after configuration changes."""
     if not channel_id():
         return
+    pending = {
+        "ledger_evidence": [{"kind": {"$in": ["submission", "quest_submission"]}, "status": "pending"}],
+        "ledger_quests": [{"kind": {"$in": list(REVIEWED_KINDS)}, "status": "pending_review"}, {"status": "open"}],
+        "ledger_relationships": [{"kind": "quest_project", "status": "open"}],
+    }
+    def refresh(collection, key):
+        current = store.get(collection, key)
+        if not current or not (current.get("review_notice_dirty") or any(
+                needs_refresh(store, owner, facts) for _, owner, facts in activities(store, collection, current))):
+            return
+        def run(s):
+            live = s.get(collection, key)
+            if live and (live.get("review_notice_dirty") or any(
+                    needs_refresh(s, owner, facts) for _, owner, facts in activities(s, collection, live))):
+                s.put(collection, live)
+        store.atomic(run)
     for collection in COLLECTIONS:
-        for doc in store.select(collection):
-            if not list(activities(store, collection, doc)):
-                continue
-            def refresh(s):
-                current = s.get(collection, doc["_id"])
-                if current:
-                    s.put(collection, current)
-            store.atomic(refresh)
+        changed_channel = [{field: {"$exists": True, "$nin": [None, channel_id()]}}
+                           for field in ("review_notice_channel", "review_channel_id")]
+        for doc in store.select(collection, {"$or": pending[collection] + changed_channel + [{"review_notice_dirty": True}]}):
+            refresh(collection, doc["_id"])
+        if collection != "ledger_evidence":
+            for doc in store.legacy_review_channels(collection, channel_id()):
+                refresh(collection, doc["_id"])
+    for job in store.select("ledger_outbox", {"kind": {"$in": ["review_notice", "quest_review_notice"]},
+            "status": {"$in": ["failed", "cancelled"]}, "review_reconcile_resolved": {"$ne": True}}):
+        payload = job["payload"]
+        collection, key = (("ledger_quests", payload["quest_id"]) if job["kind"] == "quest_review_notice"
+                           else (payload["collection"], payload["activity_id"]))
+        if collection in COLLECTIONS:
+            refresh(collection, key)
+        # Terminal jobs stay auditable without re-reading resolved failures forever.
+        def resolved(s):
+            live = s.get("ledger_outbox", job["_id"])
+            if live and live["status"] in ("failed", "cancelled"):
+                live["review_reconcile_resolved"] = True
+                s.put("ledger_outbox", live)
+        store.atomic(resolved)
 
 
 def render(payload, facts):

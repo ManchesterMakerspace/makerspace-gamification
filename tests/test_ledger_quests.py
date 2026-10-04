@@ -47,6 +47,42 @@ def test_human_review_edits_preserve_original_and_immutable_published_revision(j
         service.review(str(oid(10)), published["_id"], 123, edits=before)
 
 
+@pytest.mark.parametrize('scope,capability,contributor,visible', [
+    ({'kind': 'global'}, 'quest_complete', False, True),
+    ({'kind': 'quest', 'quest': 'ledger-proposal'}, 'quest_complete', False, True),
+    ({'kind': 'shops', 'shops': [str(oid(201))]}, 'quest_complete', False, True),
+    ({'kind': 'shops', 'shops': [str(oid(202))]}, 'quest_complete', False, False),
+    ({'kind': 'global'}, 'learning_review', False, False),
+    ({'kind': 'global'}, 'quest_complete', True, False)])
+def test_delegated_review_queue_discovers_only_authorized_cooperative_work(joined, scope, capability, contributor, visible):
+    l, s, _, composer, _, slack = joined
+    l.join(str(oid(3)))
+    service = LedgerQuests(l)
+    q = service.review(str(oid(10)), pending(joined, 'cooperative', shops=[str(oid(201))])['_id'], 100)
+    Authority(l).grant(str(oid(10)), str(oid(3)), [capability], scope, 'Discover authorized shared reviews')
+    for member, role in ((1, 'Design'), (2, 'Fabrication')):
+        service.contribute(str(oid(member)), q['_id'], 'join', role=role)
+        service.contribute(str(oid(member)), q['_id'], 'submit', description='Observable contribution evidence')
+    if contributor:
+        service.contribute(str(oid(3)), q['_id'], 'join', role='Design')
+    worker = Worker(l, composer, slack)
+    worker.admin_command(str(oid(3)), ['review'], 'pending-queue')
+    summary = s.get('ledger_outbox', 'dm:pending-queue')['payload']['facts']['summary']
+    assert ('Cooperative contribution:' in summary) == visible
+    assert ('verify-quest ' + q['_id'] + ' <@U1>') in summary if visible else q['_id'] not in summary
+    assert 'Shared project ready:' not in summary
+    for member in (1, 2):
+        service.contribute(str(oid(10)), q['_id'], 'verify', member=str(oid(member)))
+    worker.admin_command(str(oid(3)), ['review'], 'ready-queue')
+    summary = s.get('ledger_outbox', 'dm:ready-queue')['payload']['facts']['summary']
+    assert ('Shared project ready:' in summary) == visible
+    assert 'Cooperative contribution:' not in summary
+    if visible:
+        assert '/ledger-admin complete-quest ' + q['_id'] in summary
+    assert not any(j['payload'].get('member_id') == str(oid(3))
+                   for j in s.select('ledger_outbox', {'kind': 'review_channel_invite'}))
+
+
 def test_review_rechecks_authority_rank_resources_and_edited_scope(joined):
     l, s, src, *_ = joined
     q = pending(joined, shops=[str(oid(201))])

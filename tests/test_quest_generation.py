@@ -508,8 +508,64 @@ def test_short_excerpt_matches_whole_words_and_allows_paraphrase(generator):
     assert g.compose(snapshot, 'individual') == good
 
 
+@pytest.mark.parametrize('source', ['title', 'description', 'criteria', 'outcome', 'discipline_name', 'discipline_expectation', 'legacy_discipline'])
+@pytest.mark.parametrize('target', [1, 6])
+def test_completed_example_prose_cannot_be_copied_into_any_proposal_field(generator, source, target):
+    g, (_, _, _, _, api, _) = generator
+    snapshot = g.context(1, random.Random(1), now())
+    excerpt = 'Measure eccentric offsets against the purple reference stop.'
+    example = {'ref': 'completed', 'target_rank': target, 'disciplines': []}
+    if source.startswith('discipline_'):
+        example['disciplines'] = [{source.removeprefix('discipline_'): excerpt}]
+    elif source == 'legacy_discipline':
+        example['disciplines'] = [excerpt]
+    else:
+        example[source] = excerpt
+    snapshot['data']['completed_examples'] = [example]
+    bad = {**proposal(), 'criteria': excerpt.upper()}
+    api.quest_response.return_value = json.dumps(bad)
+    with pytest.raises(ValueError, match='repair attempt'):
+        g.compose(snapshot, 'individual')
+    assert api.quest_response.call_count == 2
+
+
+def test_later_completed_example_span_is_rejected_despite_visible_text_variations(generator):
+    g, (_, _, _, _, api, _) = generator
+    snapshot = g.context(1, random.Random(1), now())
+    excerpt = 'Measure each eccentric reference offset and record the measured blue-stop tolerance before the final assembly.'
+    snapshot['data']['completed_examples'] = [{'target_rank': 6, 'criteria': 'Historical context. ' * 5 + excerpt}]
+    api.quest_response.return_value = json.dumps({**proposal(), 'description': excerpt.replace('eccentric', '**eccen\u200btric**')})
+    with pytest.raises(ValueError, match='repair attempt'):
+        g.compose(snapshot, 'individual')
+
+
+def test_completed_examples_allow_independent_safe_prose(generator):
+    g, (_, _, _, _, api, _) = generator
+    snapshot = g.context(1, random.Random(1), now())
+    snapshot['data']['completed_examples'] = [{'target_rank': 6, 'criteria': 'Inspect concentricity against the amber test fixture.'}]
+    api.quest_response.return_value = json.dumps(proposal())
+    assert g.compose(snapshot, 'individual') == proposal()
+
+
+def test_saved_composed_proposal_cannot_copy_retained_completed_examples(generator):
+    g, (_, s, _, _, api, _) = generator
+    with patch.object(g, 'fit', side_effect=TimeoutError), pytest.raises(TimeoutError):
+        g.run(rank=1, request_id='example-copy-retry')
+    excerpt = 'Inspect concentricity against the amber test fixture.'
+    saved = s.get('ledger_context', 'quest-input:example-copy-retry')
+    saved['value']['data']['completed_examples'] = [{'target_rank': 6, 'criteria': excerpt}]
+    s.put('ledger_context', saved)
+    audit = s.get('ledger_evidence', 'quest-generation:example-copy-retry')
+    audit.update(status='composed', proposal={**proposal(), 'criteria': excerpt}, retained_inputs={'messages': 0, 'examples': 1})
+    s.put('ledger_evidence', audit)
+    with pytest.raises(ValueError, match='copied supplied inspiration'):
+        g.run(rank=1, request_id='example-copy-retry')
+    assert not s.select('ledger_quests')
+    api.quest_response.assert_not_called()
+
+
 @pytest.mark.parametrize('composed', [False, True])
-@pytest.mark.parametrize('version', [1, 2])
+@pytest.mark.parametrize('version', [1, 2, 3])
 def test_legacy_unfinished_inputs_and_composed_proposals_require_new_request(generator, composed, version):
     g, (_, s, _, _, api, _) = generator
     with patch.object(g, 'fit', side_effect=TimeoutError):

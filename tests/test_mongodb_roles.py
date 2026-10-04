@@ -97,7 +97,18 @@ def test_role_grants_match_actual_collections_deletes_and_indexes():
             if node.func.attr == "delete" and node.args and isinstance(node.args[0], ast.Constant):
                 deletes.add(node.args[0].value)
             if node.func.attr == "create_index":
-                indexed.add(node.func.value.attr)
+                receiver = node.func.value
+                if isinstance(receiver, ast.Attribute):
+                    indexed.add(receiver.attr)
+                elif isinstance(receiver, ast.Subscript) and isinstance(receiver.slice, ast.Name):
+                    # Index initialization iterates a literal list of owned collections.
+                    loops = [loop for loop in ast.walk(tree) if isinstance(loop, ast.For)
+                             and isinstance(loop.target, ast.Name) and loop.target.id == receiver.slice.id
+                             and any(child is node for child in ast.walk(loop))]
+                    assert loops and all(isinstance(loop.iter, (ast.Tuple, ast.List)) for loop in loops)
+                    indexed.update(name for loop in loops for value in loop.iter.elts for name in collection_literals(value))
+                else:
+                    raise AssertionError('Unresolved index collection')
     from ledger.query_tools import PROJECTIONS
     sources.update(PROJECTIONS)
     read_role = definition("mongosh", "source")
