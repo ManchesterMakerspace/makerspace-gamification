@@ -149,6 +149,36 @@ def test_game_leave_does_not_disable_independent_observation(joined):
     assert not l.active(member(1))
 
 
+@pytest.mark.parametrize('action', ['game_leave', 'observation_optout'])
+@pytest.mark.parametrize('retry_first', [False, True])
+def test_notice_retry_respects_independent_consent_in_both_orders(env, monkeypatch, action, retry_first):
+    monkeypatch.setenv('LEDGER_OBSERVATION', 'true')
+    l, s, _, composer, _, slack = env
+    l.join(member(1))
+    key = f'observation-notice:{member(1)}:1'
+    job = s.get('ledger_outbox', key)
+    job['status'] = 'cancelled'
+    s.put('ledger_outbox', job)
+    retry = lambda: Engagement(l).notice(member(1))
+    change = (lambda: l.leave(member(1))) if action == 'game_leave' else (lambda: l.preferences(member(1), False, True))
+    for operation in ([retry, change] if retry_first else [change, retry]):
+        operation()
+    worker = Worker(l, composer, slack)
+    if action == 'game_leave':
+        assert not l.active(member(1)) and l.preference_profile(member(1))['preferences']['observation']
+        assert worker.step('ledger_outbox', kinds=['engagement_notice'])
+        assert s.get('ledger_outbox', key)['status'] == 'done'
+        assert l.preference_profile(member(1)).get('observation_notice_delivered_at')
+        slack.chat_postMessage.assert_called_once()
+    else:
+        assert l.active(member(1)) and not l.preference_profile(member(1))['preferences']['observation']
+        assert worker.step('ledger_outbox', kinds=['engagement_notice']) == retry_first
+        assert s.get('ledger_outbox', key)['status'] == 'cancelled'
+        Engagement(l).notice(member(1))
+        assert s.get('ledger_outbox', key)['status'] == 'cancelled'
+        slack.chat_postMessage.assert_not_called()
+
+
 def test_deployment_disable_overrides_default_and_reconcile_retries_nonparticipant_notice(env, monkeypatch):
     l, s, _, composer, _, slack = env
     service = Engagement(l)
