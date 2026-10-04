@@ -225,11 +225,20 @@ class Quests:
             q = Quests(d).eligible(member, q, "submit")
             if not description.strip() or len(description) > 2000:
                 raise ValueError("Describe observable completion evidence.")
-            submission_id = f"quest-submission:{member}:{q['logical_id']}"
-            previous = s.get("ledger_evidence", submission_id)
+            logical_submission = f"quest-submission:{member}:{q['logical_id']}"
+            accepted = Quests(d).acceptance(member, q["logical_id"])
+            # Old deployments stored one attempt under the logical ID. Keep it
+            # intact; the acceptance becomes the pointer to subsequent attempts.
+            previous_id = accepted.get("submission_id") or logical_submission
+            previous = s.get("ledger_evidence", previous_id)
+            if accepted.get("submission_id") and not previous:
+                raise ValueError("The saved quest submission is unavailable.")
             if previous and previous["status"] in ("pending", "approved"):
                 return previous
             submission_version = previous.get("submission_version", 1) + 1 if previous else 1
+            submission_id = f"{logical_submission}:attempt:{submission_version}"
+            if s.get("ledger_evidence", submission_id):
+                raise ValueError("This quest submission version already exists.")
             specialized = None
             if q["classification"] != "challenge":
                 specialized = d._submit(member, q["catalog_id"], description, list(learners), (q["shop_ids"] or [None])[0], mentor, handoff,
@@ -242,6 +251,8 @@ class Quests:
             d.touch(member)
             d.touch(q["creator"])
             s.put("ledger_evidence", doc)
+            accepted["submission_id"] = submission_id
+            s.put("ledger_relationships", accepted)
             return doc
         return self.l.store.atomic(run)
 
@@ -252,6 +263,9 @@ class Quests:
             if not doc or doc.get("kind") != "quest_submission" or doc["status"] != "pending":
                 raise ValueError("Choose a pending quest completion.")
             q = s.get("ledger_quests", doc["quest_revision"])
+            review_id = f"review:quest-submission:{doc['member_id']}:{q['logical_id']}:attempt:{doc.get('submission_version', 1)}"
+            if s.get("ledger_evidence", review_id):
+                raise ValueError("This quest submission attempt was already reviewed.")
             audit = Authority(d).authorize(actor, doc["member_id"], "quest_complete", q["shop_ids"], q["logical_id"], excluded=[q["creator"]], commit=True)
             q = Quests(d).eligible(doc["member_id"], q, "complete")
             if not approve and not reason.strip():
@@ -262,12 +276,15 @@ class Quests:
                 d._review(actor, doc["specialized_evidence"], True, reason, quest_review=True)
             doc.update(status="approved" if approve else "rejected", reviewer=actor, review_authority=audit, reason=reason, reviewed_at=now())
             s.put("ledger_evidence", doc)
-            s.put("ledger_evidence", {"_id": "review:" + evidence, "kind": "quest_completion_review", "actor": actor, **audit, "at": now(), "reason": reason})
+            s.put("ledger_evidence", {"_id": review_id, "kind": "quest_completion_review", "evidence": evidence,
+                "member_id": doc["member_id"], "logical_id": q["logical_id"], "quest_revision": q["_id"],
+                "submission_version": doc.get("submission_version", 1), "status": doc["status"], "actor": actor, **audit, "at": now(), "reason": reason})
             if approve:
                 completion = f"quest-complete:{doc['member_id']}:{q['logical_id']}"
                 if not s.get("ledger_evidence", completion):
                     accepted = Quests(d).acceptance(doc["member_id"], q["logical_id"])
-                    s.put("ledger_evidence", {"_id": completion, "kind": "quest_completion", "member_id": doc["member_id"], "quest_revision": q["_id"], "at": now()})
+                    s.put("ledger_evidence", {"_id": completion, "kind": "quest_completion", "member_id": doc["member_id"], "quest_revision": q["_id"],
+                                              "submission_id": evidence, "at": now()})
                     d.touch(q["creator"])
                     q["completion_count"] = q.get("completion_count", 0) + 1
                     s.put("ledger_quests", q)

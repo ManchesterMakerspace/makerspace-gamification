@@ -307,6 +307,93 @@ def test_live_model_evaluation_is_always_audit_only_even_with_all_switches_enabl
         Engagement(l).correct(member(10), member(1), 1, 'Cannot treat a suggestion as an award', record['_id'])
 
 
+def observation_response(messages, *_):
+    docs = json.loads(messages[-1]['content'])['observations']
+    return json.dumps({'member_id': docs[0]['member_id'], 'evidence': [d['_id'] for d in docs],
+                       'category': 'no_action', 'xp': 0, 'reason': 'No action is needed.'})
+
+
+@pytest.mark.parametrize('change', ['edit', 'delete'])
+def test_invalid_observations_do_not_cancel_job_or_poison_later_batches(joined, monkeypatch, change):
+    l, s, _, composer, api, slack = joined
+    invalid = observation(joined, monkeypatch, source='11.1', text='INVALID_CAPTURED_TEXT')
+    worker = Worker(l, composer, slack)
+    edit = ({'type': 'message', 'subtype': 'message_changed', 'channel': 'CCHAT',
+             'message': {'ts': '11.1', 'text': 'Edited text'}} if change == 'edit' else
+            {'type': 'message', 'subtype': 'message_deleted', 'channel': 'CCHAT', 'deleted_ts': '11.1'})
+    worker.event(edit, 'edit-event')
+    valid = observation(joined, monkeypatch, source='12.1', text='Current project feedback')
+    before = l.participant(member(1))
+    for job in s.select('ledger_inbox', {'kind': 'engagement'}):
+        job['available_at'] = now() - timedelta(seconds=1)
+        s.put('ledger_inbox', job)
+    api.complete.side_effect = observation_response
+    assert worker.step('ledger_inbox', kinds=['engagement'])
+    assert s.select('ledger_inbox', {'kind': 'engagement', 'status': 'done'})
+    discarded = s.get('ledger_evidence', invalid['evidence'][0])
+    assert discarded['status'] == 'cancelled'
+    assert discarded['cancellation_reason'] == 'Original message changed or was deleted.'
+    assert s.get('ledger_evidence', valid['evidence'][0])['status'] == 'evaluated'
+    assert 'INVALID_CAPTURED_TEXT' not in json.dumps(api.complete.call_args.args[0])
+    newer = observation(joined, monkeypatch, source='13.1', text='Newer project feedback')
+    assert Engagement(l).evaluate(member(1), api, 'later-job')['evidence'] == newer['evidence']
+    assert l.participant(member(1))['xp'] == before['xp']
+    assert not s.select('ledger_awards')
+
+
+def test_all_invalid_observations_finish_without_inference(joined, monkeypatch):
+    l, s, _, _, api, *_ = joined
+    invalid = observation(joined, monkeypatch, source='deleted')
+    s.delete('ledger_context', 'message:CCHAT:deleted')
+    assert Engagement(l).evaluate(member(1), api, 'empty-job') is None
+    assert s.get('ledger_evidence', invalid['evidence'][0])['status'] == 'cancelled'
+    api.complete.assert_not_called()
+    newer = observation(joined, monkeypatch, source='newer')
+    api.complete.side_effect = observation_response
+    assert Engagement(l).evaluate(member(1), api, 'newer-job')['evidence'] == newer['evidence']
+
+
+@pytest.mark.parametrize('kind', ['kudos_metadata', 'volunteer'])
+def test_invalid_nonmessage_source_is_cancelled_without_discarding_valid_observation(joined, monkeypatch, kind):
+    l, s, src, _, api, *_ = joined
+    valid = observation(joined, monkeypatch, source='valid-message')
+    service = Engagement(l)
+    if kind == 'kudos_metadata':
+        source = 'kudos:metadata'
+        s.put('ledger_evidence', {'_id': source, 'kind': 'kudos', 'giver': member(1)})
+    else:
+        source = 'volunteer:' + member(900)
+        src.data['volunteer_credits'].append({'_id': oid(900), 'member_id': oid(1), 'status': 'approved'})
+    captured = service.capture(member(1), source, kind)
+    if kind == 'kudos_metadata':
+        s.put('ledger_evidence', {'_id': source, 'kind': 'kudos', 'giver': member(2)})
+    else:
+        src.data['volunteer_credits'][0]['status'] = 'rejected'
+    api.complete.side_effect = observation_response
+    assert service.evaluate(member(1), api, 'source-changed')['evidence'] == valid['evidence']
+    assert s.get('ledger_evidence', captured['_id'])['status'] == 'cancelled'
+    assert captured['_id'] not in json.dumps(api.complete.call_args.args[0])
+
+
+def test_invalid_records_before_batch_limit_do_not_strand_valid_overflow(joined, monkeypatch):
+    l, s, _, _, api, *_ = joined
+    for i in range(9):
+        observation(joined, monkeypatch, source=f'bad-{i}', text=f'INVALID_{i}')
+        s.delete('ledger_context', f'message:CCHAT:bad-{i}')
+    refs = [observation(joined, monkeypatch, source=f'good-{i}')['evidence'][0] for i in range(10)]
+    api.complete.side_effect = observation_response
+    service = Engagement(l)
+    first = service.evaluate(member(1), api, 'large-job')
+    assert len(first['evidence']) == 8 and set(first['evidence']) <= set(refs)
+    followup = s.get('ledger_inbox', 'engagement-followup:large-job')
+    assert followup['status'] == 'pending'
+    second = service.evaluate(member(1), api, followup['_id'])
+    assert len(second['evidence']) == 2
+    assert not s.select('ledger_evidence', {'kind': 'observation', 'status': 'pending'})
+    assert len(s.select('ledger_evidence', {'kind': 'observation', 'status': 'cancelled'})) == 9
+    assert 'INVALID_' not in json.dumps(api.complete.call_args_list)
+
+
 @pytest.mark.parametrize('change', ['optout', 'preference', 'edit', 'delete', 'suspend'])
 def test_consent_and_evidence_changes_during_inference_block_commit(joined, monkeypatch, change):
     l, s, src, *_ = joined

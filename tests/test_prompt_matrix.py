@@ -47,6 +47,8 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     delegate = root.find("roles/role[@id='delegated_reviewer']").text
     assert 'stable logical ID' in delegate and "every actual operation's shops" in delegate
     assert 'history-import pending' in root.find('response').text
+    assert 'cancels invalid observations individually before inference' in root.find("roles/role[@id='ai_observer']").text
+    assert 'immutable version-specific IDs' in root.find('community').text
     for i, (name, _, floor, _) in enumerate(RANKS, 1):
         assert f'| {i} | {name} | {floor if floor is not None else "Inactive"} |' in root.find('progression').text
     for rate in XP.values():

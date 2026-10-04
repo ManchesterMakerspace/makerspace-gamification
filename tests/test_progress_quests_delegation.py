@@ -259,11 +259,22 @@ def test_specialized_resubmission_reviews_corrected_attempt_and_keeps_old_eviden
         s.put('ledger_evidence', old)
         first['specialized_evidence'] = old['_id']
         first.pop('submission_version')
+        s.delete('ledger_evidence', first['_id'])
+        first['_id'] = f"quest-submission:{member(1)}:{q['logical_id']}"
         s.put('ledger_evidence', first)
+        accepted = service.acceptance(member(1), q['logical_id'])
+        accepted.pop('submission_id')
+        s.put('ledger_relationships', accepted)
     old = s.get('ledger_evidence', first['specialized_evidence'])
     service.verify(member(10), first['_id'], approve=False, reason='Correct the evidence')
+    rejected = s.get('ledger_evidence', first['_id'])
+    first_review_id = f"review:quest-submission:{member(1)}:{q['logical_id']}:attempt:1"
+    first_review = s.get('ledger_evidence', first_review_id)
     second = service.submit(member(1), q['_id'], 'Corrected attempt', [member(3)], member(2), 'Corrected usable handoff')
     assert second['submission_version'] == 2
+    assert second['_id'] != first['_id']
+    assert s.get('ledger_evidence', first['_id']) == rejected
+    assert s.get('ledger_evidence', first_review_id) == first_review
     assert second['specialized_evidence'] != first['specialized_evidence']
     assert s.get('ledger_evidence', old['_id']) == old
     corrected = s.get('ledger_evidence', second['specialized_evidence'])
@@ -277,7 +288,14 @@ def test_specialized_resubmission_reviews_corrected_attempt_and_keeps_old_eviden
         with pytest.raises(ValueError, match='acknowledge'):
             service.verify(member(10), second['_id'])
     l.acknowledge(member(3), corrected['_id'])
-    service.verify(member(10), second['_id'])
+    service.verify(member(11), second['_id'])
+    assert s.get('ledger_evidence', first['_id']) == rejected
+    assert s.get('ledger_evidence', first_review_id) == first_review
+    assert first_review['status'] == 'rejected' and first_review['actor'] == member(10)
+    assert first_review['reason'] == 'Correct the evidence'
+    second_review = s.get('ledger_evidence', 'review:' + second['_id'])
+    assert second_review['status'] == 'approved' and second_review['actor'] == member(11)
+    assert second_review['evidence'] == second['_id'] and second_review['submission_version'] == 2
     assert s.get('ledger_evidence', corrected['_id'])['status'] == 'approved'
     assert s.get('ledger_evidence', old['_id']) == old
     assert l.participant(member(1))['metrics'][classification] == 1
@@ -286,6 +304,63 @@ def test_specialized_resubmission_reviews_corrected_attempt_and_keeps_old_eviden
     assert int(l.participant(member(1))['xp']) == initial_xp + 42
     with pytest.raises(Denied, match='already completed'):
         service.submit(member(1), q['_id'], 'Duplicate completion')
+
+
+def test_submission_attempts_and_reviews_preserve_history_and_once_only_completion(joined):
+    l, s, *_ = joined
+    service = Quests(l)
+    q = published(joined, reward=42)
+    accepted = service.accept(member(1), q['_id'])
+    attempts, reviews = [], []
+    for version in (1, 2):
+        attempt = service.submit(member(1), q['_id'], f'Attempt {version}')
+        assert attempt['submission_version'] == version
+        service.verify(member(10), attempt['_id'], False, f'Rejection {version}')
+        attempts.append(s.get('ledger_evidence', attempt['_id']))
+        reviews.append(s.get('ledger_evidence', 'review:' + attempt['_id']))
+    with ThreadPoolExecutor(2) as pool:
+        submitted = list(pool.map(lambda description: service.submit(member(1), q['_id'], description), ['Corrected final attempt', 'Concurrent retry']))
+    assert submitted[0] == submitted[1]
+    final = submitted[0]
+    assert final['submission_version'] == 3
+    assert service.acceptance(member(1), q['logical_id']) == {**accepted, 'submission_id': final['_id']}
+    for attempt in attempts:
+        with pytest.raises(ValueError, match='pending quest completion'):
+            service.verify(member(11), attempt['_id'])
+    service.verify(member(11), final['_id'])
+    for attempt, review in zip(attempts, reviews):
+        assert s.get('ledger_evidence', attempt['_id']) == attempt
+        assert s.get('ledger_evidence', review['_id']) == review
+    assert len(s.select('ledger_evidence', {'kind': 'quest_submission'})) == 3
+    assert len(s.select('ledger_evidence', {'kind': 'quest_completion_review'})) == 3
+    assert s.get('ledger_evidence', f"quest-complete:{member(1)}:{q['logical_id']}")['submission_id'] == final['_id']
+    l.reconcile(member(1))
+    assert l.participant(member(1))['xp'] == '42'
+    assert len(s.select('ledger_awards', {'kind': 'quest'})) == 1
+
+
+def test_reviewing_legacy_pending_attempt_preserves_existing_legacy_review(joined):
+    l, s, *_ = joined
+    service = Quests(l)
+    q = published(joined, reward=42)
+    accepted = service.accept(member(1), q['_id'])
+    attempt = service.submit(member(1), q['_id'], 'Legacy corrected attempt')
+    s.delete('ledger_evidence', attempt['_id'])
+    logical_id = f"quest-submission:{member(1)}:{q['logical_id']}"
+    attempt.update(_id=logical_id, submission_version=2)
+    s.put('ledger_evidence', attempt)
+    legacy_review = {'_id': 'review:' + logical_id, 'kind': 'quest_completion_review',
+                     'actor': member(10), 'reason': 'Historical rejection', 'at': now()}
+    s.put('ledger_evidence', legacy_review)
+    # Legacy acceptance did not have a submission pointer.
+    s.put('ledger_relationships', accepted)
+    assert service.submit(member(1), q['_id'], 'Repeated pending request') == attempt
+    service.verify(member(11), logical_id)
+    assert s.get('ledger_evidence', legacy_review['_id']) == legacy_review
+    new_review = s.get('ledger_evidence', 'review:' + logical_id + ':attempt:2')
+    assert new_review['actor'] == member(11) and new_review['status'] == 'approved'
+    assert new_review['evidence'] == logical_id
+    assert l.participant(member(1))['xp'] == '42'
 
 
 def test_grant_capability_scope_and_review_audit_without_staff_gate(joined):
