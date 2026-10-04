@@ -71,7 +71,7 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
                       'groups:write', 'im:write', 'im:history', 'users:read', 'files:write', 'channels:read', 'channels:history'}
     # Inventory actual SDK calls: new methods require an explicit permission review.
     method_scopes = {
-        'users_info': {'users:read'}, 'conversations_info': {'groups:read', 'channels:read'},
+        'users_info': {'users:read'}, 'users_list': {'users:read'}, 'conversations_info': {'groups:read', 'channels:read'},
         'conversations_members': {'groups:read'}, 'conversations_create': {'groups:write'},
         'conversations_invite': {'groups:write'}, 'conversations_kick': {'groups:write'},
         'conversations_open': {'im:write'}, 'files_upload_v2': {'files:write'},
@@ -84,6 +84,9 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
         for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and hasattr(WebClient, node.func.attr):
                 calls.add(node.func.attr)
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'call'
+                    and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 'users_list'):
+                calls.add('users_list')
     assert calls == set(method_scopes)
     assert all(needed <= scopes for needed in method_scopes.values())
 

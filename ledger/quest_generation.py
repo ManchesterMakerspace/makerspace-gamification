@@ -7,10 +7,12 @@ import json
 import random
 import re
 import time
+from unicodedata import normalize
 from uuid import uuid4
 from xml.etree import ElementTree
 
-from slack_sdk.errors import SlackApiError
+from pymongo.errors import PyMongoError
+from slack_sdk.errors import SlackApiError, SlackRequestError
 
 from .domain import Denied, Ledger
 from .quest_policy import (LEDGER_AUTHOR, QUEST_SCHEMA, REVIEWED_KINDS,
@@ -19,7 +21,7 @@ from .sources import object_id, sid
 from .rules import amount
 from .storage import enqueue, now
 
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 ACTIVITY_DAYS = 30
 CHAT_DAYS = 14
 SOURCE_LIMIT = 5000
@@ -68,6 +70,7 @@ class SlackHistory:
         self.client, self.sleep = client, sleep
         self.users = {}
         self.redaction_incomplete = False
+        self.directory_names = None
 
     def call(self, method, **kwargs):
         waited = 0
@@ -116,23 +119,76 @@ class SlackHistory:
         profile = self.users[user]
         return not (profile.get("deleted") or profile.get("is_bot") or profile.get("is_app_user"))
 
-    def redact(self, rows):
+    @staticmethod
+    def profile_names(user):
+        if not isinstance(user, dict) or not isinstance(user.get("id"), str) or not user["id"]:
+            raise QuestGenerationError("Slack identity directory returned an invalid user.")
+        profile = user.get("profile")
+        if profile is None:
+            profile = {}
+        if not isinstance(profile, dict):
+            raise QuestGenerationError("Slack identity directory returned an invalid profile.")
+        values = [user.get("real_name"), user.get("name"), *(profile.get(k) for k in (
+            "real_name", "display_name", "real_name_normalized", "display_name_normalized", "first_name", "last_name"))]
+        if any(value is not None and not isinstance(value, str) for value in values):
+            raise QuestGenerationError("Slack identity directory returned an invalid name.")
+        return {unescape(value).strip() for value in values if isinstance(value, str) and value.strip()}
+
+    def directory(self):
+        if self.directory_names is not None:
+            return self.directory_names
+        cursor, seen, names, count = "", set(), set(), 0
+        # Complete only: a partial name directory cannot protect non-authors.
+        for _ in range(100):
+            response = self.call("users_list", limit=200, cursor=cursor)
+            members, metadata = response.get("members"), response.get("response_metadata", {})
+            if response.get("ok") is False or not isinstance(members, list) or not isinstance(metadata, dict):
+                raise QuestGenerationError("Slack identity directory returned an invalid page.")
+            count += len(members)
+            if count > SOURCE_LIMIT:
+                raise QuestGenerationError("Slack identity directory exceeds the bounded limit.")
+            for user in members:
+                names.update(self.profile_names(user))
+            cursor = metadata.get("next_cursor", "")
+            if not isinstance(cursor, str):
+                raise QuestGenerationError("Slack identity directory returned an invalid cursor.")
+            if not cursor:
+                if response.get("has_more") or response.get("is_limited"):
+                    raise QuestGenerationError("Slack identity directory is incomplete.")
+                self.directory_names = names
+                return names
+            if cursor in seen:
+                raise QuestGenerationError("Slack identity directory pagination repeated.")
+            seen.add(cursor)
+        raise QuestGenerationError("Slack identity directory pagination exceeds the bounded limit.")
+
+    def redact(self, rows, extra_names=()):
         if self.redaction_incomplete:
             # Earlier rows can mention an author whose later lookup failed;
             # omitting just that author's own reply cannot protect identities.
             return []
-        all_names = set()
-        for user in self.users.values():
-            profile = user.get("profile") or {}
-            all_names.update(n for n in (user.get("real_name"), user.get("name"),
-                profile.get("real_name"), profile.get("display_name")) if isinstance(n, str))
+        if not rows:
+            return []
+        try:
+            all_names = self.directory() | set(extra_names)
+            for user in self.users.values():
+                all_names.update(self.profile_names(user))
+        except (SlackApiError, SlackRequestError, QuestGenerationError, KeyError, TypeError, OSError):
+            self.redaction_incomplete = True
+            return []
+        # Typed names may use decomposed accents or straight/curly apostrophes.
+        # Canonicalize only these derived excerpts, never member-authored records.
+        def canonical(text):
+            return normalize("NFC", unescape(text)).translate(str.maketrans("‘’ʼ", "'''"))
+        all_names = {canonical(name) for name in all_names}
         all_names.update(part for name in list(all_names) for part in name.split())
         return [{**row, "text": text[:600]} for row in rows
-                if (text := sanitize(row["text"], all_names))]
+                if (text := sanitize(canonical(row["text"]), all_names))]
 
     def inspiration(self, channel_id, messages, oldest, latest, *, defer_redaction=False):
         if not defer_redaction:
             self.redaction_incomplete = False
+            self.directory_names = None
         rows, notes, seen = [], [], set()
         recent = sorted(messages, key=lambda m: timestamp(m.get("ts")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         def append(message):
@@ -318,6 +374,7 @@ class QuestGenerator:
 
     def context(self, rank, rng, stamp):
         self.history.redaction_incomplete = False
+        self.history.directory_names = None
         if rank is not None and not enabled_rank(self.l, rank):
             raise QuestGenerationError("--rank must name an enabled numeric rank slot.")
         metrics, histories = self.metrics(stamp)
@@ -336,11 +393,26 @@ class QuestGenerator:
             coverage.append({"channel": channel["_id"], "history_complete": complete, "notes": notes, "messages": len(rows)})
         # The second channel's replies may identify someone mentioned in the
         # first. Redact before building prompts or persisting reserved inputs.
-        chat = self.history.redact(chat)
+        member_names = set()
+        if chat and not self.history.redaction_incomplete:
+            try:
+                members, complete = self.bounded("members", {}, ["firstname", "lastname"])
+                if not complete:
+                    raise QuestGenerationError("Makerspace name directory exceeds the bounded limit.")
+                for member in members:
+                    parts = [member.get(k) for k in ("firstname", "lastname")]
+                    if any(part is not None and not isinstance(part, str) for part in parts):
+                        raise QuestGenerationError("Makerspace name directory returned an invalid name.")
+                    parts = [part or "" for part in parts]
+                    member_names.update(unescape(part).strip() for part in parts if part.strip())
+                    member_names.add(" ".join(parts).strip())
+            except (PyMongoError, QuestGenerationError, OSError, TypeError):
+                self.history.redaction_incomplete = True
+        chat = self.history.redact(chat, member_names)
         if self.history.redaction_incomplete:
             for item in coverage:
                 item["messages"] = 0
-                item["notes"] = sorted(set(item["notes"] + ["chat omitted because author profiles unavailable"]))
+                item["notes"] = sorted(set(item["notes"] + ["chat omitted because identity names unavailable"]))
         examples = self.examples(rng)
         shops, shops_complete = self.bounded("shops", {"disabled": {"$ne": True}}, ["name", "disabled", "out_of_service"])
         tools, tools_complete = self.bounded("tools", {"disabled": {"$ne": True}}, ["name", "description", "shop_id", "disabled", "out_of_service"])

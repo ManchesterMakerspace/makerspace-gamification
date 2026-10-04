@@ -58,6 +58,8 @@ Use the complete generated files with the [Create One Custom Role API](https://w
 
 The [one-shot quest generator](QUEST_GENERATION.md) uses existing owned quest definitions/revisions, evidence audits, temporary context, outbox notices and relationship acceptances/shared projects. Its relationship project and generation-lease indexes use the existing `createIndex` resources. The Atlas and self-managed role examples and their tests were reviewed; no new collection, wildcard privilege or source write is needed.
 
+Quest-inspiration redaction also reads a complete bounded `members` directory through `MLAB_URI`, projecting only `firstname`/`lastname` and the adapter's ID field. Include inactive, revoked, merged and unlinked records because names need redaction regardless of eligibility. Directory records never enter saved context or inference; incomplete or failed reads omit chat inspiration. Existing `members` find privileges and projection allowlists cover this read without additional grants or source writes.
+
 | Resources | MongoDB actions | Reason |
 | --- | --- | --- |
 | `members`, `slack_users`, `shops`, `tools`, `tool_checkouts`, `volunteer_credits`, `volunteer_tasks`, `volunteer_events`, `earned_memberships`, `groups`, `checkins`, `cards` in the source database | `find` | Identity, review scope, catalog, evidence, membership, read-only queries, and internal arrival resolution |

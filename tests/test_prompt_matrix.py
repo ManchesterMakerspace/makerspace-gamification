@@ -45,6 +45,11 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'Omit /ledger-admin and related help for ineligible callers' in root.find('response').text
     generated_author = root.find("roles/role[@id='ledger_quest_author']").text
     assert 'both channels' in generated_author and 'cooperative discipline prose' in generated_author
+    assert 'complete bounded Slack and makerspace member directories' in generated_author
+    assert 'including non-authors and inactive members' in generated_author
+    assert 'omit chat when identity reads fail, are malformed or incomplete' in generated_author
+    assert 'Names absent from both directories may remain' in root.find('privacy').text
+    assert 'Directory records themselves never enter saved context or inference' in generated_author
     consent = root.find('consent').text
     assert 'legacy done jobs without receipts' in consent and 'confirmed delivery receipts' in consent
     assert len(matrix['text'].encode()) <= MAX_MATRIX_BYTES

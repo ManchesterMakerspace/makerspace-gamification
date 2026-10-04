@@ -40,6 +40,8 @@ def generator(joined):
     slack.conversations_info.return_value = {"channel": {"is_private": True, "is_member": True, "is_ext_shared": False}}
     slack.conversations_history.return_value = {"messages": [], "response_metadata": {}}
     slack.conversations_replies.return_value = {"messages": []}
+    slack.users_list.return_value = {"members": [{"id": f"U{i}", "real_name": f"Maker{i} Test"} for i in range(1, 12)],
+                                     "response_metadata": {"next_cursor": ""}}
     return QuestGenerator(l, api, PromptMatrix(), slack, "CSTAFF"), joined
 
 
@@ -414,12 +416,13 @@ def test_short_excerpt_matches_whole_words_and_allows_paraphrase(generator):
 
 
 @pytest.mark.parametrize('composed', [False, True])
-def test_legacy_unfinished_inputs_and_composed_proposals_require_new_request(generator, composed):
+@pytest.mark.parametrize('version', [1, 2])
+def test_legacy_unfinished_inputs_and_composed_proposals_require_new_request(generator, composed, version):
     g, (_, s, _, _, api, _) = generator
     with patch.object(g, 'fit', side_effect=TimeoutError):
         with pytest.raises(TimeoutError): g.run(rank=1, request_id='legacy')
     audit = s.get('ledger_evidence', 'quest-generation:legacy')
-    audit['prompt_version'] = 1
+    audit['prompt_version'] = version
     if composed: audit.update(status='composed', proposal=proposal(), retained_inputs={})
     s.put('ledger_evidence', audit)
     saved = deepcopy(s.get('ledger_context', 'quest-input:legacy'))
@@ -478,6 +481,123 @@ def test_quote_guard_canonicalizes_slack_reserved_entities(generator):
     snapshot['data']['chat'] = [{'text': 'Try the purple jig &amp; test every stop.'}]
     api.quest_response.return_value = json.dumps({**proposal(), 'description': 'Try the purple jig & test every stop.'})
     with pytest.raises(ValueError): g.compose(snapshot, 'individual')
+
+
+def test_directory_redacts_non_author_names_aliases_and_inactive_people_before_prompting(generator):
+    g, (_, s, src, _, api, slack) = generator
+    stamp = now()
+    src.data['members'].append({'_id': oid(999), 'firstname': 'Mira', 'lastname': 'Silentmember', 'status': 'revoked', 'merged_at': stamp})
+    slack.users_list.side_effect = [
+        {'members': [{'id': 'U1', 'real_name': 'Root Maker'}], 'response_metadata': {'next_cursor': 'second'}},
+        {'members': [{'id': 'UNONA', 'real_name': 'Nora Nonwriter', 'name': 'quiet_nora', 'deleted': True,
+            'profile': {'display_name': 'QuietNora', 'display_name_normalized': 'quieter_nora',
+                        'first_name': 'Li', 'last_name': 'Observer'}}], 'response_metadata': {'next_cursor': ''}}]
+    slack.conversations_history.side_effect = lambda channel, **kwargs: {'messages': [{
+        'user': 'U1', 'ts': str(stamp.timestamp()),
+        'text': 'Nora Nonwriter and quieter_nora and QuietNora and quiet_nora and Li helped Mira Silentmember with adjustable stops.'}] if channel == 'CCHAT' else []}
+    result = g.run(rank=1, request_id='non-authors')
+    rendered = json.dumps(api.quest_response.call_args.args[0])
+    saved = json.dumps(s.get('ledger_context', 'quest-input:non-authors'), default=str)
+    assert 'adjustable stops' in rendered and result['retained_inputs']['messages'] == 1
+    assert all(name not in rendered + saved for name in ('Nora', 'Nonwriter', 'quieter_nora', 'QuietNora', 'quiet_nora', 'Li ', 'Mira', 'Silentmember'))
+    assert slack.users_list.call_args_list[1].kwargs['cursor'] == 'second'
+    assert not any(call.kwargs['user'] == 'UNONA' for call in slack.users_info.call_args_list)
+
+
+def test_direct_inspiration_redacts_workspace_non_author_without_generator_context(generator):
+    g, (_, _, _, _, _, slack) = generator
+    stamp = now()
+    slack.users_list.return_value = {'members': [{'id': 'UNOAUTHOR', 'real_name': 'Nora Nonwriter'}]}
+    rows, _ = g.history.inspiration('CCHAT', [{'user': 'U1', 'ts': str(stamp.timestamp()),
+        'text': 'Nora Nonwriter recommended adjustable stops.'}], stamp - timedelta(days=14), stamp)
+    assert rows[0]['text'] == '[identity removed] recommended adjustable stops.'
+
+
+@pytest.mark.parametrize('directory', ['slack', 'members'])
+def test_non_author_names_redacted_across_unicode_and_apostrophe_forms(generator, directory):
+    g, (_, s, src, _, api, slack) = generator
+    stamp = now()
+    if directory == 'slack':
+        slack.users_list.return_value = {'members': [{'id': 'UNONA', 'real_name': 'José O’Brien'}]}
+    else:
+        src.data['members'].append({'_id': oid(999), 'firstname': 'José', 'lastname': 'O’Brien'})
+    slack.conversations_history.side_effect = lambda channel, **kwargs: {'messages': [{
+        'user': 'U1', 'ts': str(stamp.timestamp()),
+        'text': "Jose\u0301 O'Brien recommended adjustable stops for café work."}] if channel == 'CCHAT' else []}
+    result = g.run(rank=1, request_id='canonical-names')
+    rendered = json.dumps(api.quest_response.call_args.args[0], ensure_ascii=False)
+    saved = json.dumps(s.get('ledger_context', 'quest-input:canonical-names'), default=str, ensure_ascii=False)
+    assert all(name not in rendered + saved for name in ('José', 'Jose\u0301', "O'Brien", 'O’Brien'))
+    assert 'adjustable stops for café work' in rendered and result['retained_inputs']['messages'] == 1
+
+
+@pytest.mark.parametrize('failure', ['error', 'cycle', 'malformed', 'oversize', 'limited'])
+def test_incomplete_slack_identity_directory_omits_chat_without_stopping_quest(generator, failure):
+    g, (_, s, _, _, api, slack) = generator
+    stamp = now()
+    slack.conversations_history.side_effect = lambda channel, **kwargs: {'messages': [{
+        'user': 'U1', 'ts': str(stamp.timestamp()), 'text': 'Nora Nonwriter recommended a measuring jig.'}] if channel == 'CCHAT' else []}
+    if failure == 'error':
+        response = MagicMock(status_code=403, headers={})
+        slack.users_list.side_effect = SlackApiError('unavailable', response)
+    elif failure == 'cycle':
+        slack.users_list.return_value = {'members': [{'id': 'U1', 'real_name': 'Root Maker'}], 'response_metadata': {'next_cursor': 'same'}}
+    elif failure == 'malformed':
+        slack.users_list.return_value = {'members': [{'id': 'U1', 'profile': {'display_name': 12}}]}
+    elif failure == 'oversize':
+        slack.users_list.return_value = {'members': [{'id': 'U1', 'real_name': 'Root Maker'}] * 5001}
+    elif failure == 'limited':
+        slack.users_list.return_value = {'members': [], 'is_limited': True}
+    result = g.run(rank=1, request_id='incomplete-directory')
+    saved = s.get('ledger_context', 'quest-input:incomplete-directory')['value']
+    assert saved['data']['chat'] == [] and 'Nora' not in json.dumps(api.quest_response.call_args.args[0])
+    assert result['status'] == 'submitted' and result['retained_inputs']['messages'] == 0
+    assert all(c['messages'] == 0 and c['notes'] for c in result['coverage'])
+    assert saved['data']['shops'] and saved['data']['tools']
+
+
+@pytest.mark.parametrize('failure', ['error', 'truncated', 'malformed'])
+def test_incomplete_member_name_directory_omits_chat(generator, failure):
+    from pymongo.errors import OperationFailure
+    g, (l, _, _, _, api, slack) = generator
+    stamp = now()
+    slack.conversations_history.side_effect = lambda channel, **kwargs: {'messages': [{
+        'user': 'U1', 'ts': str(stamp.timestamp()), 'text': 'Mira Silentmember recommended adjustable stops.'}] if channel == 'CCHAT' else []}
+    original = l.sources.bounded
+    def bounded(collection, *args, **kwargs):
+        if collection == 'members':
+            if failure == 'error': raise OperationFailure('private source details')
+            if failure == 'truncated': return [{'_id': oid(999), 'firstname': 'Mira', 'lastname': 'Silentmember'}] * 5001
+            return [{'_id': oid(999), 'firstname': {'invalid': 'Mira'}, 'lastname': 'Silentmember'}]
+        return original(collection, *args, **kwargs)
+    with patch.object(l.sources, 'bounded', side_effect=bounded):
+        result = g.run(rank=1, dry_run=True)
+    assert result['retained_inputs']['messages'] == 0
+    assert 'Mira' not in json.dumps(api.quest_response.call_args.args[0])
+
+
+def test_new_generation_refreshes_directory_and_does_not_persist_it(generator):
+    g, (_, s, _, _, api, slack) = generator
+    stamp = now()
+    slack.conversations_history.side_effect = lambda channel, **kwargs: {'messages': [{
+        'user': 'U1', 'ts': str(stamp.timestamp()), 'text': 'Late Alias recommended adjustable stops.'}] if channel == 'CCHAT' else []}
+    slack.users_list.side_effect = [
+        {'members': [{'id': 'U1', 'real_name': 'Root Maker'}]},
+        {'members': [{'id': 'ULATE', 'profile': {'display_name': 'Late Alias', 'email': 'DIRECTORY_ONLY_SECRET'}}]}]
+    g.run(rank=1, request_id='before-alias')
+    g.run(rank=1, request_id='after-alias')
+    assert 'Late Alias' not in json.dumps(api.quest_response.call_args.args[0])
+    assert 'DIRECTORY_ONLY_SECRET' not in json.dumps(s.get('ledger_context', 'quest-input:after-alias'), default=str)
+    assert slack.users_list.call_count == 2
+
+
+def test_names_absent_from_both_directories_remain_under_explicitly_accepted_policy(generator):
+    g, (_, _, _, _, api, slack) = generator
+    stamp = now()
+    slack.conversations_history.side_effect = lambda channel, **kwargs: {'messages': [{
+        'user': 'U1', 'ts': str(stamp.timestamp()), 'text': 'Nora Outsideperson recommended adjustable stops.'}] if channel == 'CCHAT' else []}
+    g.run(rank=1, dry_run=True)
+    assert 'Nora Outsideperson' in json.dumps(api.quest_response.call_args.args[0])
 
 
 def test_completed_example_joins_and_anonymizes_original_submission(generator):
