@@ -110,14 +110,76 @@ def test_question_anywhere_can_be_ignored_without_marking_bot_thread(env):
     l, s, _, composer, api, slack = env
     w = Worker(l, composer, slack, bot_id='UBOT')
     api.tool_response.return_value = {'content': 'NO_REPLY'}
-    assert w.event({'type': 'message', 'user': 'U1', 'channel': 'CSHOP', 'ts': '12.1',
+    assert w.event({'type': 'message', 'user': 'U1', 'channel': 'CCHAT', 'ts': '12.1',
                     'text': 'Lunch? I packed a sandwich.'}, 'ambient') == 'reply_queued'
-    w.outbox(claim(s, 'reply:CSHOP:12.1'))
+    w.outbox(claim(s, 'reply:CCHAT:12.1'))
     slack.chat_postMessage.assert_not_called()
-    assert not s.get('ledger_context', 'thread:CSHOP:12.1')
+    assert not s.get('ledger_context', 'thread:CCHAT:12.1')
     assert not s.select('ledger_evidence', {'kind': 'ai_observation'})
-    assert w.event({'type': 'message', 'user': 'U1', 'channel': 'CSHOP', 'ts': '13.1', 'text': 'More',
+    assert w.event({'type': 'message', 'user': 'U1', 'channel': 'CCHAT', 'ts': '13.1', 'text': 'More',
                     'thread_ts': '12.1'}, 'more') == 'ignored_unaddressed_channel_message'
+
+
+@pytest.mark.parametrize('fixture', ['env', 'joined'])
+@pytest.mark.parametrize('text', ['Lunch? I packed a sandwich.', 'How is my progress?', 'Show my stats'])
+def test_unrelated_ambient_messages_never_reach_context_or_inference(request, fixture, text):
+    l, s, _, composer, api, slack = request.getfixturevalue(fixture)
+    w = Worker(l, composer, slack, bot_id='UBOT')
+    assert w.event({'type': 'message', 'user': 'U1', 'channel': 'COTHER', 'ts': '12.1',
+                    'text': text, 'thread_ts': '10.1'}, 'ambient') == 'ignored_unaddressed_channel_message'
+    assert not s.get('ledger_context', 'message:COTHER:12.1')
+    assert not s.get('ledger_outbox', 'reply:COTHER:12.1')
+    api.complete.assert_not_called()
+    api.tool_response.assert_not_called()
+
+
+@pytest.mark.parametrize('text', ['Lunch? I packed a sandwich.', 'Show my stats'])
+def test_queued_ambient_and_progress_jobs_are_blocked_if_channel_is_unregistered(joined, text):
+    l, s, _, composer, api, slack = joined
+    w = Worker(l, composer, slack, bot_id='UBOT')
+    assert w.event({'type': 'message', 'user': 'U1', 'channel': 'CCHAT', 'ts': '12.1', 'text': text}, 'ambient') == 'reply_queued'
+    legacy_request = s.get('ledger_context', 'message:CCHAT:12.1')
+    legacy_request.pop('conversation_requested')
+    s.put('ledger_context', legacy_request)
+    s.delete('ledger_channels', 'chat')
+    with pytest.raises(Denied, match='registered Ledger channel'):
+        w.outbox(claim(s, 'reply:CCHAT:12.1'))
+    api.complete.assert_not_called()
+    api.tool_response.assert_not_called()
+    assert not s.get('ledger_outbox', 'reply:CCHAT:12.1').get('composed')
+
+
+def test_unrelated_explicit_request_excludes_legacy_unrequested_context(env):
+    l, s, _, composer, api, slack = env
+    w = Worker(l, composer, slack, bot_id='UBOT')
+    for ts, extra in [('9.1', {}), ('9.2', {'conversation_requested': False})]:
+        s.put('ledger_context', {'_id': f'message:COTHER:{ts}', 'kind': 'message', 'member_id': mid(2),
+                                'channel': 'COTHER', 'thread': '10.1', 'text': 'UNRELATED_PRIVATE_CONVERSATION', 'at': ts, **extra})
+    assert w.event({'type': 'message', 'user': 'U1', 'channel': 'COTHER', 'ts': '12.1', 'thread_ts': '10.1',
+                    'text': '<@UBOT> Tell me about XP'}, 'mention') == 'reply_queued'
+    api.tool_response.return_value = {'content': 'The Ledger recognizes learning with XP.'}
+    w.outbox(claim(s, 'reply:COTHER:12.1'))
+    assert 'UNRELATED_PRIVATE_CONVERSATION' not in json.dumps(api.tool_response.call_args.args[0])
+    slack.chat_postMessage.assert_called_once()
+
+
+@pytest.mark.parametrize('channel,text,thread', [('DU1', 'Show my stats', None),
+                                               ('COTHER', '<@UBOT> Show my stats', None),
+                                               ('COTHER', 'Show my stats', '10.1')])
+def test_direct_progress_requests_retain_tool_routing(joined, channel, text, thread):
+    l, s, _, composer, api, slack = joined
+    w = Worker(l, composer, slack, bot_id='UBOT')
+    if thread:
+        w.event({'type': 'message', 'user': 'UBOT', 'channel': channel, 'ts': thread, 'text': 'A bot post'}, 'bot')
+    event = {'type': 'message', 'user': 'U1', 'channel': channel, 'ts': '12.1', 'text': text}
+    if thread:
+        event['thread_ts'] = thread
+    assert w.event(event, 'direct') == 'reply_queued'
+    job = claim(s, f'reply:{channel}:12.1')
+    assert job['payload']['progress_request'] and job['payload']['use_tools']
+    api.tool_response.return_value = {'content': 'The Ledger has your calculated progress.'}
+    w.outbox(job)
+    api.tool_response.assert_called_once()
 
 
 def test_bot_published_kudos_root_allows_followup_without_exposing_body(env):

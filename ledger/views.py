@@ -189,8 +189,13 @@ def progress_blocks(ledger, member):
 def character_sheet(ledger, member):
     from .progress import progress
     facts = progress(ledger, member)
-    blocks = [section(f"*{escape(facts['rank'])}* · {facts['xp']} XP\n*Deepest cleared skill:* {escape(facts.get('highest_skill', 'No recorded clearance'))}"),
-        section("\n".join(f"{k.replace('_', ' ').title()}: {escape(v)}" for k, v in facts["metrics"].items())), navigation()]
+    blocks = [section(f"*{escape(facts['rank'])}* · {facts['xp']} XP\n*Deepest cleared skill:* {escape(facts.get('highest_skill', 'No recorded clearance'))}")]
+    if facts["metrics"]:
+        blocks.append(section("\n".join(f"{k.replace('_', ' ').title()}: {escape(v)}" for k, v in facts["metrics"].items())))
+    else:
+        pending = (ledger.participant(member) or {}).get("import_pending")
+        blocks.append(section("Verified history import pending; progress may be incomplete." if pending else "No recorded milestones yet."))
+    blocks.append(navigation())
     recorded = ledger.store.select("ledger_awards", {"member_id": member})
     blocks.append(section(f"Recorded achievements: {len(recorded)}. Open Achievements for details."))
     return modal("dismiss", "Character sheet", blocks, submit="Done")
@@ -286,7 +291,7 @@ def delegates(ledger, actor):
     blocks = [select_input("delegate", "Choose a participating member")]
     blocks.extend(checkbox("cap_" + cap, cap.replace("_", " ").title()) for cap in sorted(CAPABILITIES))
     blocks.extend([select_input("scope_kind", "Authority scope", [option(k.title(), k) for k in ("global", "shops", "quest")]),
-        text_input("scope_ids", "Shop IDs or quest ID", optional=True), text_input("reason", "Required reason", multiline=True)])
+        text_input("scope_ids", "Shop IDs or quest ID (any revision)", optional=True), text_input("reason", "Required reason", multiline=True)])
     for g in ledger.store.select("ledger_relationships", {"kind": "delegation", "status": "active"})[:30]:
         if Authority(ledger).staff_scope(actor)["kind"] == "global" or g["grantor"] == actor:
             blocks.append(section(f"Grant {escape(g['_id'])}\nDelegate: {escape(ledger.sources.slack_id(g['delegate']))}\nCapabilities: {escape(', '.join(g['capabilities']))}\nScope: {escape(json.dumps(g['scope']))}"))

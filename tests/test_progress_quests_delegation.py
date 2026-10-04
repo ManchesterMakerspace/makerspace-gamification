@@ -68,6 +68,38 @@ def test_member_modals_use_deterministic_values_and_no_inference(joined, command
     api.complete.assert_not_called()
 
 
+@pytest.mark.parametrize('pending', [True, False])
+def test_new_character_sheet_uses_nonempty_metrics_state_without_inference(env, pending):
+    l, s, _, composer, api, slack = env
+    l.join(member(1))
+    p = l.participant(member(1))
+    assert p['metrics'] == {}
+    p['import_pending'] = pending
+    s.put('ledger_participants', p)
+    SlackUI(l, composer).command({'user_id': 'U1', 'command': '/ledger', 'text': 'stats', 'trigger_id': 'T'}, slack)
+    view = slack.views_open.call_args.kwargs['view']
+    sections = [block['text']['text'] for block in view['blocks'] if block['type'] == 'section']
+    assert all(text.strip() for text in sections)
+    assert any('0 XP' in text and 'Deepest cleared skill' in text for text in sections)
+    expected = 'Verified history import pending; progress may be incomplete.' if pending else 'No recorded milestones yet.'
+    assert expected in sections
+    assert any(block['type'] == 'actions' for block in view['blocks'])
+    assert 'Recorded achievements: 0. Open Achievements for details.' in sections
+    assert l.participant(member(1)) == p
+    api.complete.assert_not_called()
+    api.tool_response.assert_not_called()
+
+
+def test_character_sheet_keeps_populated_metrics_and_zero_values(joined):
+    l, s, *_ = joined
+    set_participant(l, s, 1, metrics={'checkouts': 0, 'volunteer': '1.5'})
+    view = views.character_sheet(l, member(1))
+    sections = [block['text']['text'] for block in view['blocks'] if block['type'] == 'section']
+    assert 'Checkouts: 0\nVolunteer: 1.5' in sections
+    assert 'No recorded milestones yet.' not in sections
+    assert all(text.strip() for text in sections)
+
+
 def test_quest_browser_hash_and_forged_selection_revalidation(joined):
     l, _, _, composer, _, slack = joined
     q = published(joined)
@@ -195,6 +227,67 @@ def test_specialized_milestones_do_not_add_catalog_xp(joined):
     assert l.participant(member(1))['xp'] == '42'
 
 
+@pytest.mark.parametrize('classification', ['first_build', 'mentoring', 'stewardship', 'develop_mentor'])
+@pytest.mark.parametrize('legacy', [False, True])
+def test_specialized_resubmission_reviews_corrected_attempt_and_keeps_old_evidence(joined, classification, legacy):
+    l, s, src, *_ = joined
+    service = Quests(l)
+    catalog = {'first_build': 'first-build', 'mentoring': 'mentoring-session'}.get(classification, 'specialized-v1')
+    if classification in ('stewardship', 'develop_mentor'):
+        entry = {'_id': catalog, 'kind': 'challenge', 'achievement': classification, 'criteria': 'Verified milestone evidence'}
+        if classification == 'stewardship':
+            src.data['volunteer_tasks'].append({'_id': oid(900), 'title': 'Workshop handoff'})
+            entry['task_id'] = member(900)
+        l.publish_catalog(member(10), entry)
+    q = published(joined, classification=classification, catalog=catalog, reward=42)
+    if classification == 'develop_mentor':
+        guidance = l.submit(member(1), 'mentoring-session', 'Guided the corrected mentor', [member(2)])
+        l.acknowledge(member(2), guidance['_id'])
+        l.review(member(10), guidance['_id'])
+        teaching = l.submit(member(2), 'mentoring-session', 'The corrected mentor taught independently', [member(3)])
+        l.acknowledge(member(3), teaching['_id'])
+        l.review(member(10), teaching['_id'])
+    initial_xp = int(l.participant(member(1))['xp'])
+    service.accept(member(1), q['_id'])
+    first = service.submit(member(1), q['_id'], 'First attempt', [member(2)], member(4), 'Old handoff')
+    l.acknowledge(member(2), first['specialized_evidence'])
+    if legacy:
+        # Reproduce records written before submission attempts were versioned.
+        old = s.get('ledger_evidence', first['specialized_evidence'])
+        s.delete('ledger_evidence', old['_id'])
+        old['_id'] = f"submission:{member(1)}:member-quest:{q['logical_id']}"
+        s.put('ledger_evidence', old)
+        first['specialized_evidence'] = old['_id']
+        first.pop('submission_version')
+        s.put('ledger_evidence', first)
+    old = s.get('ledger_evidence', first['specialized_evidence'])
+    service.verify(member(10), first['_id'], approve=False, reason='Correct the evidence')
+    second = service.submit(member(1), q['_id'], 'Corrected attempt', [member(3)], member(2), 'Corrected usable handoff')
+    assert second['submission_version'] == 2
+    assert second['specialized_evidence'] != first['specialized_evidence']
+    assert s.get('ledger_evidence', old['_id']) == old
+    corrected = s.get('ledger_evidence', second['specialized_evidence'])
+    assert corrected['description'] == second['description'] == 'Corrected attempt'
+    assert corrected['learners'] == [member(3)] and corrected['acknowledged'] == []
+    assert corrected['mentor'] == member(2) and corrected['handoff'] == 'Corrected usable handoff'
+    acknowledgments = len([row for row in s.select('ledger_outbox') if row['_id'].startswith('ack:submission:')])
+    assert service.submit(member(1), q['_id'], 'Repeated pending request', [member(2)]) == second
+    assert len([row for row in s.select('ledger_outbox') if row['_id'].startswith('ack:submission:')]) == acknowledgments
+    if classification == 'mentoring':
+        with pytest.raises(ValueError, match='acknowledge'):
+            service.verify(member(10), second['_id'])
+    l.acknowledge(member(3), corrected['_id'])
+    service.verify(member(10), second['_id'])
+    assert s.get('ledger_evidence', corrected['_id'])['status'] == 'approved'
+    assert s.get('ledger_evidence', old['_id']) == old
+    assert l.participant(member(1))['metrics'][classification] == 1
+    assert int(l.participant(member(1))['xp']) == initial_xp + 42
+    l.reconcile(member(1))
+    assert int(l.participant(member(1))['xp']) == initial_xp + 42
+    with pytest.raises(Denied, match='already completed'):
+        service.submit(member(1), q['_id'], 'Duplicate completion')
+
+
 def test_grant_capability_scope_and_review_audit_without_staff_gate(joined):
     l, s, _, composer, _, slack = joined
     grant = Authority(l).grant(member(10), member(2), ['learning_review'], {'kind': 'global'}, 'Experienced independent reviewer')
@@ -309,6 +402,99 @@ def test_async_draft_applies_suggestions_with_new_input_ids_and_preserves_review
     q = s.select('ledger_quests')[0]
     assert q['title'] == 'My edited jig' and q['status'] == 'pending_review'
     assert l.participant(member(1))['xp'] == '0'
+
+
+@pytest.mark.parametrize('select_revision', [False, True])
+def test_revised_quest_grant_normalizes_scope_and_authorizes_publication_and_completion(joined, select_revision):
+    l, s, *_ = joined
+    service, authority = Quests(l), Authority(l)
+    original = published(joined)
+    revised = service.draft(member(3), 'Revised jig', 'Corrected jig description', 'Demonstrate the corrected jig',
+                            1, revision_of=original['_id'])
+    service.submit_draft(member(3), revised['_id'])
+    requested = {'kind': 'quest', 'quest': revised['_id'] if select_revision else original['_id']}
+    grant = authority.grant(member(10), member(2), ['quest_publish', 'quest_complete'], requested, 'Quest-specific review')
+    assert revised['_id'] != original['logical_id']
+    assert grant['scope'] == {'kind': 'quest', 'quest': original['logical_id']}
+    assert requested['quest'] == (revised['_id'] if select_revision else original['_id'])
+    assert s.get('ledger_relationships', grant['_id'])['scope'] == grant['scope']
+    assert grant['quest_revision'] == requested['quest']
+    service.publish(member(2), revised['_id'], 17)
+    service.accept(member(1), revised['_id'])
+    evidence = service.submit(member(1), revised['_id'], 'Completed the corrected jig')
+    completed = service.verify(member(2), evidence['_id'])
+    for record in (s.get('ledger_quests', revised['_id']), completed):
+        assert record['review_authority'] == {'authority': 'delegated', 'grant_id': grant['_id'], 'grant_version': 1}
+    assert l.participant(member(1))['xp'] == '17'
+    with pytest.raises(Denied):
+        authority.authorize(member(2), member(1), 'quest_complete', quest='unrelated-quest')
+    with pytest.raises(Denied):
+        authority.authorize(member(2), member(1), 'learning_review', quest=original['logical_id'])
+    with pytest.raises(Denied):
+        authority.authorize(member(2), member(2), 'quest_complete', quest=original['logical_id'])
+    authority.revoke(member(10), grant['_id'], 'Review finished')
+    with pytest.raises(Denied):
+        authority.authorize(member(2), member(1), 'quest_publish', quest=original['logical_id'])
+
+
+@pytest.mark.parametrize('legacy_grant', [False, True])
+def test_revised_quest_grant_uses_selected_shops_and_preserves_legacy_audit(joined, legacy_grant):
+    l, s, src, *_ = joined
+    set_participant(l, s, 3, rank=3)
+    service, authority = Quests(l), Authority(l)
+    original = service.draft(member(3), 'Jig', 'Original shop', 'Observable jig', 1, shops=[member(201)])
+    revised = service.draft(member(3), 'Revised jig', 'New shop', 'Observable jig', 1,
+                            shops=[member(202)], revision_of=original['_id'])
+    service.submit_draft(member(3), revised['_id'])
+    src.data['members'][9].update(role='resource_manager', resource_manager_shop_ids=[oid(202)])
+    grant = authority.grant(member(10), member(2), ['quest_publish'], {'kind': 'quest', 'quest': revised['_id']}, 'Shop two review')
+    if legacy_grant:
+        grant['scope']['quest'] = revised['_id']
+        grant.pop('quest_revision')
+        s.put('ledger_relationships', grant)
+    assert authority.grant_valid(grant)
+    review = service.publish(member(2), revised['_id'], 17)
+    assert review['review_authority']['grant_id'] == grant['_id']
+    assert s.get('ledger_relationships', grant['_id'])['scope'] == grant['scope']
+    assert s.get('ledger_relationships', grant['_id'])['version'] == 1
+    with pytest.raises(Denied):
+        authority.authorize(member(2), member(1), 'quest_publish', [member(201)], original['logical_id'])
+    src.data['members'][9]['resource_manager_shop_ids'] = []
+    with pytest.raises(Denied):
+        authority.authorize(member(2), member(1), 'quest_publish', [member(202)], original['logical_id'])
+
+
+def test_revision_normalization_preserves_resource_manager_shop_limits(joined):
+    l, s, src, *_ = joined
+    set_participant(l, s, 3, rank=3)
+    service, authority = Quests(l), Authority(l)
+    original = service.draft(member(3), 'Jig', 'Shop one jig', 'Observable jig', 1, shops=[member(201)])
+    service.submit_draft(member(3), original['_id'])
+    service.publish(member(10), original['_id'], 17)
+    within = service.draft(member(3), 'Revised jig', 'Still shop one', 'Observable jig', 1,
+                           shops=[member(201)], revision_of=original['_id'])
+    outside = service.draft(member(3), 'Multi-shop jig', 'Additional shop', 'Observable jig', 1,
+                            shops=[member(201), member(202)], revision_of=original['_id'])
+    src.data['members'][9].update(role='resource_manager', resource_manager_shop_ids=[oid(201)])
+    grant = authority.grant(member(10), member(2), ['quest_publish'], {'kind': 'quest', 'quest': within['_id']}, 'Shop one review')
+    assert grant['scope']['quest'] == original['logical_id']
+    with pytest.raises(Denied, match="grantor's current staff authority"):
+        authority.grant(member(10), member(2), ['quest_publish'], {'kind': 'quest', 'quest': outside['_id']}, 'Outside assignment')
+    service.submit_draft(member(3), within['_id'])
+    assert service.publish(member(2), within['_id'], 17)['status'] == 'published'
+    service.submit_draft(member(3), outside['_id'])
+    with pytest.raises(Denied):
+        service.publish(member(2), outside['_id'], 17)
+    assert s.get('ledger_quests', outside['_id'])['status'] == 'pending_review'
+
+
+@pytest.mark.parametrize('scope', [{'kind': 'quest'}, {'kind': 'quest', 'quest': 'missing'},
+                                  {'kind': 'quest', 'quest': 'missing', 'extra': 'forged'}])
+def test_quest_grant_rejects_missing_or_malformed_selection(joined, scope):
+    l, s, *_ = joined
+    with pytest.raises(ValueError, match='existing quest'):
+        Authority(l).grant(member(10), member(2), ['quest_publish'], scope, 'Invalid selection')
+    assert not s.select('ledger_relationships', {'kind': 'delegation'})
 
 
 def test_quest_scoped_grants_and_publication_ui_admit_valid_delegates(joined):

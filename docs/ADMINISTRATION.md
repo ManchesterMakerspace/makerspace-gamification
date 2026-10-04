@@ -74,3 +74,5 @@ The developing-mentor milestone requires approved guidance that includes the new
 ## Delegated reviews and member quests
 
 Use `/ledger-admin delegates` for explicit capability/scope grants, inspection, and reasoned revocation. Delegates can access authorized pending review actions without a staff role; configuration and finalized corrections remain staff-only. `/ledger-admin review` includes member quest publication and completion queues. `/ledger-admin publish-quest <revision>` / `reject-quest <revision>` open independent reward review. See [complete authority and lifecycle rules](ENGAGEMENT_QUESTS.md).
+
+Quest scope accepts any revision ID and stores the quest's stable logical ID. The selected revision records the relevant shops, and reviews of later revisions still require those reviews' shops to be within the grantor's current scope. Legacy grants containing a revision ID resolve to the same logical quest without replacing their audit history.

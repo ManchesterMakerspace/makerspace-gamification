@@ -41,6 +41,12 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert len(matrix['text'].encode()) <= MAX_MATRIX_BYTES
     assert {r.get('id') for r in root.find('roles')} == REQUIRED_ROLES
     assert 'Repeated join requests show saved participation' in root.find('consent').text
+    assert 'Only in registered Ledger channels' in root.find('channels').text
+    assert 'old ambient jobs are blocked before inference' in root.find('channels').text
+    assert 'distinct specialized evidence attempt' in root.find('economy').text
+    delegate = root.find("roles/role[@id='delegated_reviewer']").text
+    assert 'stable logical ID' in delegate and "every actual operation's shops" in delegate
+    assert 'history-import pending' in root.find('response').text
     for i, (name, _, floor, _) in enumerate(RANKS, 1):
         assert f'| {i} | {name} | {floor if floor is not None else "Inactive"} |' in root.find('progression').text
     for rate in XP.values():

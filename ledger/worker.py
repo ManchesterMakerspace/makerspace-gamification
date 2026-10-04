@@ -229,25 +229,28 @@ class Worker:
         self.ledger.require_member(member_id)
         managed = {c["channel_id"] for c in self.store.select("ledger_channels", {"kind": "channel"})}
         thread = event.get("thread_ts") or event.get("ts")
-        addressed = is_dm or kind == "app_mention" or (self.bot_id and re.search(r"<@" + re.escape(self.bot_id) + r"(?:\|[^>]+)?>", text)) or bool(re.search(r"\b(?:the\s+)?ledger\b|\bthe\s+system\b", text, re.I))
+        addressed = self.chat_addressed(text, kind, is_dm)
         continuing = self.store.get("ledger_context", f"thread:{channel}:{thread}")
         if not is_dm and channel not in managed:
+            if not (addressed or continuing):
+                return "ignored_unaddressed_channel_message"
             # Slack may deliver mentions from channels the bot has not joined.
             info = self.slack.conversations_info(channel=channel)["channel"]
             if info.get("is_member") is not True:
                 return "ignored_unjoined_channel"
         message_id = f"message:{channel}:{event['ts']}"
         self.store.atomic(lambda s: s.put("ledger_context", {"_id": message_id, "kind": "message", "member_id": member_id,
-            "channel": channel, "thread": thread, "text": text[:6000], "at": event["ts"],
+            "channel": channel, "thread": thread, "text": text[:6000], "at": event["ts"], "conversation_requested": bool(addressed or continuing),
             "participating": self.ledger.active(member_id), "consent_generation": (self.ledger.participant(member_id) or {}).get("consent_generation", 0),
             "expires_at": now() + timedelta(days=30)}))
         from .conversations import self_progress_question
+        # Recognition selects tools; only managed channels may trigger ambient replies.
         progress_request = self.ledger.active(member_id) and self_progress_question(text)
         if not is_dm:
             from .engagement import Engagement
             Engagement(self.ledger).capture(member_id, message_id, "message", text, channel, datetime.fromtimestamp(float(event["ts"]), timezone.utc))
         question = "?" in text
-        if addressed or continuing or progress_request or question:
+        if addressed or continuing or (channel in managed and (progress_request or question)):
             def write(s):
                 enqueue(s, "ledger_outbox", f"reply:{channel}:{event['ts']}", "conversation", {"member_id": member_id, "channel": channel,
                         "thread": thread, "text": text[:6000], "message_id": message_id, "progress_request": progress_request,
@@ -258,6 +261,11 @@ class Worker:
             self.store.atomic(write)
             return "reply_queued"
         return "ignored_unaddressed_channel_message"
+
+    def chat_addressed(self, text, kind=None, is_dm=False):
+        return bool(is_dm or kind == "app_mention" or
+                    (self.bot_id and re.search(r"<@" + re.escape(self.bot_id) + r"(?:\|[^>]+)?>", text)) or
+                    re.search(r"\b(?:the\s+)?ledger\b|\bthe\s+system\b", text, re.I))
 
     def command(self, member_id, command, key):
         from .slack_app import SlackUI
@@ -625,10 +633,18 @@ class Worker:
             request = self.store.get("ledger_context", p["message_id"])
             if not request:
                 raise Denied("The original request was deleted.")
+            managed = {c["channel_id"] for c in self.store.select("ledger_channels", {"kind": "channel"})}
+            unrelated = not p["channel"].startswith("D") and p["channel"] not in managed
+            if unrelated:
+                requested = (request.get("conversation_requested") or self.chat_addressed(request["text"]) or
+                             self.store.get("ledger_context", f"thread:{p['channel']}:{p['thread']}"))
+                if p.get("ambient") or not requested:
+                    raise Denied("Ambient questions require a registered Ledger channel.")
             query = {"kind": {"$in": ["message", "reply"]}, "channel": p["channel"]}
             if not p["channel"].startswith("D"):
                 query["thread"] = p["thread"]
             context = [c for c in self.store.select("ledger_context", query) if c["_id"] != p["message_id"]
+                       and (not unrelated or c["kind"] == "reply" or c.get("conversation_requested"))
                        and (c["kind"] == "reply" or self.ledger.sources.permitted(c["member_id"]))]
             from .conversations import restricted_answer
             context = [c for c in context if not restricted_answer(self.ledger, member_id, c["text"])

@@ -46,7 +46,7 @@ class Authority:
             return bool(staff and staff["kind"] == "global")
         shops = scope.get("shops", [])
         if scope["kind"] == "quest":
-            quest = self.l.store.get("ledger_quests", scope["quest"])
+            quest = self.l.store.get("ledger_quests", grant.get("quest_revision") or scope["quest"])
             if not quest:
                 return False
             shops = quest.get("shop_ids") or [quest.get("shop_id")]
@@ -60,7 +60,15 @@ class Authority:
                 self.l.touch(actor)
             return {"authority": "staff", "grant_id": None, "grant_version": None}
         for grant in self.l.store.select("ledger_relationships", {"kind": "delegation", "delegate": actor, "status": "active"}):
-            if capability in grant["capabilities"] and self.grant_valid(grant) and self.covers(grant["scope"], shops, quest):
+            scope = grant["scope"]
+            if scope["kind"] == "quest":
+                selected = self.l.store.get("ledger_quests", grant.get("quest_revision") or scope["quest"])
+                if not selected:
+                    continue
+                # Resolve older revision-scoped grants without rewriting their audit history.
+                scope = {"kind": "quest", "quest": selected.get("logical_id") or selected["_id"]}
+            if (capability in grant["capabilities"] and self.grant_valid(grant) and self.covers(scope, shops, quest)
+                    and (grant["scope"]["kind"] != "quest" or self.covers(self.staff_scope(grant["grantor"]), shops))):
                 if commit:
                     # Explicit revocation writes this same document, forcing a
                     # Mongo transaction conflict rather than stale-modal approval.
@@ -78,6 +86,7 @@ class Authority:
             d = Ledger(s, self.l.sources)
             a = Authority(d)
             scope = requested_scope
+            selected = None
             d.require(delegate)
             if actor == delegate or not d.sources.good_standing(delegate) or not reason.strip():
                 raise Denied("Select another participating member and provide a reason.")
@@ -89,14 +98,24 @@ class Authority:
                 if set(scope) != {"kind", "shops"} or not scope["shops"] or any(not d.sources.shop(i) for i in scope["shops"]):
                     raise ValueError("Select existing shops.")
                 scope = {"kind": "shops", "shops": sorted(set(scope["shops"]))}
-            elif scope["kind"] == "quest" and (set(scope) != {"kind", "quest"} or not s.get("ledger_quests", scope["quest"])):
-                raise ValueError("Select an existing quest.")
+            elif scope["kind"] == "quest":
+                if set(scope) != {"kind", "quest"}:
+                    raise ValueError("Select an existing quest.")
+                selected = s.get("ledger_quests", scope["quest"])
+                if not selected:
+                    raise ValueError("Select an existing quest.")
+                if not self.covers(a.staff_scope(actor), selected.get("shop_ids") or [selected.get("shop_id")]):
+                    raise Denied("A grant cannot exceed the grantor's current staff authority.")
+                scope = {"kind": "quest", "quest": selected.get("logical_id") or selected["_id"]}
             elif scope["kind"] == "global" and set(scope) != {"kind"}:
                 raise ValueError("Invalid global scope.")
             doc = {"_id": "grant:" + str(uuid4()), "kind": "delegation", "delegate": delegate,
                    "grantor": actor, "capabilities": sorted(set(capabilities)), "scope": scope,
                    "consent_generation": d.participant(delegate).get("consent_generation", 0),
                    "status": "active", "version": 1, "at": now(), "reason": reason}
+            if selected:
+                # Retain the selected revision's shops for grantor eligibility checks.
+                doc["quest_revision"] = selected["_id"]
             if not a.grant_valid(doc):
                 raise Denied("A grant cannot exceed the grantor's current staff authority.")
             d.touch(delegate)

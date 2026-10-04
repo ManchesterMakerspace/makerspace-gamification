@@ -225,17 +225,20 @@ class Quests:
             q = Quests(d).eligible(member, q, "submit")
             if not description.strip() or len(description) > 2000:
                 raise ValueError("Describe observable completion evidence.")
-            specialized = None
-            if q["classification"] != "challenge":
-                specialized = d._submit(member, q["catalog_id"], description, list(learners), (q["shop_ids"] or [None])[0], mentor, handoff, "member-quest:" + q["logical_id"])
-                specialized["quest_link"] = q["logical_id"]
-                s.put("ledger_evidence", specialized)
-            doc = {"_id": f"quest-submission:{member}:{q['logical_id']}", "kind": "quest_submission", "member_id": member,
-                   "quest_revision": q["_id"], "logical_id": q["logical_id"], "description": description, "status": "pending", "at": now(),
-                   "specialized_evidence": specialized["_id"] if specialized else None}
-            previous = s.get("ledger_evidence", doc["_id"])
+            submission_id = f"quest-submission:{member}:{q['logical_id']}"
+            previous = s.get("ledger_evidence", submission_id)
             if previous and previous["status"] in ("pending", "approved"):
                 return previous
+            submission_version = previous.get("submission_version", 1) + 1 if previous else 1
+            specialized = None
+            if q["classification"] != "challenge":
+                specialized = d._submit(member, q["catalog_id"], description, list(learners), (q["shop_ids"] or [None])[0], mentor, handoff,
+                                        f"member-quest:{q['logical_id']}:attempt:{submission_version}")
+                specialized["quest_link"] = q["logical_id"]
+                s.put("ledger_evidence", specialized)
+            doc = {"_id": submission_id, "kind": "quest_submission", "member_id": member, "submission_version": submission_version,
+                   "quest_revision": q["_id"], "logical_id": q["logical_id"], "description": description, "status": "pending", "at": now(),
+                   "specialized_evidence": specialized["_id"] if specialized else None}
             d.touch(member)
             d.touch(q["creator"])
             s.put("ledger_evidence", doc)
