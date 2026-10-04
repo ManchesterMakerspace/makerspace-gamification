@@ -75,6 +75,7 @@ def test_dependent_tool_reset_and_mrkdwn_authoring(joined):
 
 def test_rank_forms_preview_and_publish_keep_pinned_version(joined):
     l, s, _, comp, _, slack = joined
+    l.join(str(oid(10)))
     ui = SlackUI(l, comp)
     view = views.ranks_form(s.get('ledger_rulesets', 'initial'))
     fields = {}

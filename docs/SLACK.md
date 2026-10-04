@@ -28,7 +28,7 @@ The manifest enables App Home and writable app messages. All seven commands have
 | `/ledger-mentor` | Success Buddies and verified mentoring |
 | `/kudos` | Thanks for linked members with or without opt-in; optional emoji, public sharing and invitation |
 | `/ledger-project` | Project gallery and feedback threads |
-| `/ledger-admin` | Authorized configuration, verification, metrics, pause/resume |
+| `/ledger-admin` | Opted-in authorized staff/delegates only; role-scoped help and actions |
 
 All modals, buttons, checkboxes, and external shop/tool/member dropdowns use the interaction endpoint. They are interaction payloads, not additional event subscriptions or commands.
 
@@ -114,7 +114,7 @@ Slack delivers `message.im` and `message.groups` as `type: "message"`; `message_
 | `groups:write` | `conversations.create` with `is_private`, `conversations.invite`, `conversations.kick` |
 | `im:history` | `message.im`, including edits/deletions |
 | `im:write` | `conversations.open` for recipient DMs and file delivery |
-| `users:read` | `users.info` for human/active checks and `user_change` |
+| `users:read` | `users.info` for human/active checks, `user_change`, and complete bounded `users.list` name/alias reads for quest-inspiration redaction |
 | `files:write` | Skill-tree image/text and rank art via `files.getUploadURLExternal` / `files.completeUploadExternal` (`files_upload_v2`) |
 
 `groups:write` is needed for [private-channel removal](https://docs.slack.dev/reference/methods/conversations.kick/) as well as [invitations](https://docs.slack.dev/reference/methods/conversations.invite/); invite-only permission would not cover opt-out cleanup. [External file uploads](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) require `files:write`. `views.open`, `views.update`, `views.publish`, and `chat.getPermalink` need an authenticated bot but no extra scopes beyond this set for the supported flows.
@@ -134,3 +134,15 @@ The `/kudos` sending modal offers an optional emoji picker. Its selection is sav
 Both sending and receiving are available without game opt-in. Recipient participation still controls XP; one giver/recipient/week and five recipient/day qualifying XP caps still apply, and extra thanks still deliver. Nonparticipant senders can request public delivery and an invitation, but do not become recruitment sponsors. Requested acknowledgments/receipts are delivered without opt-in. Public-channel scopes and subscriptions have changed: update the manifest and reinstall the app before verifying joined-channel chat.
 
 DMs acknowledging kudos submissions and reporting delivery use `delivery.json` paired variations. Recipient identity, overall status, DM/public status and the once-only XP result are available to custom prompts; the original kudos body is excluded. Customize with `/ledger-admin template delivery member` or explicitly adopt the updated file via `/ledger-admin template-library delivery member`. Saved choices/text remain stable on retries. See [delivery prompt variables](PROMPTS.md).
+
+Review notifications post and update through `chat.postMessage`/`chat.update`, both covered by existing `chat:write`. `LEDGER_QUEST_REVIEW_CHANNEL_ID` must name a private, non-external staff channel separate from game channels, with the bot invited. A deleted saved review message is replaced only when update returns `message_not_found`; permission and rate-limit failures use outbox retry.
+
+## Administrative access and invitations
+
+Application Home/help, command responses, and generated private chat show administrative commands only to eligible opted-in humans. Source MLAB members role admin enables /ledger-admin at every rank, including slot zero. Board members retain global authority, resource managers retain shop scope, and active delegates retain granted review scope; all require current participation for this command. Rank or a role claim in chat never grants access. Ineligible invocations return an account-unavailable response without administrative help. Queued help is rechecked before delivery.
+
+Use /ledger-admin help for available actions and /ledger-admin invite to open a recipient picker, optional sender name, and optional personal message. The picker excludes opted-in, revoked/suspended, merged and invalid human identities, and submission/delivery recheck eligibility. A blank sender uses the admin source first/last name. A supplied sender replaces that real name in all invitation text and blocks; no admin mention or sponsorship identifier is sent to the recipient. Personal text is delivered without AI rewriting. This is a consent invitation, never automatic enrollment or XP. The recipient still reviews the notice and explicitly opts in.
+
+Source-role admins who opt in are invited to LEDGER_QUEST_REVIEW_CHANNEL_ID; opting out removes them. Board/resource/delegation roles are not automatically added. The destination must be private, unshared, contain The Ledger and be separate from game channels. Reconciliation backfills opted-in admins and cleans up role/identity/configuration changes. Membership confers no additional review authority.
+
+Slack itself registers slash commands workspace-wide and does not offer application-controlled per-member command discovery. The app hides all its own administrative help for ineligible members and uses a generic registered description, but Slack's slash-command picker can still show /ledger-admin. See [Slack slash-command accessibility](https://docs.slack.dev/slack-marketplace/slack-marketplace-app-guidelines-and-requirements/#slash-commands).

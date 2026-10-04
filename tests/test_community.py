@@ -99,6 +99,7 @@ def test_resource_manager_can_review_only_own_shop_without_rank_permission(joine
     l, s, src, comp, _, slack = joined
     rm, author, learner = str(oid(3)), str(oid(1)), str(oid(2))
     src.data['members'][2].update(role='resource_manager', resource_manager_shop_ids=[oid(201)])
+    l.join(rm)
     own = l.submit(author, 'mentoring-session', 'Shop one lesson', [learner], shop=str(oid(201)))
     other = l.submit(author, 'mentoring-session', 'Shop two lesson', [learner], shop=str(oid(202)))
     l.acknowledge(learner, own['_id'])
@@ -153,6 +154,7 @@ def test_invalid_mapping_and_suspension_prevent_access(joined):
 
 def test_pause_preserves_opt_out_and_separate_channel_queue(joined):
     l, s, _, comp, _, slack = joined
+    l.join(str(oid(10)))
     w = Worker(l, comp, slack)
     w.admin_command(str(oid(10)), ['pause'], 'pause')
     with pytest.raises(Denied):

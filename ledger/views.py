@@ -68,7 +68,7 @@ def consent(sponsor=None):
     return modal("consent", "Join The Ledger", [
         section("The Ledger recognizes learning, mentoring, and community contribution. Joining imports verified makerspace history and invites you to private game channels."),
         section("If you opt out, channel access and game announcements stop. Your skills and XP are retained and eligible makerspace activity continues accruing silently. Peer-addressed kudos may still be delivered, but earns no kudos XP while you are opted out."),
-        section("The Ledger customizes messages using relevant game facts. Opt-in also covers observation of new activity in Ledger channels, kudos issuance metadata, and verified volunteer activity. The System records suggestions for audit only; they do not change XP or ranks or send recognition messages. Preferences independently disable observation and arrival mentions. An explanatory notice arrives before observation activates. Participation never changes tool safety clearances."),
+        section("The Ledger customizes messages using relevant game facts. Observation is on by default for eligible members in configured Ledger channels, independently of joining, after an explanatory notice. The System records suggestions for audit only; they do not change XP or ranks or send recognition messages. To opt out, use /ledger preferences and uncheck Allow observation. Joining, observation, and arrival mentions are separate choices. Participation never changes tool safety clearances."),
         checkbox("agree", "I choose to participate")], {"sponsor": sponsor}, "Opt in")
 
 
@@ -87,6 +87,15 @@ def participation(ledger, member_id, title="Already opted in"):
 
 def kudos_recipient():
     return modal("kudos_recipient", "Give kudos", [select_input("recipient", "Choose a member first")], {"key": str(uuid4())})
+
+
+def admin_invitation():
+    return modal("admin_invitation", "Invite to The Ledger", [
+        select_input("invite_recipient", "Member to invite"),
+        text_input("sender", "Sender name (optional)", optional=True, max_length=100),
+        section("Leave sender blank to use your real name. A sender name replaces your real name in the invitation."),
+        text_input("message", "Personal message (optional)", optional=True, multiline=True),
+        section("This sends an invitation. The recipient chooses whether to join.")], {"key": str(uuid4())}, "Send invitation")
 
 
 def kudos_form(ledger, recipient, key, draft=None):
@@ -143,7 +152,7 @@ def home(ledger, member_id):
     p = ledger.participant(member_id)
     if not ledger.active(member_id):
         return {"type": "home", "blocks": [section("*The Ledger*\nChoose your own path through learning, making, and helping."),
-            {"type": "actions", "elements": [button("Opt in", "join", "")]}]}
+            {"type": "actions", "elements": [button("Opt in", "join", ""), button("Preferences", "preferences", "")]}]}
     display = ledger.presentation(p["rank"])
     rules = ledger.store.get("ledger_rulesets", p["ruleset"])
     blocks = [section(f"{display['emoji']} *{escape(display['name'])}* · {p['xp']} XP"),
@@ -164,6 +173,10 @@ def home(ledger, member_id):
             title = escape(project["title"])
             blocks.append(section(f"<{project['permalink']}|{title}>" if project.get("permalink") else title))
     blocks.append({"type": "actions", "elements": [button("Current rank channel", "reinvite", ""), button("Opt out", "leave", "")]})
+    from .admin_access import help_text
+    administrative_help = help_text(ledger, member_id)
+    if administrative_help:
+        blocks.append(section(administrative_help))
     return {"type": "home", "blocks": blocks}
 
 
@@ -206,10 +219,13 @@ def progress_view(ledger, member):
 
 
 def preferences(ledger, member):
-    p = ledger.require(member)
+    if not ledger.member_eligible(member):
+        from .domain import Denied
+        raise Denied("A valid linked human Slack account is required.")
+    p = ledger.preference_profile(member)
     pref = p.get("preferences", {})
     return modal("preferences_save", "Ledger preferences", [
-        section("The System observes only new eligible activity in registered Ledger channels, kudos issuance metadata, and verified volunteer activity. Original kudos text and DMs are excluded. Suggestions are audit-only and do not change XP or ranks or send recognition messages. Ask staff about the audit process."),
+        section("Observation is on by default for eligible members, whether or not you join The Ledger, after an explanatory notice. To opt out, uncheck Allow observation and save. The System observes only new eligible activity in configured Ledger channels, kudos issuance metadata, and verified volunteer activity. Original kudos text and DMs are excluded. Suggestions are audit-only and do not change XP or ranks or send recognition messages. Game participation and arrival mentions are separate. Ask staff about the audit process."),
         checkbox("observation", "Allow observation", pref.get("observation", True)),
         checkbox("arrival_mentions", "Allow arrival mentions", pref.get("arrival_mentions", True))], submit="Save")
 
@@ -242,9 +258,10 @@ def quest_browser(ledger, member, selected=None):
         blocks[0]["element"]["initial_option"] = option(item["title"], selected)
         blocks.extend([section(f"*{escape(item['title'])}*\n{escape(item.get('description') or item.get('criteria', ''))}"),
                        section("*Acceptance criteria*\n" + escape(item.get("criteria", "")))])
-        if item.get("kind") == "member_quest":
-            author_uid = ledger.sources.slack_id(item["creator"])
-            author = f"<@{author_uid}>" if author_uid and ledger.active(item["creator"]) else escape(author_uid or "Unavailable Slack identity")
+        from .quest_policy import cooperative, generated, individual
+        if individual(item):
+            author_uid = None if generated(item) else ledger.sources.slack_id(item["creator"])
+            author = "The Ledger" if generated(item) else (f"<@{author_uid}>" if author_uid and ledger.active(item["creator"]) else escape(author_uid or "Unavailable Slack identity"))
             blocks.extend([section(f"*Creator:* {author}\n*Exact target rank:* {escape(ledger.presentation(item['target_rank'])['name'])}\n*Approved reward:* {item['reward']} XP\n*Verification:* independent authorized reviewer"),
                 section("*Prerequisites*\nShops: " + escape(", ".join((ledger.sources.shop(i) or {}).get("name", i) for i in item["shop_ids"]) or "None") +
                         "\nTools: " + escape(", ".join((ledger.sources.tool(i) or {}).get("name", i) for i in item["tool_ids"]) or "None"))])
@@ -253,10 +270,36 @@ def quest_browser(ledger, member, selected=None):
         elif item.get("kind") == "challenge":
             blocks.append(section("*Verification:* existing milestone evidence requirements and independent review.\nUse /ledger-quests submit " + escape(item["_id"])))
         else:
-            blocks.append(section("*Disciplines:* " + escape(", ".join(item["roles"])) + "\nUse /ledger-quests join " + escape(item["_id"]) + " <discipline>, then contribute for independent verification."))
+            if cooperative(item):
+                blocks.append(section(f"*Creator:* The Ledger\n*Intended rank slot:* {item['target_rank']} (any participant may join)\n*Approved reward:* {item['reward']} XP per verified contributor"))
+                disciplines = "\n".join(f"{d['name']}: {d['expectation']}" for d in item["disciplines"])
+            else:
+                disciplines = ", ".join(item["roles"])
+            blocks.append(section("*Disciplines:* " + escape(disciplines) + "\nUse /ledger-quests join " + escape(item["_id"]) + " <discipline>, then contribute for independent verification."))
         metadata["selected"] = selected
     blocks.append({"type": "actions", "elements": [button("Create quest", "quest_author", "")]})
     return modal("dismiss", "Explore quests", blocks, metadata, "Done")
+
+
+def ledger_quest_review(quest, approve=True):
+    blocks = [section(f"*The Ledger proposal* — {quest['quest_type']}, rank slot {quest['target_rank']}"),
+        text_input("title", "Title", quest["title"], max_length=100),
+        text_input("description", "Instructions", quest["description"], multiline=True),
+        text_input("criteria", "Observable completion criteria", quest["criteria"], multiline=True),
+        text_input("shops", "Shop prerequisite IDs (comma separated)", ", ".join(quest["shop_ids"]), optional=True),
+        text_input("tools", "Tool prerequisite IDs (comma separated)", ", ".join(quest["tool_ids"]), optional=True)]
+    if quest["quest_type"] == "cooperative":
+        # Explicit name/expectation fields avoid a JSON-editing member workflow.
+        for index in range(4):
+            discipline = quest["disciplines"][index] if index < len(quest["disciplines"]) else {}
+            blocks.extend([text_input(f"discipline_name_{index}", f"Discipline {index + 1}", discipline.get("name", ""), optional=index >= 2, max_length=40),
+                text_input(f"discipline_expectation_{index}", f"Discipline {index + 1} contribution evidence", discipline.get("expectation", ""), optional=index >= 2, max_length=400)])
+    blocks.extend([text_input("reward", "Whole-number reward per member (0–500 XP)", "100"),
+        text_input("reason", "Review reason", optional=approve, multiline=True),
+        section("Edits create a new reviewed revision; The Ledger remains the author. Publication grants no XP. "
+                "Cooperative rewards require independent contribution verification and a final shared-outcome review.")])
+    return modal("ledger_quest_review", "Review Ledger quest", blocks, {"quest": quest["_id"], "approve": approve},
+                 "Approve quest" if approve else "Reject quest")
 
 
 def quest_author(ledger, member, draft=None, suggestion=False):

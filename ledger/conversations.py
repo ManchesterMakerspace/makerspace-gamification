@@ -25,6 +25,8 @@ def conversation_facts(ledger, member, private, request):
     if not private:
         deficits.pop("blockers", None)
     facts = {"participating": True, "current_rank": ledger.presentation(p["rank"])["name"], "ranks": ranks, "progress": deficits}
+    from .admin_access import help_text
+    facts["administrative_help"] = help_text(ledger, member) if private else ""
     if re.search(r"\bquests?\b", request, re.I):
         from .quests import Quests
         service = Quests(ledger)
@@ -45,13 +47,17 @@ def conversation_policy(matrix):
 
 
 def restricted_answer(ledger, member, content):
+    from .admin_access import command_eligible
+    if "/ledger-admin" in content and not command_eligible(ledger, member):
+        return True
     p = ledger.participant(member) if ledger.active(member) else None
     slot = p["rank"] if p else 0
     for rank in ledger.store.get("ledger_catalog", "rank_display")["ranks"]:
         if rank["slot"] > slot and re.search(r"(?<!\w)" + re.escape(rank["name"]) + r"(?!\w)", content, re.I):
             return True
-    for quest in ledger.store.select("ledger_quests", {"kind": "member_quest"}):
-        if quest["target_rank"] > slot and quest.get("title") and quest["title"].casefold() in content.casefold():
+    from .quest_policy import REVIEWED_KINDS, cooperative
+    for quest in ledger.store.select("ledger_quests", {"kind": {"$in": list(REVIEWED_KINDS)}}):
+        if not cooperative(quest) and quest["target_rank"] > slot and quest.get("title") and quest["title"].casefold() in content.casefold():
             return True
     return False
 
@@ -87,7 +93,10 @@ def converse(ledger, composer, member, request, history=(), private=True, select
         "Only discuss supplied current/lower rank details and next promotion requirements; never give future rank names or other higher-rank details, "
         "or quests absent from authorized facts. Nonparticipants may ask about The Ledger and XP generally; do not describe rules, specific ranks or quests. "
         "For nonparticipants optionally invite /ledger join to see behind the curtain, take the red pill, see how deep the rabbit hole goes, "
-        "start their journey or reach the next level. This invitation never implies consent. " +
+        "start their journey or reach the next level. This invitation never implies consent. "
+        "Observation defaults on for eligible members in configured channels after notice, independently of game participation. "
+        "Anyone eligible can opt out using /ledger preferences and unchecking Allow observation. Never claim chat saved this preference. " +
+        "Only mention administrative commands when administrative_help is supplied; never expose them in shared channels. " +
         ("This is an unaddressed channel question. Reply only if useful and relevant to makerspace shops/tools or The Ledger. Otherwise return exactly NO_REPLY. " if ambient else "") +
         "Authoritative caller facts: " + json.dumps(facts, default=str) + "\n" +
         ("This is a private DM." if private else "This is a shared Ledger thread; eligibility details belong in private detail.")},
@@ -115,7 +124,7 @@ def converse(ledger, composer, member, request, history=(), private=True, select
                     raise ValueError("No catalog facts support the shop/tool answer")
                 if not isinstance(content, str) or not content.strip() or len(content) > 2400 or "<@" in content or "<!" in content or "<think>" in content:
                     raise ValueError("Invalid member-facing response")
-                if restricted_answer(ledger, member, content):
+                if restricted_answer(ledger, member, content) or (not private and "/ledger-admin" in content):
                     raise ValueError("Answer disclosed an inaccessible rank or quest")
                 return {"text": member_text(content), "outcome": "generated", "tool_calls": context.calls, "latency": time.monotonic() - started}
             calls = response["tool_calls"]

@@ -34,6 +34,11 @@ class MongoStore:
         return list(self.db[owned(collection)].find(query or {}, session=self.session))
 
     def put(self, collection, doc):
+        from .review_notifications import prepare, watched
+        if watched(collection):
+            if not self.session:
+                return self.atomic(lambda s: s.put(collection, doc))
+            prepare(self, collection, doc, self.get(collection, doc["_id"]))
         self.db[owned(collection)].replace_one({"_id": doc["_id"]}, doc, upsert=True, session=self.session)
 
     def delete(self, collection, key):
@@ -87,10 +92,12 @@ class MongoStore:
         self.db.ledger_relationships.create_index([("kind", 1), ("grantor", 1), ("status", 1)])
         self.db.ledger_relationships.create_index([("kind", 1), ("scope.kind", 1), ("scope.shops", 1), ("status", 1)])
         self.db.ledger_relationships.create_index([("member_id", 1), ("logical_id", 1), ("kind", 1)])
+        self.db.ledger_relationships.create_index([("kind", 1), ("status", 1), ("quest_revision", 1)])
         self.db.ledger_quests.create_index([("kind", 1), ("status", 1), ("target_rank", 1)])
         self.db.ledger_quests.create_index([("creator", 1), ("logical_id", 1)])
         self.db.ledger_evidence.create_index([("kind", 1), ("status", 1), ("shop_id", 1)])
         self.db.ledger_evidence.create_index([("kind", 1), ("member_id", 1), ("day", 1)])
+        self.db.ledger_evidence.create_index([("kind", 1), ("status", 1), ("lease_until", 1)])
 
 
 def matches(doc, query):
@@ -135,6 +142,13 @@ class MemoryStore:
         return [deepcopy(x) for x in self.data.get(owned(collection), {}).values() if matches(x, query or {})]
 
     def put(self, collection, doc):
+        from .review_notifications import prepare, watched
+        if watched(collection):
+            return self.atomic(lambda s: self._put_review(collection, doc, prepare))
+        self.data.setdefault(owned(collection), {})[doc["_id"]] = deepcopy(doc)
+
+    def _put_review(self, collection, doc, prepare):
+        prepare(self, collection, doc, self.get(collection, doc["_id"]))
         self.data.setdefault(owned(collection), {})[doc["_id"]] = deepcopy(doc)
 
     def delete(self, collection, key):

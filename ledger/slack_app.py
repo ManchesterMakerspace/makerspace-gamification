@@ -71,10 +71,14 @@ class SlackUI:
         if command == "/ledger" and text in ("join", "opt-in"):
             return self.open(client, body, self.join_view(actor))
         if command == "/ledger" and text in ("leave", "opt-out"):
-            return self.open(client, body, views.modal("leave_confirm", "Opt out", [section("Leave all game channels and stop game announcements. Your skills and XP remain, and eligible makerspace activity continues accruing silently. Peer kudos remains available without kudos XP.")], submit="Opt out"))
+            return self.open(client, body, views.modal("leave_confirm", "Opt out", [section("Leave all game channels and stop game announcements. Your skills and XP remain, and eligible makerspace activity continues accruing silently. Peer kudos remains available without kudos XP. Observation is separate; use /ledger preferences to disable it.")], submit="Opt out"))
+        if command == "/ledger" and text == "preferences":
+            return self.open(client, body, views.preferences(self.ledger, actor))
         if command == "/ledger-admin":
-            operation = text.split()[0] if text else "ranks"
-            if operation in ("review", "approve", "reject", "verify-quest", "publish-quest", "reject-quest"):
+            from .admin_access import require_command
+            require_command(self.ledger, actor)
+            operation = text.split()[0] if text else ("ranks" if self.ledger.sources.role(actor) in ("admin", "board_member") else "help")
+            if operation in ("help", "review", "approve", "reject", "verify-quest", "complete-quest", "publish-quest", "reject-quest"):
                 pass  # Per-evidence application authorization admits delegates.
             elif operation in ("delegates", "disable-quest"):
                 self.ledger.staff(actor)
@@ -133,21 +137,44 @@ class SlackUI:
         self.queue(actor, command + " " + text, key)
 
     def admin_command(self, actor, text, body, client):
+        from .admin_access import require_command, help_text
+        require_command(self.ledger, actor)
+        if text == "invite":
+            self.ledger.admin(actor)
+            return self.open(client, body, views.admin_invitation())
+        if text == "help" or (text == "" and self.ledger.sources.role(actor) not in ("admin", "board_member")):
+            return self.open(client, body, views.modal("dismiss", "Administration", [section(help_text(self.ledger, actor))], submit="Done"))
         if text == "delegates":
             return self.open(client, body, views.delegates(self.ledger, actor))
         if text.startswith("publish-quest ") or text.startswith("reject-quest "):
             key = text.split(maxsplit=1)[1]
             quest = self.ledger.store.get("ledger_quests", key)
-            if not quest or quest.get("kind") != "member_quest" or quest["status"] != "pending_review":
-                raise ValueError("Choose a pending member quest revision.")
+            from .quest_policy import REVIEWED_KINDS, generated
+            if not quest or quest.get("kind") not in REVIEWED_KINDS or quest["status"] != "pending_review":
+                raise ValueError("Choose a pending reviewed quest revision.")
             from .authority import Authority
             Authority(self.ledger).authorize(actor, quest["creator"], "quest_publish", quest["shop_ids"], quest["logical_id"])
+            if generated(quest):
+                return self.open(client, body, views.ledger_quest_review(quest, text.startswith("publish-")))
             return self.open(client, body, views.modal("member_quest_review", "Review quest", [
                 section(quest["title"]), section(quest["description"]), section(quest["criteria"]),
                 views.text_input("reward", "Whole-number reward (0–500 XP)", "100"),
                 views.select_input("classification", "Milestone classification", [views.option(c.replace("_", " ").title(), c) for c in sorted(CHALLENGES)]),
                 views.text_input("catalog", "Existing catalog ID (specialized milestones)", optional=True), views.text_input("reason", "Review reason", optional=True)],
                 {"quest": key, "approve": text.startswith("publish-")}, "Record review"))
+        if text.startswith("complete-quest "):
+            from .authority import Authority
+            from .ledger_quests import LedgerQuests
+            from .quest_policy import LEDGER_AUTHOR, cooperative
+            quest = self.ledger.store.get("ledger_quests", text.split(maxsplit=1)[1])
+            if not quest or not cooperative(quest):
+                raise ValueError("Choose a cooperative Ledger quest.")
+            project = LedgerQuests(self.ledger).project(quest) or {}
+            Authority(self.ledger).authorize(actor, LEDGER_AUTHOR, "quest_complete", quest["shop_ids"],
+                quest["logical_id"], excluded=project.get("contributions", {}))
+            return self.open(client, body, views.modal("ledger_group_complete", "Complete shared quest", [
+                section(quest["title"]), section(quest["criteria"]),
+                views.text_input("description", "Verified shared outcome evidence", multiline=True)], {"quest": quest["_id"]}, "Record completion"))
         if text in ("", "ranks"):
             version = self.ledger.store.get("ledger_rulesets", "head")["version"]
             return self.open(client, body, views.ranks_form(self.ledger.store.get("ledger_rulesets", version)))
@@ -215,10 +242,22 @@ class SlackUI:
         if callback == "leave_confirm":
             self.ledger.leave(actor)
             return {}
-        if callback.startswith(("ranks_", "template_")) or callback in ("catalog", "quest_create"):
+        if callback == "admin_invitation":
+            from .admin_access import invite, require_command
+            require_command(self.ledger, actor)
             self.ledger.admin(actor)
-        elif callback in ("member_quest_review", "delegate_grant", "delegate_revoke_submit"):
-            pass  # Domain methods recheck current grants/scope transactionally.
+            self.confirm_human(data["invite_recipient"], client)
+            invite(self.ledger, actor, data["invite_recipient"], data.get("sender"), data.get("message"), meta["key"])
+            return {}
+        if callback.startswith(("ranks_", "template_")) or callback in ("catalog", "quest_create"):
+            from .admin_access import require_command
+            require_command(self.ledger, actor)
+            self.ledger.admin(actor)
+        elif callback in ("member_quest_review", "ledger_quest_review", "ledger_group_complete", "delegate_grant", "delegate_revoke_submit", "preferences_save"):
+            if callback != "preferences_save":
+                from .admin_access import require_command
+                require_command(self.ledger, actor)
+            # Domain methods also recheck current grants/scope transactionally.
         elif callback in ("kudos_recipient", "kudos_send"):
             self.ledger.require_member(actor)
         else:
@@ -237,6 +276,19 @@ class SlackUI:
         if callback == "member_quest_review":
             from .quests import Quests
             Quests(self.ledger).publish(actor, meta["quest"], int(data["reward"]), data["classification"], meta["approve"], data.get("reason", ""), data.get("catalog") or None)
+            return {}
+        if callback == "ledger_quest_review":
+            from .ledger_quests import LedgerQuests
+            split = lambda value: [i.strip() for i in (value or "").split(",") if i.strip()]
+            disciplines = [{"name": data.get(f"discipline_name_{i}", ""), "expectation": data.get(f"discipline_expectation_{i}", "")}
+                           for i in range(4) if data.get(f"discipline_name_{i}") or data.get(f"discipline_expectation_{i}")]
+            edits = {k: data[k] for k in ("title", "description", "criteria")}
+            edits.update(shop_ids=split(data.get("shops")), tool_ids=split(data.get("tools")), disciplines=disciplines)
+            LedgerQuests(self.ledger).review(actor, meta["quest"], int(data["reward"]), meta["approve"], data.get("reason", ""), edits)
+            return {}
+        if callback == "ledger_group_complete":
+            from .ledger_quests import LedgerQuests
+            LedgerQuests(self.ledger).finalize(actor, meta["quest"], data["description"])
             return {}
         if callback == "quest_completion_submit":
             from .quests import Quests
@@ -325,11 +377,15 @@ class SlackUI:
         if name == "join":
             return self.open(client, body, self.join_view(actor, value or None))
         if name == "leave":
-            return self.open(client, body, views.modal("leave_confirm", "Opt out", [section("Your progress is retained and continues accruing silently. All game channel access will be removed.")], submit="Opt out"))
+            return self.open(client, body, views.modal("leave_confirm", "Opt out", [section("Your progress is retained and continues accruing silently. All game channel access will be removed. Observation is separate; use /ledger preferences to disable it.")], submit="Opt out"))
         if name == "ack_mentoring":
             return self.ledger.acknowledge(actor, value)
         if name == "delegate_revoke":
             return self.open(client, body, views.modal("delegate_revoke_submit", "Revoke review grant", [views.text_input("reason", "Required reason", multiline=True)], {"grant": value}, "Revoke"))
+        if name == "preferences":
+            return self.open(client, body, views.preferences(self.ledger, actor))
+        if name == "review_ledger_quest":
+            return self.admin_command(actor, "publish-quest " + value, body, client)
         if name in ("shop", "kudos_change") and body.get("view", {}).get("callback_id") == "kudos_send":
             self.ledger.require_member(actor)
         else:
@@ -394,6 +450,17 @@ class SlackUI:
     def options(self, body):
         actor = self.actor(body)
         name, search = body["action_id"], body.get("value", "").casefold()
+        if name == "invite_recipient":
+            from .admin_access import invitation_eligible, require_command
+            require_command(self.ledger, actor)
+            self.ledger.admin(actor)
+            options = []
+            for member in self.ledger.sources.rows("members", {"merged_at": None}):
+                target = sid(member["_id"])
+                title = " ".join(str(member.get(k) or "") for k in ("firstname", "lastname")).strip() or self.ledger.sources.slack_id(target)
+                if invitation_eligible(self.ledger, target) and search in (title or "").casefold():
+                    options.append(views.option(title, target))
+            return {"options": options[:100]}
         if name == "delegate":
             self.ledger.staff(actor)
             return {"options": [views.option(self.ledger.sources.slack_id(p["member_id"]) or "Member", p["member_id"])

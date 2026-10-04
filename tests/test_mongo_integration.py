@@ -14,7 +14,7 @@ from ledger.storage import connect
 
 @pytest.mark.skipif(not os.environ.get('LEDGER_TEST_MONGO_URI'), reason='Set LEDGER_TEST_MONGO_URI to a disposable Mongo replica set')
 def test_real_transactions_and_concurrent_exactly_once_kudos(env, monkeypatch):
-    _, _, source, *_ = env
+    _, _, source, _, _, slack = env
     database = 'ledger_test_' + uuid4().hex
     store = connect(os.environ['LEDGER_TEST_MONGO_URI'], database)
     try:
@@ -99,8 +99,8 @@ def test_real_transactions_and_concurrent_exactly_once_kudos(env, monkeypatch):
         assert amount(l.participant(a)['xp']) == amount(before)
         l.reconcile(a)
         assert amount(l.participant(a)['xp']) == amount(before)
-        # Notice reopening must conflict with opt-out even when leave's scan
-        # initially sees a cancelled job and would otherwise never write it.
+        # Game consent and observation preferences are independent. A notice
+        # retry remains valid regardless of which game-leave transaction wins.
         c = str(oid(4))
         l.join(c)
         notice_key = f'observation-notice:{c}:1'
@@ -113,7 +113,31 @@ def test_real_transactions_and_concurrent_exactly_once_kudos(env, monkeypatch):
             retry.result()
             leave.result()
         assert not l.active(c)
+        assert l.preference_profile(c)['preferences']['observation'] is True
+        assert store.get('ledger_outbox', notice_key)['status'] == 'pending'
+        # An explicit observation opt-out must block a concurrent retry and
+        # delivery, including a notice reopened before the preference commits.
+        notice = store.get('ledger_outbox', notice_key)
+        notice['status'] = 'cancelled'
+        store.put('ledger_outbox', notice)
+        with ThreadPoolExecutor(2) as pool:
+            retry = pool.submit(Engagement(l).notice, c)
+            optout = pool.submit(l.preferences, c, False, True)
+            retry.result()
+            optout.result()
+        assert l.preference_profile(c)['preferences']['observation'] is False
+        from ledger.worker import Worker
+        from test_worker import claim
+        worker = Worker(l, Composer(store, None), slack)
+        job = store.get('ledger_outbox', notice_key)
+        if job['status'] == 'pending':
+            job = claim(store, notice_key)
+            with pytest.raises(Denied):
+                worker.outbox(job)
+            worker.finish('ledger_outbox', job, 'cancelled', error='Denied')
+        Engagement(l).notice(c)
         assert store.get('ledger_outbox', notice_key)['status'] == 'cancelled'
+        slack.chat_postMessage.assert_not_called()
     finally:
         assert database.startswith('ledger_test_') and len(database) == len('ledger_test_') + 32
         store.db.client.drop_database(database)

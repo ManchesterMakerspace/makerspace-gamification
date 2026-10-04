@@ -28,13 +28,67 @@ def collection_literals(expression):
     return set()
 
 
+def owned_collection_literals(tree):
+    """Follow static collection arguments, not similarly named roles/kinds/callbacks."""
+    bindings = {}
+    def bind(name, value):
+        bindings.setdefault(name, []).append(value)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bind(target.id, node.value)
+        if isinstance(node, ast.For):
+            if isinstance(node.target, ast.Name):
+                bind(node.target.id, node.iter)
+            elif isinstance(node.target, (ast.Tuple, ast.List)) and isinstance(node.iter, (ast.Tuple, ast.List)):
+                for row in node.iter.elts:
+                    if isinstance(row, (ast.Tuple, ast.List)):
+                        for target, value in zip(node.target.elts, row.elts):
+                            if isinstance(target, ast.Name):
+                                bind(target.id, value)
+    def resolve(expression, seen=frozenset()):
+        if isinstance(expression, ast.Name) and expression.id not in seen:
+            return set().union(*(resolve(value, seen | {expression.id}) for value in bindings.get(expression.id, [])))
+        if isinstance(expression, (ast.Tuple, ast.List, ast.Set)):
+            return set().union(*(resolve(value, seen) for value in expression.elts))
+        if isinstance(expression, ast.IfExp):
+            return resolve(expression.body, seen) | resolve(expression.orelse, seen)
+        return collection_literals(expression)
+    result = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ('get', 'put', 'select', 'delete') and node.args):
+            receiver = node.func.value
+            # Dict.get also accepts similarly named application fields. Owned
+            # reads use the store attribute or the store transaction aliases.
+            if node.func.attr == 'get' and not (
+                    isinstance(receiver, ast.Name) and receiver.id in ('store', 's', 'tx', 'self')
+                    or isinstance(receiver, ast.Attribute) and receiver.attr == 'store'):
+                continue
+            result.update(value for value in resolve(node.args[0]) if re.fullmatch(r'ledger_[a-z_]+', value))
+    return result
+
+
+def test_collection_inventory_ignores_role_kind_and_callback_names_but_follows_collection_lists():
+    tree = ast.parse('''
+roles = {"ledger_quest_author"}
+kinds = ("ledger_quest",)
+views.modal("ledger_quest_review", "Review", [])
+names = ("ledger_quests", "ledger_new_collection")
+for collection in names:
+    store.put(collection, {})
+store.get("ledger_quest", "real-collection-with-kind-name")
+''')
+    assert owned_collection_literals(tree) == {'ledger_quests', 'ledger_new_collection', 'ledger_quest'}
+
+
 def test_role_grants_match_actual_collections_deletes_and_indexes():
     trees = [ast.parse(path.read_text(encoding="utf-8")) for path in (ROOT / "ledger").glob("*.py")]
     collections, sources, deletes, indexed = set(), set(), set(), set()
     for tree in trees:
+        collections.update(owned_collection_literals(tree))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and re.fullmatch(r"ledger_[a-z_]+", node.value):
-                collections.add(node.value)
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
             if node.func.attr in ("rows", "bounded") and node.args:

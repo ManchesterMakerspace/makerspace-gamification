@@ -6,6 +6,8 @@ The implementation is a Python Slack Bolt application with durable Mongo inbox/o
 
 ## Run locally
 
+The Ledger can also author an individual or cooperative quest for human review with `python -m ledger.generate_quest`. Use `--rank N` to select an enabled rank, or omit it for weighted demand-based selection; `--dry-run --seed 42` previews without writes. See [quest generation, review and rollout](docs/QUEST_GENERATION.md) for required channel-use notices, configuration, resumable requests and shared project completion.
+
 Requires Python 3.12+, an existing Mongo replica set, an MQTT broker, a Slack app, and a reachable vLLM endpoint. The supplied Compose deployment serves `nvidia/Qwen3.8-27B-NVFP4` using `vllm-gb10` on a Linux ARM64 NVIDIA DGX Spark/GB10 host. The Python bot can run separately on other hardware.
 
 ```powershell
@@ -131,4 +133,6 @@ The sibling `ChangeStream2MQTT` change filters every `ledger_*` collection befor
 
 ## Character sheets and reviewed member quests
 
-Use `/ledger stats`, `/ledger progress`, `/ledger preferences`, and `/ledger achievements` for private detail. `/ledger-quests list` searches eligible titles; rank-3 members can use `/ledger-quests create` and Help draft with The Ledger. Independent reviewers approve immutable revisions and 0–500 XP rewards. Accepted quests survive rank-up and pay once per logical quest. Staff use `/ledger-admin delegates` to issue explicit scoped review authority. Optional audit-only observation and arrival mentions have independent preferences and deployment switches. Model proposals cannot change accounting, rank or recognition delivery, regardless of flags. See [member guide, authority, and rollout](docs/ENGAGEMENT_QUESTS.md).
+Use `/ledger stats`, `/ledger progress`, `/ledger preferences`, and `/ledger achievements` for private detail. `/ledger-quests list` searches eligible titles; rank-3 members can use `/ledger-quests create` and Help draft with The Ledger. Independent reviewers approve immutable revisions and 0–500 XP rewards. Accepted quests survive rank-up and pay once per logical quest. Staff use `/ledger-admin delegates` to issue explicit scoped review authority. Audit-only observation defaults on for every eligible member in configured Ledger channels after an explanatory notice, independently of game participation. `/ledger preferences` opts out without joining. Arrival mentions have a separate preference and remain disabled by default deployment-wide. Model proposals cannot change accounting, rank or recognition delivery, regardless of flags. See [member guide, authority, and rollout](docs/ENGAGEMENT_QUESTS.md).
+
+Review-channel notifications use `LEDGER_QUEST_REVIEW_CHANNEL_ID`. Configure a private staff channel containing The Ledger, separate from member game channels. Pending quests, completion evidence and other reviewable activities post there; review decisions update the saved message, with replacement if it was deleted. See [review notification operations](docs/ENGAGEMENT_QUESTS.md#review-channel-notifications).

@@ -38,6 +38,24 @@ def fake_connection(raw, *, status=200, content_type='text/plain; charset=utf-8'
 def test_bundled_matrix_codifies_roles_and_seed_economy():
     matrix = bundled_matrix()
     root = ElementTree.fromstring(matrix['text'])
+    admin = root.find("roles/role[@id='admin']").text
+    assert 'MLAB members role admin' in admin and 'every rank' in admin
+    assert 'sender display name replaces the admin real name' in admin
+    assert 'on opt-out remove them' in admin
+    assert 'Omit /ledger-admin and related help for ineligible callers' in root.find('response').text
+    generated_author = root.find("roles/role[@id='ledger_quest_author']").text
+    assert 'both channels' in generated_author and 'cooperative discipline prose' in generated_author
+    assert 'complete bounded Slack and makerspace member directories' in generated_author
+    assert 'including non-authors and inactive members' in generated_author
+    assert 'omit chat when identity reads fail, are malformed or incomplete' in generated_author
+    assert 'Names absent from both directories may remain' in root.find('privacy').text
+    assert 'Directory records themselves never enter saved context or inference' in generated_author
+    assert 'configured rank names are forbidden' in generated_author
+    assert 'human publication edits and saved proposal retries' in generated_author
+    assert 'never completion finalization time' in root.find('economy').text
+    assert 'quest_revision matches the disabled revision' in root.find('community').text
+    consent = root.find('consent').text
+    assert 'legacy done jobs without receipts' in consent and 'confirmed delivery receipts' in consent
     assert len(matrix['text'].encode()) <= MAX_MATRIX_BYTES
     assert {r.get('id') for r in root.find('roles')} == REQUIRED_ROLES
     assert 'Repeated join requests show saved participation' in root.find('consent').text
@@ -47,6 +65,17 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     delegate = root.find("roles/role[@id='delegated_reviewer']").text
     assert 'stable logical ID' in delegate and "every actual operation's shops" in delegate
     assert 'history-import pending' in root.find('response').text
+    assert 'cancels invalid observations individually before inference' in root.find("roles/role[@id='ai_observer']").text
+    observer = root.find("roles/role[@id='ai_observer']").text
+    assert 'regardless of game opt-in' in observer and 'Member opt-out and deployment disable' in observer
+    nonparticipant = root.find("roles/role[@id='nonparticipant']").text
+    assert 'independent /ledger preferences opt-out requires no joining' in nonparticipant
+    assert 'No rules, specific ranks/quests or retained progress disclosure' in nonparticipant
+    assert 'preserve choices across upgrades/join/rejoin' in root.find('consent').text
+    assert 'configured private staff channel' in root.find("roles/role[@id='ledger']").text
+    assert 'Save review_message_ts/review_channel_id' in root.find('community').text
+    assert 'if deleted, post a replacement and save its timestamp' in root.find('community').text
+    assert 'immutable version-specific IDs' in root.find('community').text
     for i, (name, _, floor, _) in enumerate(RANKS, 1):
         assert f'| {i} | {name} | {floor if floor is not None else "Inactive"} |' in root.find('progression').text
     for rate in XP.values():
@@ -63,7 +92,7 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert {'admin', 'board_member', 'resource_manager'} <= found <= REQUIRED_ROLES
 
 
-@pytest.mark.parametrize('role', ['quest_author', 'ai_observer', 'delegated_reviewer'])
+@pytest.mark.parametrize('role', ['quest_author', 'ledger_quest_author', 'ai_observer', 'delegated_reviewer'])
 def test_missing_new_required_remote_role_retains_current_policy(role):
     import re
     matrix = PromptMatrix(DOC)
@@ -162,6 +191,7 @@ def test_refresh_loads_once_per_revision_and_keeps_last_valid_or_bundled(caplog)
 
 def test_matrix_is_system_policy_and_reserved_deliveries_survive_reload(joined):
     ledger, store, _, composer, api, slack = joined
+    ledger.join(str(oid(10)))
     composer.matrix = PromptMatrix(DOC)
     composer.choose = lambda cs: cs[0]
     with patch('ledger.prompt_matrix.fetch_google_doc', side_effect=[policy('2'), policy('3')]) as fetch:
@@ -189,6 +219,7 @@ def test_matrix_is_system_policy_and_reserved_deliveries_survive_reload(joined):
 
 def test_reload_marker_is_seen_by_other_workers_and_restricted_to_admin_board(joined):
     ledger, store, sources, composer, api, slack = joined
+    ledger.join(str(oid(11)))
     second = Composer(store, api, matrix=PromptMatrix(DOC))
     composer.matrix = PromptMatrix(DOC)
     worker = Worker(ledger, composer, slack)

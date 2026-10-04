@@ -16,7 +16,9 @@ def snapshot(store):
         'verified_learning': sum(e.get('status') == 'approved' and e.get('achievement') in ('first_build', 'challenge') for e in evidence),
         'feedback_received': sum(e.get('kind') == 'feedback' for e in evidence),
         'projects': len(store.select('ledger_projects')),
-        'completed_group_quests': len(store.select('ledger_quests', {'status': 'completed'})),
+        'completed_group_quests': len(store.select('ledger_quests', {'status': 'completed'})) + len(
+            store.select('ledger_relationships', {'kind': 'quest_project', 'status': 'completed'})),
+        'quest_generation_requests': dict(Counter(e['status'] for e in evidence if e.get('kind') == 'quest_generation')),
         'deliveries': dict(Counter(j['status'] for j in jobs)),
         'generation_attempts': len(compositions),
         'fallbacks': sum(c['outcome'] == 'fallback' for c in compositions),

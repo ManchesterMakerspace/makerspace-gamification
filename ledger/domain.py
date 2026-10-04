@@ -46,6 +46,25 @@ class Ledger:
     def participant(self, member_id):
         return self.store.get("ledger_participants", str(member_id))
 
+    def preference_profile(self, member_id):
+        p = self.participant(member_id)
+        if p:
+            return p
+        profile = self.store.get("ledger_relationships", f"member-preferences:{member_id}")
+        if profile and profile.get("kind") == "member_preferences":
+            return profile
+        return {
+            "_id": f"member-preferences:{member_id}", "kind": "member_preferences", "member_id": member_id,
+            "revision": 0, "preferences": {"observation": True, "arrival_mentions": True}}
+
+    def save_preference_profile(self, profile):
+        collection = "ledger_relationships" if profile.get("kind") == "member_preferences" else "ledger_participants"
+        self.store.put(collection, profile)
+
+    def member_eligible(self, member_id):
+        identity = self.store.get("ledger_catalog", f"identity:{member_id}") or {}
+        return bool(self.sources.permitted(member_id) and not identity.get("deactivated") and not identity.get("bot"))
+
     def active(self, member_id):
         p = self.participant(member_id)
         identity = self.store.get("ledger_catalog", f"identity:{member_id}") or {}
@@ -84,6 +103,11 @@ class Ledger:
             p["revision"] = p.get("revision", 0) + 1
             self.store.put("ledger_participants", p)
 
+    def touch_preferences(self, member_id):
+        p = self.preference_profile(member_id)
+        p["revision"] = p.get("revision", 0) + 1
+        self.save_preference_profile(p)
+
     def presentation(self, slot):
         ranks = self.store.get("ledger_catalog", "rank_display")["ranks"]
         return deepcopy(ranks[slot - 1]) if slot else {"slot": 0, "name": "Participant", "emoji": ""}
@@ -104,11 +128,17 @@ class Ledger:
             return p
         first = not p
         if first:
+            preferences = self.preference_profile(member_id)
             version = self.store.get("ledger_rulesets", "head")["version"]
             rules = self.store.get("ledger_rulesets", version)
             initial_rank = 1 if amount(rules["ranks"][0]["floor"]) == 0 else 0
             p = {"_id": member_id, "member_id": member_id, "ruleset": version, "xp": "0",
                  "rank": initial_rank, "first_opt_in": now(), "revision": 0, "metrics": {}, "import_pending": True}
+            p.update({k: deepcopy(preferences[k]) for k in ("preferences", "observation_generation",
+                "observation_notice_delivered_at", "observation_notice_ts") if k in preferences})
+            # Serialize joining with nonparticipant preference/notice updates.
+            preferences.update(kind="member_preferences_migrated", migrated_at=now())
+            self.store.put("ledger_relationships", preferences)
         p.update(opted_in=True, import_pending=True, revision=p["revision"] + 1,
                  consent_generation=p.get("consent_generation", 0) + 1)
         p.setdefault("preferences", {"observation": True, "arrival_mentions": True})
@@ -120,6 +150,8 @@ class Ledger:
             if rel and rel["giver"] == sponsor and rel["status"] == "pending":
                 rel.update(status="accepted", accepted_at=now())
                 self.store.put("ledger_relationships", rel)
+        from .admin_access import sync_review_membership
+        sync_review_membership(self, member_id)
         self._invite(member_id, "chat", explicit=True)
         if p["rank"]:
             self._invite(member_id, f"rank:{p['rank']}", explicit=True)
@@ -142,17 +174,19 @@ class Ledger:
         self.store.put("ledger_participants", p)
         from .authority import Authority
         Authority(self).cleanup(member_id, "Consent withdrawn; a new grant is required after rejoining")
+        from .admin_access import sync_review_membership
+        sync_review_membership(self, member_id)
         self.store.put("ledger_evidence", {"_id": f"consent:{member_id}:{p['revision']}", "kind": "consent", "member_id": member_id, "opted_in": False, "at": now()})
         for job in self.store.select("ledger_outbox", {"status": {"$in": ["pending", "working"]}}):
             payload = job["payload"]
-            if payload.get("member_id") == member_id and job["kind"] in ("invite", "message", "mqtt", "conversation", "welcome", "quest_draft", "engagement_notice") and not payload.get("peer_kudos"):
+            if payload.get("member_id") == member_id and job["kind"] in ("invite", "message", "mqtt", "conversation", "welcome", "quest_draft") and not payload.get("peer_kudos"):
                 job["status"] = "cancelled"
                 self.store.put("ledger_outbox", job)
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
             enqueue(self.store, "ledger_outbox", f"leave:{member_id}:{p['revision']}:{channel['_id']}", "remove",
                     {"member_id": member_id, "channel": channel["channel_id"]})
         # Explicit acknowledgment is allowed after consent is withdrawn.
-        self.notify(member_id, "opt_out", {"summary": "You are opted out. Channel removal is queued. Skills and XP are retained; source activity continues accruing silently."},
+        self.notify(member_id, "opt_out", {"summary": "You have left game participation. Channel removal is queued. Skills and XP are retained; source activity continues accruing silently. Observation is a separate choice: use /ledger preferences and uncheck Allow observation to disable it."},
                     f"optout:{member_id}:{p['revision']}", exception=True)
 
     def _invite(self, member_id, channel_key, explicit=False, inviter=None):
@@ -187,11 +221,11 @@ class Ledger:
                 raise Denied("Only a current member of that channel may invite someone back.")
         self._invite(target, channel_key, explicit=True, inviter=actor)
 
-    def notify(self, member_id, kind, facts, key, exception=False):
+    def notify(self, member_id, kind, facts, key, exception=False, administrative=False):
         if not exception and not self.active(member_id):
             return
         enqueue(self.store, "ledger_outbox", f"dm:{key}", "message", {"member_id": member_id,
-                "type": kind, "audience": "member", "facts": facts, "exception": exception})
+                "type": kind, "audience": "member", "facts": facts, "exception": exception, "administrative": administrative})
 
     def major(self, member_id, kind, facts, key, historical=False):
         if historical or not self.active(member_id) or kind not in MAJOR:
@@ -509,6 +543,8 @@ class Ledger:
         return self.tx("_reconcile", member_id, historical)
 
     def _reconcile(self, member_id, historical=False):
+        from .admin_access import sync_review_membership
+        sync_review_membership(self, member_id)
         from .authority import Authority
         from .quests import Quests
         Authority(self).cleanup(member_id)
@@ -629,14 +665,19 @@ class Ledger:
     def preferences(self, member_id, observation, arrival_mentions):
         def run(s):
             d = Ledger(s, self.sources)
-            p = d.require(member_id)
+            if not d.member_eligible(member_id):
+                raise Denied("A valid linked human Slack account is required.")
+            p = d.preference_profile(member_id)
             if type(observation) is not bool or type(arrival_mentions) is not bool:
                 raise ValueError("Choose both preferences explicitly.")
             p.update(preferences={"observation": observation, "arrival_mentions": arrival_mentions}, revision=p["revision"] + 1,
                      observation_generation=p.get("observation_generation", 0) + 1)
-            s.put("ledger_participants", p)
+            d.save_preference_profile(p)
             s.put("ledger_evidence", {"_id": "preferences:" + str(uuid4()), "kind": "preferences", "member_id": member_id,
                 "preferences": p["preferences"], "at": now()})
+            if observation:
+                from .engagement import Engagement
+                Engagement(d).notice(member_id)
             return p
         return self.store.atomic(run)
 
