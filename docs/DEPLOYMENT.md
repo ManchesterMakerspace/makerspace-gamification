@@ -1,6 +1,6 @@
 # GB10 inference and Cloudflare Tunnel
 
-The supplied [compose.yaml](../compose.yaml) runs six services: web ingress, three independent workers, vLLM, and cloudflared. Existing Mongo and MQTT remain external dependencies. All commands below run from the repository root on the deployment host.
+The supplied [compose.yaml](../compose.yaml) runs seven services: web ingress, four independent workers, vLLM, and cloudflared. Existing Mongo and MQTT remain external dependencies. All commands below run from the repository root on the deployment host.
 
 ## Inference host and configuration
 
@@ -61,7 +61,7 @@ docker compose run --rm --no-deps ledger-accounting ledger dry-run
 docker compose up -d ledger-web cloudflared
 # Complete Slack request-URL verification, then create/bind the private channels.
 docker compose run --rm --no-deps ledger-accounting ledger bootstrap
-docker compose up -d ledger-accounting ledger-delivery ledger-channels
+docker compose up -d ledger-accounting ledger-delivery ledger-channels ledger-engagement
 docker compose ps
 curl --fail "http://$(docker compose port ledger-web 3000)/ready"
 ```
@@ -85,6 +85,22 @@ The adapter sends `chat_template_kwargs: {"enable_thinking": false}` with every 
 Finally exercise a DM, all commands, modal dropdowns/submissions, App Home, a public kudos, private-channel invitations/removals, and a file-backed skill tree in Slack. Stop only `ledger-ai` briefly during the staff pilot and confirm canned messages, unchanged accounting, and working opt-out cleanup, then restart it. A failed completion gets one attempt within the existing fifteen-second deadline; already composed fallback messages are reused on delivery retries.
 
 Local automated checks validate the API contract, signed callback dispatch, manifest coverage, and Compose structure. A successful GB10 model load, authenticated Cloudflare route, and real Slack workspace installation must be verified on the deployment host; they are not simulated by those tests.
+
+## Rebuild after a repository update
+
+After updating the deployment checkout, run:
+
+```bash
+bash scripts/rebuild.sh
+# Allow longer model startup if necessary:
+bash scripts/rebuild.sh --wait-timeout 2400
+```
+
+The [rebuild script](../scripts/rebuild.sh) requires Bash and Docker Compose v2 with `--wait-timeout` and `--ignore-buildable` support. It resolves the repository directory from its own location, loads normal Compose `.env`/override settings, checks the daemon and configuration, rebuilds application images with `--pull --no-cache`, and pulls configured registry images before stopping the running stack. Build or pull failure leaves existing containers running. Pin `VLLM_IMAGE` and `CLOUDFLARED_IMAGE` in `.env` to control registry updates; unpinned `latest` tags may change on every rebuild.
+
+It then gives containers 60 seconds to shut down, removes the project's old containers and orphan services, and recreates all enabled services, including the engagement worker. The Hugging Face named cache volume and external Mongo/MQTT data are preserved. It does not prune Docker resources, reset records, or run `init`/`bootstrap`. Use the same Compose project settings as the existing deployment; optional profiles remain controlled by `COMPOSE_PROFILES`.
+
+Expect downtime during recreation and model warmup. The default 1,800-second health deadline accommodates the AI's twenty-minute start period. Success requires all services to be running (healthy where health checks exist) and web `/ready` to pass both Mongo checks. Workers and cloudflared have no health checks; this does not prove broker connectivity, Slack delivery, tunnel connectivity, or successful model generation. A startup/readiness failure exits nonzero and shows service status, leaving containers available for diagnosis with `docker compose logs`. Fix the cause and rerun; rollback remains a deliberate operator action.
 
 ## Tools and staged engagement rollout
 

@@ -27,6 +27,8 @@ Set `MLAB_URI` for the makerspace reader and `LEDGER_URI` for the Ledger writer.
 
 For deployment, populate `.env` with database/Slack/MQTT credentials, a shared vLLM API key, and a Cloudflare Tunnel token. Compose includes `ghcr.io/timothystewart6/vllm-gb10` and `cloudflare/cloudflared`; the tunnel's published hostname forwards to `http://ledger-web:3000`. The AI endpoint stays inside Docker. Follow the [GB10 and tunnel deployment guide](docs/DEPLOYMENT.md) for startup, model warmup, and verification, then the [pilot steps](docs/OPERATIONS.md).
 
+After updating the deployment checkout, run `bash scripts/rebuild.sh` on the Linux deployment host to rebuild images and recreate all services while preserving named volumes and external data. See [rebuild behavior and verification](docs/DEPLOYMENT.md#rebuild-after-a-repository-update).
+
 The importable [Slack manifest JSON](slack-manifest.json) includes all seven commands, seven event subscriptions, App Home, modal interactions, and required bot scopes. Replace every `LEDGER_HOST` with the tunnel's public hostname. See the [Slack setup and permission mapping](docs/SLACK.md); check that `/kudos` is available before installation.
 
 The bot's leatherbound grimoire icon is included at [512 × 512](icons/ledger-bot-512.png) for Slack upload and [36 × 36](icons/ledger-bot-36.png) for mobile rendering. See [icon assets and installation](icons/README.md) for the source illustration and generation prompt.
