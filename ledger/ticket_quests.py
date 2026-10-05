@@ -190,6 +190,8 @@ class TicketQuests:
         quest = self.store.get("ledger_evidence", key)
         if not quest or quest.get("status") not in ("announcing", "open") or quest.get("winner_member_id"):
             return
+        if quest.get("pending_claim"):
+            return
         eligible = ticket is not None and ticket.get("status") in ACTIVE and ticket.get("category") in VALID_CATEGORIES
         outcome = ("deleted" if ticket is None else
                    "closed" if ticket.get("status") in TERMINAL else
@@ -228,7 +230,7 @@ class TicketQuests:
             return True
         self.store.atomic(close)
 
-    def response_event(self, event, event_key):
+    def response_event(self, event, event_key, attempts=1):
         channel, root = event.get("channel"), event.get("thread_ts")
         if not channel or not root or not event.get("user") or not event.get("ts"):
             return False
@@ -244,7 +246,12 @@ class TicketQuests:
         if (self.store.get("ledger_catalog", "control") or {}).get("paused"):
             return True
         quest = quests[0]
-        if quest.get("status") == "open":
+        response_id = "ticket-quest-response:" + sha1(f"{channel}:{event['ts']}".encode()).hexdigest()
+        if self.store.get("ledger_evidence", response_id):
+            return True
+        pending = quest.get("pending_claim") or {}
+        owns_pending = pending.get("response_id") == response_id
+        if quest.get("status") == "open" and not owns_pending:
             ticket = self._ticket(quest["ticket_id"])
             if not ticket:
                 self._refresh_quest(None, config(self.ledger), now(), ticket_id=quest["ticket_id"])
@@ -257,32 +264,67 @@ class TicketQuests:
         if not member:
             return True
         member_id = sid(member["_id"])
-        response_id = "ticket-quest-response:" + sha1(f"{channel}:{event['ts']}".encode()).hexdigest()
         text = event.get("text", "")
         if len(text) > 4000:
             text = text[:4000]
         files = event.get("files") or []
         jpeg = next((f for f in files if isinstance(f, dict) and f.get("mimetype") in ("image/jpeg", "image/jpg")
                      and f.get("id")), None)
-        if jpeg and self.worker:
-            try:
-                if not self._download_jpeg({"image_file_id": jpeg["id"]}):
-                    jpeg = None
-            except (requests.RequestException, PyMongoError, SlackApiError):
-                raise
-            except (ValueError, OSError):
-                # Confirmed malformed or unsupported image bytes qualify as a
-                # text-only response. Transient Slack/network failures escape
-                # so the inbox retries before reserving a winner or XP amount.
-                jpeg = None
         eligible = (member_id != quest.get("reporter_id") and self.ledger.active(member_id)
                     and self.ledger.sources.good_standing(member_id)
                     and self._sentence(text))
+        config_now = config(self.ledger)
+        if owns_pending and not jpeg and pending.get("image_file_id"):
+            jpeg = {"id": pending["image_file_id"], "mimetype": "image/jpeg"}
+        if eligible and jpeg and not owns_pending:
+            def reserve_claim(s):
+                latest = s.get("ledger_evidence", quest["_id"])
+                if not latest or latest.get("status") != "open" or latest.get("winner_member_id"):
+                    return False
+                current_member = Ledger(s, self.sources)
+                participant = current_member.participant(member_id)
+                current_time = now()
+                if (latest.get("pending_claim") or not latest.get("deadline") or latest["deadline"] <= current_time
+                        or not participant or not participant.get("opted_in") or not current_member.active(member_id)
+                        or not self.sources.good_standing(member_id) or member_id == latest.get("reporter_id")):
+                    return False
+                latest["pending_claim"] = {"response_id": response_id, "member_id": member_id,
+                    "slack_id": event["user"], "message_ts": event["ts"], "claimed_at": current_time,
+                    "image_file_id": jpeg["id"], "text": text,
+                    "xp_with_image": config_now["xp_with_image"], "xp_without_image": config_now["xp_without_image"]}
+                s.put("ledger_evidence", latest)
+                return True
+            owns_pending = self.store.atomic(reserve_claim)
+
+        image_valid = False
+        if jpeg and owns_pending and self.worker:
+            try:
+                image_valid = bool(self._download_jpeg({"image_file_id": jpeg["id"]}))
+            except (requests.RequestException, PyMongoError, SlackApiError) as exc:
+                # Reserve the first eligible JPEG claimant before I/O. Earlier
+                # transient failures retry without letting later replies win.
+                # After the inbox retry budget, resolve the reservation as a
+                # text-only claim so it cannot block the quest indefinitely.
+                if attempts < 10:
+                    raise
+                log.warning("ticket quest image check exhausted response=%s error_type=%s",
+                            response_id, type(exc).__name__)
+                jpeg = None
+            except (ValueError, OSError):
+                jpeg = None
+        elif jpeg and owns_pending and not self.worker:
+            # Tests and non-delivery callers have no Slack client to verify the
+            # file; preserve the legacy image award behavior for that path.
+            image_valid = True
+
+        if jpeg and owns_pending and self.worker and not image_valid:
+            jpeg = None
+
         record = {"_id": response_id, "kind": "broken_ticket_quest_response", "quest_id": quest["_id"],
                   "member_id": member_id, "slack_id": event["user"], "channel": channel, "thread_ts": root,
-                  "message_ts": event["ts"], "text": text, "image_file_id": jpeg.get("id") if jpeg else None,
+                  "message_ts": event["ts"], "text": text,
+                  "image_file_id": jpeg.get("id") if jpeg else None,
                   "eligible": bool(eligible), "created_at": now(), "delivery": None}
-        config_now = config(self.ledger)
         winner = False
         def accept(s):
             nonlocal winner
@@ -291,13 +333,19 @@ class TicketQuests:
             latest = s.get("ledger_evidence", quest["_id"])
             current_member = Ledger(s, self.sources)
             participant = current_member.participant(member_id)
+            claim = (latest or {}).get("pending_claim") or {}
+            owns_claim = claim.get("response_id") == response_id
+            deadline_ok = bool(latest and latest.get("deadline") and (
+                claim.get("claimed_at") <= latest["deadline"] if owns_claim else latest["deadline"] > now()))
             valid = (eligible and latest and latest.get("status") == "open" and not latest.get("winner_member_id")
-                     and latest.get("deadline") and latest["deadline"] > now()
+                     and (not claim or owns_claim) and deadline_ok
                      and participant and participant.get("opted_in") and current_member.active(member_id)
                      and self.sources.good_standing(member_id) and member_id != latest.get("reporter_id"))
             record["eligible"] = bool(valid)
             if valid:
-                amount = config_now["xp_with_image"] if jpeg else config_now["xp_without_image"]
+                amount = (claim.get("xp_with_image", config_now["xp_with_image"]) if image_valid and jpeg
+                          else claim.get("xp_without_image", config_now["xp_without_image"]) if owns_claim
+                          else config_now["xp_with_image"] if jpeg else config_now["xp_without_image"])
                 changed = current_member.award(member_id, latest["_id"], str(amount), "broken_ticket_quest", historical=True,
                                                facts={"ticket_id": latest["ticket_key"]})
                 if changed:
@@ -305,6 +353,8 @@ class TicketQuests:
                 latest.update(status="won", winner_member_id=member_id, winner_response_id=response_id,
                               winner_at=now(), xp_awarded=amount)
                 winner = True
+            if owns_claim:
+                latest.pop("pending_claim", None)
             latest["responses"] = latest.get("responses", 0) + 1
             s.put("ledger_evidence", latest)
             s.put("ledger_evidence", record)
@@ -392,7 +442,12 @@ class TicketQuests:
     def _download_jpeg(self, response):
         if not response.get("image_file_id"):
             return None
-        info = self.worker.slack.files_info(file=response["image_file_id"])["file"]
+        try:
+            info = self.worker.slack.files_info(file=response["image_file_id"])["file"]
+        except SlackApiError as exc:
+            if self._permanent_image_error(exc):
+                return None
+            raise
         if info.get("mimetype") not in ("image/jpeg", "image/jpg") or not info.get("url_private_download"):
             return None
         url = info["url_private_download"]
@@ -401,24 +456,45 @@ class TicketQuests:
         token = getattr(self.worker.slack, "token", None)
         if not token:
             return None
-        with requests.get(url, headers={"Authorization": "Bearer " + token}, timeout=(2, 10),
-                          allow_redirects=False, stream=True) as result:
-            result.raise_for_status()
-            size = result.headers.get("Content-Length")
-            if size:
-                try:
-                    if int(size) > MAX_IMAGE_BYTES:
+        try:
+            with requests.get(url, headers={"Authorization": "Bearer " + token}, timeout=(2, 10),
+                              allow_redirects=False, stream=True) as result:
+                result.raise_for_status()
+                size = result.headers.get("Content-Length")
+                if size:
+                    try:
+                        if int(size) > MAX_IMAGE_BYTES:
+                            return None
+                    except (TypeError, ValueError):
+                        pass
+                content = bytearray()
+                for chunk in result.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    if len(content) + len(chunk) > MAX_IMAGE_BYTES:
                         return None
-                except (TypeError, ValueError):
-                    pass
-            content = bytearray()
-            for chunk in result.iter_content(chunk_size=64 * 1024):
-                if not chunk:
-                    continue
-                if len(content) + len(chunk) > MAX_IMAGE_BYTES:
-                    return None
-                content.extend(chunk)
-            return sanitize_jpeg(bytes(content))
+                    content.extend(chunk)
+                return sanitize_jpeg(bytes(content))
+        except requests.HTTPError as exc:
+            if self._permanent_image_error(exc):
+                return None
+            raise
+
+    @staticmethod
+    def _permanent_image_error(exc):
+        transient_http = {408, 425, 429}
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if isinstance(exc, requests.HTTPError) and isinstance(status, int):
+            return 400 <= status < 500 and status not in transient_http
+        if isinstance(exc, SlackApiError):
+            error = exc.response.get("error")
+            if error in {"file_not_found", "file_deleted", "file_access_denied", "not_found", "not_shared",
+                         "channel_not_found", "not_in_channel", "missing_scope", "no_permission",
+                         "not_allowed_token_type", "invalid_auth", "not_authed", "token_revoked",
+                         "account_inactive"}:
+                return True
+            return isinstance(status, int) and 400 <= status < 500 and status not in transient_http
+        return False
 
     def _upload_drive(self, image, filename):
         token = os.environ.get("LEDGER_TICKET_GOOGLE_ACCESS_TOKEN")

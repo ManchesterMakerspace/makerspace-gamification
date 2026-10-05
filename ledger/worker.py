@@ -110,7 +110,7 @@ class Worker:
             from .ticket_quests import TicketQuests
             TicketQuests(self.ledger).reconcile(job["payload"].get("ticket_id"))
         elif job["kind"] == "slack_event":
-            outcome = self.event(payload, job["_id"])
+            outcome = self.event(payload, job["_id"], attempts=job.get("attempts", 1))
             log.info("Slack event processed job=%s outcome=%s", job["_id"], outcome or "handled")
         elif job["kind"] == "command":
             try:
@@ -174,7 +174,7 @@ class Worker:
                     row.update(present=False, voluntary_leave=True, desired=False)
                     self.store.atomic(lambda s, r=row: s.put("ledger_channels", r))
 
-    def event(self, event, key):
+    def event(self, event, key, attempts=1):
         kind = event.get("type")
         if kind == "user_change":
             user = event["user"]
@@ -244,7 +244,7 @@ class Worker:
             return "ignored_unlinked_identity"
         if kind == "message" and event.get("thread_ts"):
             from .ticket_quests import TicketQuests
-            handled = TicketQuests(self.ledger, worker=self).response_event(event, key)
+            handled = TicketQuests(self.ledger, worker=self).response_event(event, key, attempts=attempts)
             if handled:
                 return handled
         if file_share:

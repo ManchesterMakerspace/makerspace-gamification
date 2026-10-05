@@ -1,4 +1,5 @@
 from datetime import timedelta
+from hashlib import sha1
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
@@ -6,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 from PIL import Image
+from slack_sdk.errors import SlackApiError
 
 from conftest import oid
 from ledger.storage import now
@@ -123,11 +125,104 @@ def test_transient_image_check_retries_before_awarding_image_xp(joined):
         with pytest.raises(requests.RequestException):
             service.response_event(event, "transient-image-event")
     assert ledger.participant(str(oid(2)))["xp"] == "0"
+    pending = store.get("ledger_evidence", quest["_id"]).get("pending_claim")
+    assert pending["response_id"] == "ticket-quest-response:" + sha1(
+        f"CQUEST:{event['ts']}".encode()).hexdigest()
     assert not store.select("ledger_evidence", {"kind": "broken_ticket_quest_response"})
+
+    ledger.join(str(oid(3)))
+    later = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U3", "ts": "903.102", "text": "I checked the tool and confirmed the issue."}
+    assert service.response_event(later, "later-text-reply") is True
+    assert ledger.participant(str(oid(3)))["xp"] == "0"
 
     with patch.object(TicketQuests, "_download_jpeg", return_value=b"sanitized-jpeg"):
         assert service.response_event(event, "transient-image-event") is True
     assert ledger.participant(str(oid(2)))["xp"] == "100"
+    assert ledger.participant(str(oid(3)))["xp"] == "0"
+
+
+def test_permanently_unavailable_jpeg_falls_back_to_no_image_xp(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    event = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.201", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "deleted-file", "mimetype": "image/jpeg"}]}
+    with patch.object(TicketQuests, "_download_jpeg", return_value=None):
+        assert service.response_event(event, "permanent-image-error") is True
+    assert ledger.participant(str(oid(2)))["xp"] == "66"
+    response = store.select("ledger_evidence", {"kind": "broken_ticket_quest_response"})[0]
+    assert response.get("image_file_id") is None
+
+
+def test_deleted_or_forbidden_image_errors_are_permanent_but_ratelimits_retry():
+    slack_response = MagicMock()
+    slack_response.get.side_effect = lambda key: "file_not_found" if key == "error" else None
+    slack_response.status_code = 200
+    missing = SlackApiError("missing", slack_response)
+    assert TicketQuests._permanent_image_error(missing)
+
+    slack_response.get.side_effect = lambda key: "ratelimited" if key == "error" else None
+    ratelimited = SlackApiError("ratelimited", slack_response)
+    assert not TicketQuests._permanent_image_error(ratelimited)
+
+    forbidden_response = requests.Response()
+    forbidden_response.status_code = 403
+    forbidden = requests.HTTPError(response=forbidden_response)
+    assert TicketQuests._permanent_image_error(forbidden)
+
+    retry_response = requests.Response()
+    retry_response.status_code = 429
+    retry_after = requests.HTTPError(response=retry_response)
+    assert not TicketQuests._permanent_image_error(retry_after)
+
+
+def test_jpeg_fetch_falls_back_on_permanent_errors_and_retries_transient_ones(joined):
+    _, _, _, service = setup_tickets(joined)
+    service.worker = MagicMock()
+    response = MagicMock()
+    response.get.side_effect = lambda key: "file_not_found" if key == "error" else None
+    response.status_code = 200
+    service.worker.slack.files_info.side_effect = SlackApiError("missing", response)
+    assert service._download_jpeg({"image_file_id": "deleted"}) is None
+
+    response.get.side_effect = lambda key: "ratelimited" if key == "error" else None
+    service.worker.slack.files_info.side_effect = SlackApiError("ratelimited", response)
+    with pytest.raises(SlackApiError):
+        service._download_jpeg({"image_file_id": "temporary"})
+
+    service.worker.slack.files_info.side_effect = None
+    service.worker.slack.files_info.return_value = {"file": {
+        "mimetype": "image/jpeg", "url_private_download": "https://files.slack.com/image"}}
+    service.worker.slack.token = "test-token"
+    for status, permanent in ((404, True), (503, False)):
+        http_response = requests.Response()
+        http_response.status_code = status
+        failure = requests.HTTPError(response=http_response)
+        result = MagicMock()
+        result.__enter__.return_value = result
+        result.headers = {}
+        result.raise_for_status.side_effect = failure
+        with patch("ledger.ticket_quests.requests.get", return_value=result):
+            if permanent:
+                assert service._download_jpeg({"image_file_id": "http-file"}) is None
+            else:
+                with pytest.raises(requests.HTTPError):
+                    service._download_jpeg({"image_file_id": "http-file"})
+
+
+def test_image_check_uses_no_image_award_after_retry_budget(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    event = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.301", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "F1", "mimetype": "image/jpeg"}]}
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=requests.Timeout("offline")):
+        assert service.response_event(event, "image-retries-exhausted", attempts=10) is True
+    assert ledger.participant(str(oid(2)))["xp"] == "66"
+    assert not store.get("ledger_evidence", quest["_id"]).get("pending_claim")
 
 
 def test_ignores_nonthread_and_non_sentence_messages(joined):
