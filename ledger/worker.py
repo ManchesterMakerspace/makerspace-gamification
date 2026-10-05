@@ -237,7 +237,8 @@ class Worker:
                 self.store.atomic(lambda s: s.put("ledger_context", {"_id": f"thread:{channel}:{thread}",
                     "kind": "thread", "expires_at": now() + timedelta(days=30)}))
             return "ignored_bot_or_subtype"
-        if event.get("bot_id") or event.get("subtype"):
+        file_share = kind == "message" and event.get("subtype") == "file_share"
+        if event.get("bot_id") or (event.get("subtype") and not file_share):
             return "ignored_bot_or_subtype"
         if not member:
             return "ignored_unlinked_identity"
@@ -246,6 +247,8 @@ class Worker:
             handled = TicketQuests(self.ledger, worker=self).response_event(event, key)
             if handled:
                 return handled
+        if file_share:
+            return "ignored_file_share"
         member_id = sid(member["_id"])
         is_dm = event.get("channel_type") == "im" or channel.startswith("D")
         text = event.get("text", "")

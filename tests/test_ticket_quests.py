@@ -9,6 +9,7 @@ from PIL import Image
 from conftest import oid
 from ledger.storage import now
 from ledger.ticket_quests import TicketQuests, canonical_id, config, sanitize_jpeg, ticket_key, validate_config
+from ledger.worker import Worker
 
 
 def setup_tickets(joined, *, reporter=1, status="open", category="broken"):
@@ -118,6 +119,102 @@ def test_ignores_nonthread_and_non_sentence_messages(joined):
     service.response_event({"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
         "user": "U2", "ts": "902.002", "text": "I checked it"}, "event")
     assert store.get("ledger_evidence", quest["_id"]).get("winner_member_id") is None
+
+
+def test_file_share_thread_reply_can_qualify_with_jpeg(joined):
+    ledger, store, source, _ = setup_tickets(joined)
+    quest = open_quest(TicketQuests(ledger), store, source)
+    worker = Worker(ledger, joined[3], joined[5], bot_id="UBOT")
+    with patch.object(TicketQuests, "_download_jpeg", return_value=b"sanitized-jpeg"):
+        result = worker.event({"type": "message", "subtype": "file_share", "channel": "CQUEST",
+            "thread_ts": quest["announcement_ts"], "user": "U2", "ts": "905.001",
+            "text": "I checked the belt and confirmed the issue.",
+            "files": [{"id": "F1", "mimetype": "image/jpeg"}]}, "file-share-event")
+    assert result is True
+    assert ledger.participant(str(oid(2)))["xp"] == "100"
+
+
+def test_jpeg_download_stream_stops_at_limit_before_pillow(joined):
+    ledger, _, _, _, _, slack = joined
+    worker = Worker(ledger, joined[3], slack, bot_id="UBOT")
+    slack.files_info.return_value = {"file": {"mimetype": "image/jpeg",
+        "url_private_download": "https://files.slack.com/private/F1"}}
+    worker.slack.token = "xoxb-test"
+
+    class Response:
+        headers = {}
+        closed = False
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            self.closed = True
+        def raise_for_status(self):
+            pass
+        def iter_content(self, chunk_size):
+            assert chunk_size == 64 * 1024
+            yield b"x" * (12 * 1024 * 1024)
+            yield b"overflow"
+
+    response = Response()
+    with patch("ledger.ticket_quests.requests.get", return_value=response), \
+         patch("ledger.ticket_quests.sanitize_jpeg") as sanitize:
+        assert TicketQuests(ledger, worker)._download_jpeg({"image_file_id": "F1"}) is None
+    sanitize.assert_not_called()
+    assert response.closed
+
+
+def test_image_filename_is_unique_for_each_response():
+    quest = {"ticket_key": "735"}
+    first = {"_id": "ticket-quest-response:abc123", "slack_id": "U2"}
+    second = {"_id": "ticket-quest-response:def456", "slack_id": "U2"}
+    assert TicketQuests._image_filename(quest, first) != TicketQuests._image_filename(quest, second)
+
+
+@pytest.mark.parametrize("change", [("category", "other"), ("status", "awaiting_review")])
+def test_quest_closes_when_ticket_becomes_ineligible(joined, change):
+    _, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    source.data["fix_tickets"][0][change[0]] = change[1]
+    service.reconcile(735)
+    closed = store.get("ledger_evidence", quest["_id"])
+    assert closed["status"] == "closed"
+    assert closed["outcome"] == "ineligible"
+    assert store.get("ledger_outbox", f"ticket-quest-update:{quest['_id']}:ineligible")
+
+
+def test_ticket_quest_announcement_narration_uses_persisted_composition(joined):
+    ledger, store, _, composer, _, slack = joined
+    composer.compose = MagicMock()
+    worker = Worker(ledger, composer, slack, bot_id="UBOT")
+    worker.persist_composition = MagicMock(return_value={"text": "The quest has ended."})
+    quest_id = ticket_key(735)
+    store.put("ledger_evidence", {"_id": quest_id, "kind": "broken_ticket_quest", "ticket_key": "735",
+        "status": "closed", "announcement_channel": "CQUEST", "announcement_ts": "900.001",
+        "final_ticket_status": "resolved"})
+    job = {"_id": "ticket-quest-update:735:closed", "payload": {"quest_id": quest_id, "outcome": "closed"}}
+    TicketQuests(ledger, worker)._update_announcement(job)
+    worker.persist_composition.assert_called_once()
+    composer.compose.assert_not_called()
+    assert slack.chat_update.call_args.kwargs["text"].startswith("The quest has ended.")
+
+
+def test_response_thanks_uses_persisted_composition(joined):
+    ledger, store, _, composer, _, slack = joined
+    composer.compose = MagicMock()
+    worker = Worker(ledger, composer, slack, bot_id="UBOT")
+    worker.persist_composition = MagicMock(return_value={"text": "Thanks for the repair report."})
+    response_id = "ticket-quest-response:abc123"
+    quest_id = ticket_key(735)
+    store.put("ledger_evidence", {"_id": quest_id, "kind": "broken_ticket_quest", "ticket_key": "735",
+        "status": "won", "xp_awarded": 100})
+    store.put("ledger_evidence", {"_id": response_id, "kind": "broken_ticket_quest_response", "quest_id": quest_id,
+        "slack_id": "U2", "channel": "CQUEST", "thread_ts": "900.001", "text": "I checked the motor.",
+        "delivery": {"fix_channel": "CFIX"}, "rails_note_written": True})
+    service = TicketQuests(ledger, worker)
+    service._deliver_response({"_id": response_id, "payload": {"response_id": response_id, "winner": False}})
+    worker.persist_composition.assert_called_once()
+    composer.compose.assert_not_called()
+    assert slack.chat_postMessage.call_args.kwargs["text"] == "Thanks for the repair report."
 
 
 @pytest.mark.parametrize("terminal", ["resolved", "rejected", "withdrawn"])

@@ -27,6 +27,7 @@ CONFIG_ID = "broken_ticket_quests"
 TERMINAL = {"resolved", "rejected", "withdrawn"}
 ACTIVE = {"open", "in_progress", "waiting_for_parts"}
 VALID_CATEGORIES = {"damaged", "broken"}
+MAX_IMAGE_BYTES = 12 * 1024 * 1024
 DEFAULT_CONFIG = {"enabled": False, "quest_channel_id": "", "fix_channel_id": "",
                   "duration_hours": 18, "xp_with_image": 100, "xp_without_image": 66,
                   "revision": 0}
@@ -187,14 +188,18 @@ class TicketQuests:
         quest = self.store.get("ledger_evidence", key)
         if not quest or quest.get("status") not in ("announcing", "open") or quest.get("winner_member_id"):
             return
+        eligible = ticket.get("status") in ACTIVE and ticket.get("category") in VALID_CATEGORIES
+        outcome = ("closed" if ticket.get("status") in TERMINAL else
+                   "ineligible" if not eligible else None)
         if quest.get("status") == "announcing":
-            if ticket.get("status") not in TERMINAL:
+            if not outcome:
                 return
             def cancel_announcement(s):
                 latest = s.get("ledger_evidence", key)
                 if not latest or latest.get("status") != "announcing":
                     return
-                latest.update(status="closed", outcome_at=current, final_ticket_status=ticket.get("status"))
+                latest.update(status="closed", outcome_at=current, outcome=outcome,
+                              final_ticket_status=ticket.get("status"), final_ticket_category=ticket.get("category"))
                 s.put("ledger_evidence", latest)
                 pending = s.get("ledger_outbox", f"ticket-quest-announcement:{latest['ticket_key']}")
                 if pending and pending.get("status") in ("pending", "working"):
@@ -202,10 +207,7 @@ class TicketQuests:
                     s.put("ledger_outbox", pending)
             self.store.atomic(cancel_announcement)
             return
-        outcome = None
-        if ticket.get("status") in TERMINAL:
-            outcome = "closed"
-        elif quest.get("deadline") and quest["deadline"] <= current:
+        if not outcome and quest.get("deadline") and quest["deadline"] <= current:
             outcome = "expired"
         if not outcome:
             return
@@ -213,7 +215,9 @@ class TicketQuests:
             latest = s.get("ledger_evidence", key)
             if not latest or latest.get("status") != "open" or latest.get("winner_member_id"):
                 return False
-            latest.update(status=outcome, outcome_at=current, final_ticket_status=ticket.get("status"))
+            latest.update(status="expired" if outcome == "expired" else "closed", outcome_at=current,
+                          outcome=outcome, final_ticket_status=ticket.get("status"),
+                          final_ticket_category=ticket.get("category"))
             s.put("ledger_evidence", latest)
             enqueue(s, "ledger_outbox", f"ticket-quest-update:{key}:{outcome}", "ticket_quest_update", {"quest_id": key, "outcome": outcome})
             return True
@@ -239,11 +243,10 @@ class TicketQuests:
             ticket = self._ticket(quest["ticket_id"])
             if not ticket:
                 return True
-            if ticket.get("status") in TERMINAL:
+            if (ticket.get("status") in TERMINAL or ticket.get("status") not in ACTIVE
+                    or ticket.get("category") not in VALID_CATEGORIES):
                 self._refresh_quest(ticket, config(self.ledger), now())
                 quest = self.store.get("ledger_evidence", quest["_id"]) or quest
-            elif ticket.get("status") not in ACTIVE or ticket.get("category") not in VALID_CATEGORIES:
-                return True
         member = self.sources.identity(event["user"])
         if not member:
             return True
@@ -339,8 +342,9 @@ class TicketQuests:
             elif latest and latest.get("status") == "closed" and not latest.get("announcement_ts"):
                 latest.update(announcement_ts=response["ts"], announcement_delivery={"channel": response.get("channel", quest["announcement_channel"]), "ts": response["ts"]})
                 s.put("ledger_evidence", latest)
-                enqueue(s, "ledger_outbox", f"ticket-quest-update:{quest['_id']}:closed", "ticket_quest_update",
-                        {"quest_id": quest["_id"], "outcome": "closed"})
+                outcome = latest.get("outcome", "closed")
+                enqueue(s, "ledger_outbox", f"ticket-quest-update:{quest['_id']}:{outcome}", "ticket_quest_update",
+                        {"quest_id": quest["_id"], "outcome": outcome})
         self.store.atomic(save)
 
     def _update_announcement(self, job):
@@ -351,13 +355,24 @@ class TicketQuests:
             text = f"Quest complete: <@{self.sources.slack_id(quest['winner_member_id']) or ''}> was first to help with ticket #{quest['ticket_key']}."
         elif job["payload"]["outcome"] == "closed":
             facts = {"summary": f"The ticket verification quest ended without a winner because ticket #{quest['ticket_key']} is now {quest.get('final_ticket_status', 'closed')}."}
-            narration = self.worker.composer.compose("status", "shared", facts).get("text", "")
+            narration = self.worker.persist_composition(job, "status", "shared", facts).get("text", "")
+            text = (narration + "\n" if narration else "") + facts["summary"]
+        elif job["payload"]["outcome"] == "ineligible":
+            facts = {"summary": (f"The verification quest for ticket #{quest['ticket_key']} closed because it is no longer an eligible "
+                                  f"damaged/broken ticket (category: {quest.get('final_ticket_category') or 'unknown'}, "
+                                  f"status: {quest.get('final_ticket_status') or 'unknown'}).")}
+            narration = self.worker.persist_composition(job, "status", "shared", facts).get("text", "")
             text = (narration + "\n" if narration else "") + facts["summary"]
         else:
             facts = {"summary": f"The verification window for ticket #{quest['ticket_key']} expired without a qualifying response."}
-            narration = self.worker.composer.compose("status", "shared", facts).get("text", "")
+            narration = self.worker.persist_composition(job, "status", "shared", facts).get("text", "")
             text = (narration + "\n" if narration else "") + facts["summary"]
         self.worker.slack.chat_update(channel=quest["announcement_channel"], ts=quest["announcement_ts"], text=text, blocks=[section(text)])
+
+    @staticmethod
+    def _image_filename(quest, response):
+        response_suffix = response["_id"].rsplit(":", 1)[-1]
+        return f"quest-{quest['ticket_key']}-{response['slack_id']}-{response_suffix}.jpg"
 
     def _download_jpeg(self, response):
         if not response.get("image_file_id"):
@@ -371,9 +386,24 @@ class TicketQuests:
         token = getattr(self.worker.slack, "token", None)
         if not token:
             return None
-        result = requests.get(url, headers={"Authorization": "Bearer " + token}, timeout=(2, 10), allow_redirects=False)
-        result.raise_for_status()
-        return sanitize_jpeg(result.content)
+        with requests.get(url, headers={"Authorization": "Bearer " + token}, timeout=(2, 10),
+                          allow_redirects=False, stream=True) as result:
+            result.raise_for_status()
+            size = result.headers.get("Content-Length")
+            if size:
+                try:
+                    if int(size) > MAX_IMAGE_BYTES:
+                        return None
+                except (TypeError, ValueError):
+                    pass
+            content = bytearray()
+            for chunk in result.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                if len(content) + len(chunk) > MAX_IMAGE_BYTES:
+                    return None
+                content.extend(chunk)
+            return sanitize_jpeg(bytes(content))
 
     def _upload_drive(self, image, filename):
         token = os.environ.get("LEDGER_TICKET_GOOGLE_ACCESS_TOKEN")
@@ -408,7 +438,7 @@ class TicketQuests:
         if not quest:
             return
         image = self._download_jpeg(response)
-        filename = f"quest-{quest['ticket_key']}-{response['slack_id']}.jpg"
+        filename = self._image_filename(quest, response)
         try:
             drive_url = self._upload_drive(image, filename) if image else None
         except (requests.RequestException, ValueError, KeyError) as exc:
@@ -463,7 +493,7 @@ class TicketQuests:
         else:
             summary = "Thank the responder for helping with ticket verification."
             fallback = "Thanks for helping with the ticket verification."
-        narration = self.worker.composer.compose("status", "shared", {"summary": summary}).get("text", "")
+        narration = self.worker.persist_composition(job, "status", "shared", {"summary": summary}).get("text", "")
         message = narration or fallback
         if job["payload"].get("winner"):
             message += f" Recorded {quest.get('xp_awarded', 0)} XP."
