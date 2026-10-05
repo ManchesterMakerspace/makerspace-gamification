@@ -1,4 +1,6 @@
 """Application authorization, consent invitations and staff channel membership."""
+from collections import Counter
+import re
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from slack_sdk.errors import SlackApiError
@@ -6,6 +8,7 @@ from slack_sdk.errors import SlackApiError
 from .domain import Denied, Ledger
 from .messages import button, escape, section
 from .review_notifications import channel_id
+from .sources import sid
 from .storage import enqueue
 
 
@@ -50,6 +53,50 @@ def help_text(ledger, actor):
 
 def invitation_eligible(ledger, target):
     return ledger.member_eligible(target) and not (ledger.participant(target) or {}).get("opted_in", False)
+
+
+def invitation_candidates(ledger, search):
+    """Read a bounded name match set and batch eligibility without per-member queries."""
+    query = {"merged_at": None, "status": {"$nin": ["revoked", "suspended"]}}
+    terms = search.strip()[:150].split()
+    if terms:
+        query["$and"] = [{"$or": [{field: {"$regex": re.escape(term), "$options": "i"}}
+                                 for field in ("firstname", "lastname")]} for term in terms]
+        uid = search.strip().upper()
+        if re.fullmatch(r"[UW][A-Z0-9]+", uid):
+            named_links = ledger.sources.bounded("slack_users", {"slack_id": uid, "invalidated_at": None}, ["member_id"], 501)
+            query["$or"] = [{"$and": query.pop("$and")}, {"_id": {"$in": [r.get("member_id") for r in named_links]}}]
+    members = ledger.sources.bounded("members", query, ["_id", "firstname", "lastname", "status", "merged_at"], 500)
+    if not members:
+        return []
+    ids = [m["_id"] for m in members]
+    links = ledger.sources.bounded("slack_users", {"member_id": {"$in": ids}, "invalidated_at": None},
+                                   ["member_id", "slack_id"], 2 * len(ids) + 1)
+    if len(links) > 2 * len(ids):
+        return []  # Incomplete identity reads cannot establish eligibility.
+    linked_members = Counter(sid(r.get("member_id")) for r in links)
+    uids = {r["slack_id"] for r in links if isinstance(r.get("slack_id"), str) and re.fullmatch(r"[UW][A-Z0-9]+", r["slack_id"])}
+    if not uids:
+        return []
+    all_links = ledger.sources.bounded("slack_users", {"slack_id": {"$in": sorted(uids)}, "invalidated_at": None},
+                                       ["member_id", "slack_id"], 2 * len(uids) + 1)
+    if len(all_links) > 2 * len(uids):
+        return []
+    linked_users = Counter(r.get("slack_id") for r in all_links)
+    linked = {sid(r["member_id"]): r["slack_id"] for r in links
+              if linked_members[sid(r.get("member_id"))] == 1 and r.get("slack_id") in uids and linked_users[r["slack_id"]] == 1}
+    keys = [sid(i) for i in ids]
+    opted_in = {p["_id"] for p in ledger.store.select("ledger_participants", {"_id": {"$in": keys}}) if p.get("opted_in")}
+    identities = {p["_id"]: p for p in ledger.store.select("ledger_catalog", {"_id": {"$in": ["identity:" + k for k in keys]}})}
+    result = []
+    for member in members:
+        key = sid(member["_id"])
+        identity = identities.get("identity:" + key, {})
+        if key not in linked or key in opted_in or identity.get("deactivated") or identity.get("bot"):
+            continue
+        title = " ".join(str(member.get(k) or "").strip() for k in ("firstname", "lastname")).strip() or linked[key]
+        result.append((key, title))
+    return result[:100]
 
 
 def invite(ledger, actor, target, sender, message, key):

@@ -1,7 +1,11 @@
 """Application-selected kudos emoji; authored message bodies are never filtered."""
 import re
 
-EMOJI = [("👏 Applause", ":clap:"), ("🙌 Celebration", ":raised_hands:"),
+EMOJI = [("silver star", ":kudo:"), ("gold star", ":kudos:"),
+         ("fixed it!", ":fix_parrot:"), ("First place", ":first_place_medal:"),
+         ("fistbump!", ":fistbump:"), ("used the force", ":duct_tape:"),
+         ("Thank You", ":thankyou:"), ("Teamwork!", ":teamwork:"),
+         ("👏 Applause", ":clap:"), ("🙌 Celebration", ":raised_hands:"),
          ("👍 Thumbs up", ":+1:"), ("💚 Green heart", ":green_heart:"),
          ("❤️ Heart", ":heart:"), ("🌟 Shining star", ":star2:"),
          ("✨ Sparkles", ":sparkles:"), ("🎉 Party", ":tada:"),

@@ -57,6 +57,11 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'never completion finalization time' in root.find('economy').text
     assert 'quest_revision matches the disabled revision' in root.find('community').text
     consent = root.find('consent').text
+    assert 'first 150 characters' in consent and 'literal first/last-name tokens in any order' in consent
+    assert 'valid Slack ID' in consent and '500 candidates/100 choices' in consent
+    assert 'invalid/ambiguous links and known bots/deactivated identities' in consent
+    assert 'Incomplete identity reads or database errors return no choices' in consent
+    assert 'two-second database deadline' in consent and 'Discovery grants no consent' in consent
     assert 'legacy done jobs without receipts' in consent and 'confirmed delivery receipts' in consent
     assert len(matrix['text'].encode()) <= MAX_MATRIX_BYTES
     assert {r.get('id') for r in root.find('roles')} == REQUIRED_ROLES

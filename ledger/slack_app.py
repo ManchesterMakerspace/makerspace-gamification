@@ -6,6 +6,8 @@ from collections import Counter
 from datetime import timedelta
 from uuid import uuid4
 
+from pymongo import timeout
+from pymongo.errors import PyMongoError
 from slack_bolt import App
 from slack_bolt.authorization import AuthorizeResult
 from slack_bolt.response import BoltResponse
@@ -88,6 +90,8 @@ class SlackUI:
             self.ledger.require_member(actor)
         else:
             self.ledger.require(actor)
+        if command == "/ledger" and text.split()[:1] == ["invite"] and len(mentions(text)) != 1:
+            raise ValueError("Use /ledger invite @member [chat|rank:<slot>] to invite an opted-in member to a game channel.")
         if command == "/kudos":
             if text:
                 recipient = self.resolve(text)
@@ -451,16 +455,10 @@ class SlackUI:
         actor = self.actor(body)
         name, search = body["action_id"], body.get("value", "").casefold()
         if name == "invite_recipient":
-            from .admin_access import invitation_eligible, require_command
+            from .admin_access import invitation_candidates, require_command
             require_command(self.ledger, actor)
             self.ledger.admin(actor)
-            options = []
-            for member in self.ledger.sources.rows("members", {"merged_at": None}):
-                target = sid(member["_id"])
-                title = " ".join(str(member.get(k) or "") for k in ("firstname", "lastname")).strip() or self.ledger.sources.slack_id(target)
-                if invitation_eligible(self.ledger, target) and search in (title or "").casefold():
-                    options.append(views.option(title, target))
-            return {"options": options[:100]}
+            return {"options": [views.option(title, target) for target, title in invitation_candidates(self.ledger, search)]}
         if name == "delegate":
             self.ledger.staff(actor)
             return {"options": [views.option(self.ledger.sources.slack_id(p["member_id"]) or "Member", p["member_id"])
@@ -549,9 +547,14 @@ def build_app(ui, token, signing_secret, team_id, bot_id, client=None):
             ui.ledger.notify(actor, "status", {"summary": str(error)}, str(uuid4()), exception=True)
 
     @app.options(re.compile(r".*"))
-    def options(ack, body):
+    def options(ack, body, logger):
         try:
-            ack(**ui.options(body))
+            with timeout(2):
+                result = ui.options(body)
+            ack(**result)
+        except PyMongoError as error:
+            logger.warning("Slack options lookup failed error_type=%s", type(error).__name__)
+            ack(options=[])
         except (ValueError, KeyError):
             ack(options=[])
 
