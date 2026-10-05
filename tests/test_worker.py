@@ -189,6 +189,14 @@ def test_bridge_dedup_null_delete_and_minimal_payload(joined):
         w.outbox(claim(s, 'mqtt:mqtt-test'))
 
 
+def test_null_ticket_delete_enqueues_full_quest_reconciliation(joined):
+    _, store, *_ = joined
+    payload = b'delete 1780000000 {"document":null}'
+    assert ingest_mqtt(store, 'fix_tickets/delete', payload)
+    job = next(j for j in store.select('ledger_inbox') if j['kind'] == 'ticket_quest_reconcile')
+    assert job['payload'] == {}
+
+
 def test_expired_lease_recovered_without_old_worker_completing_new_job(joined):
     _, s, *_ = joined
     w = worker(joined)

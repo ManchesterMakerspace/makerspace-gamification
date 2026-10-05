@@ -268,7 +268,12 @@ class TicketQuests:
             try:
                 if not self._download_jpeg({"image_file_id": jpeg["id"]}):
                     jpeg = None
-            except (requests.RequestException, PyMongoError, SlackApiError, ValueError, OSError):
+            except (requests.RequestException, PyMongoError, SlackApiError):
+                raise
+            except (ValueError, OSError):
+                # Confirmed malformed or unsupported image bytes qualify as a
+                # text-only response. Transient Slack/network failures escape
+                # so the inbox retries before reserving a winner or XP amount.
                 jpeg = None
         eligible = (member_id != quest.get("reporter_id") and self.ledger.active(member_id)
                     and self.ledger.sources.good_standing(member_id)

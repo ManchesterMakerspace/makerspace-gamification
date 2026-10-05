@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from PIL import Image
 
 from conftest import oid
@@ -109,6 +110,24 @@ def test_jpeg_claim_awards_configured_100_and_two_concurrent_claims_have_one_win
     race = store.get("ledger_evidence", race["_id"])
     assert race["winner_member_id"] in {str(oid(2)), str(oid(3))}
     assert sum(int(ledger.participant(str(oid(i)))["xp"]) for i in (2, 3)) == 166
+
+
+def test_transient_image_check_retries_before_awarding_image_xp(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    event = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.101", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "F1", "mimetype": "image/jpeg"}]}
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=requests.ConnectionError("temporary network error")):
+        with pytest.raises(requests.RequestException):
+            service.response_event(event, "transient-image-event")
+    assert ledger.participant(str(oid(2)))["xp"] == "0"
+    assert not store.select("ledger_evidence", {"kind": "broken_ticket_quest_response"})
+
+    with patch.object(TicketQuests, "_download_jpeg", return_value=b"sanitized-jpeg"):
+        assert service.response_event(event, "transient-image-event") is True
+    assert ledger.participant(str(oid(2)))["xp"] == "100"
 
 
 def test_ignores_nonthread_and_non_sentence_messages(joined):

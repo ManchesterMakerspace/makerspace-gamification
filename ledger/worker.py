@@ -1132,6 +1132,10 @@ def ingest_mqtt(store, topic, payload, retained=False):
     doc = envelope.get("document") if isinstance(envelope, dict) else None
     if collection in ("fix_tickets", "fix_ticket_events"):
         if not isinstance(doc, dict) or doc.get("_id") is None:
+            if collection == "fix_tickets" and operation == "delete":
+                key = "ticket-quest-mqtt:" + hashlib.sha256(topic.encode() + payload).hexdigest()
+                store.atomic(lambda s: enqueue(s, "ledger_inbox", key, "ticket_quest_reconcile", {}))
+                return True
             return False
         ticket_id = doc.get("_id") if collection == "fix_tickets" else doc.get("ticket_id")
         if ticket_id is None:
