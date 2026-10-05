@@ -494,8 +494,11 @@ class Worker:
                 except Denied:
                     continue
             if cooperative(q):
-                verified = {m: c for m, c in contributions.items() if c.get("status") == "verified"}
-                eligible = service.verified_contributors(q, {**state, "contributions": verified})
+                # Finalization reads every stored contribution, including unverified records.
+                if not isinstance(raw_contributions, dict) or any(
+                        not isinstance(c, dict) or "status" not in c for c in raw_contributions.values()):
+                    continue
+                eligible = service.verified_contributors(q, state)
                 if len(eligible) < 2 or not {d["name"] for d in q["disciplines"]}.issubset({c["role"] for c in eligible.values()}):
                     continue
                 try:
