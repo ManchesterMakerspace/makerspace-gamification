@@ -476,29 +476,36 @@ class Worker:
             if q and cooperative(q) and q["status"] == "published" and project["quest_revision"] == q["_id"]:
                 parents.append((q, project))
         for q, state in parents:
-            contributions = state.get("contributions", {})
+            raw_contributions = state.get("contributions")
+            excluded = raw_contributions if isinstance(raw_contributions, dict) else ()
+            contributions = {m: c for m, c in (raw_contributions.items() if isinstance(raw_contributions, dict) else ())
+                             if isinstance(c, dict)}
             logical, shops = q.get("logical_id", q["_id"]), q.get("shop_ids") or [q.get("shop_id")]
             for member, contribution in contributions.items():
-                if contribution["status"] != "pending":
+                if contribution.get("status") != "pending":
                     continue
                 try:
                     if cooperative(q):
                         service.available(member, q)
-                    authority.authorize(actor, member, "quest_complete", shops, logical, excluded=contributions)
+                    authority.authorize(actor, member, "quest_complete", shops, logical, excluded=excluded)
                     uid = l.sources.slack_id(member)
                     if uid:
                         lines.append(f"Cooperative contribution: {q['_id']} · <@{uid}> — {contribution['description']}; use /ledger-admin verify-quest {q['_id']} <@{uid}>.")
                 except Denied:
                     continue
             if cooperative(q):
+                # Finalization reads every stored contribution, including unverified records.
+                if not isinstance(raw_contributions, dict) or any(
+                        not isinstance(c, dict) or "status" not in c for c in raw_contributions.values()):
+                    continue
                 eligible = service.verified_contributors(q, state)
                 if len(eligible) < 2 or not {d["name"] for d in q["disciplines"]}.issubset({c["role"] for c in eligible.values()}):
                     continue
                 try:
                     for member in eligible:
                         service.available(member, q)
-                        authority.authorize(actor, member, "quest_complete", shops, logical, excluded=contributions)
-                    authority.authorize(actor, LEDGER_AUTHOR, "quest_complete", shops, logical, excluded=contributions)
+                        authority.authorize(actor, member, "quest_complete", shops, logical, excluded=excluded)
+                    authority.authorize(actor, LEDGER_AUTHOR, "quest_complete", shops, logical, excluded=excluded)
                     lines.append(f"Shared project ready: {q['_id']} — {q['title']}; use /ledger-admin complete-quest {q['_id']}.")
                 except Denied:
                     continue

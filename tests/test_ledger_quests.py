@@ -83,6 +83,57 @@ def test_delegated_review_queue_discovers_only_authorized_cooperative_work(joine
                    for j in s.select('ledger_outbox', {'kind': 'review_channel_invite'}))
 
 
+@pytest.mark.parametrize('shared', [False, True])
+@pytest.mark.parametrize('malformed', [None, [], {str(oid(4)): None},
+                                    {str(oid(4)): 'invalid'}, {str(oid(4)): {}}, {str(oid(3)): None}])
+def test_review_queue_preserves_valid_reviews_beside_malformed_contributions(joined, shared, malformed):
+    l, s, _, composer, _, slack = joined
+    l.join(str(oid(3)))
+    Authority(l).grant(str(oid(10)), str(oid(3)), ['quest_complete', 'learning_review'],
+                       {'kind': 'global'}, 'Review pending work')
+    evidence = l.submit(str(oid(1)), 'learning-challenge', 'Valid learning evidence.')
+    service = LedgerQuests(l)
+    q = service.review(str(oid(10)), pending(joined, 'cooperative')['_id'], 100)
+    if shared:
+        bad = service.project(q)
+        bad['contributions'] = deepcopy(malformed)
+        s.put('ledger_relationships', bad)
+    else:
+        s.put('ledger_quests', {'_id': 'legacy-malformed', 'status': 'open', 'contributions': deepcopy(malformed)})
+    # Also exercise valid siblings inside a malformed mapping, where possible.
+    for member, role in ((1, 'Design'), (2, 'Fabrication')):
+        state = service.project(q)
+        if not isinstance(state['contributions'], dict):
+            state['contributions'] = {}
+        state['contributions'][str(oid(member))] = {'status': 'pending', 'role': role, 'description': 'Valid contribution.'}
+        s.put('ledger_relationships', state)
+    # A separate malformed shared project preserves the non-map cases.
+    if shared and not isinstance(malformed, dict):
+        bad = deepcopy(service.project(q))
+        bad.update(_id='malformed-project', contributions=deepcopy(malformed))
+        s.put('ledger_relationships', bad)
+    before = s.select('ledger_relationships')
+    worker = Worker(l, composer, slack)
+    worker.admin_command(str(oid(3)), ['review'], 'legacy-queue')
+    summary = s.get('ledger_outbox', 'dm:legacy-queue')['payload']['facts']['summary']
+    assert evidence['_id'] in summary
+    independent = not (shared and isinstance(malformed, dict) and str(oid(3)) in malformed)
+    assert ('/ledger-admin verify-quest ' + q['_id'] + ' <@U1>' in summary) == independent
+    assert 'Shared project ready:' not in summary
+    assert s.select('ledger_relationships') == before
+    state = service.project(q)
+    for member in (1, 2):
+        state['contributions'][str(oid(member))]['status'] = 'verified'
+    s.put('ledger_relationships', state)
+    before = s.select('ledger_relationships')
+    worker.admin_command(str(oid(3)), ['review'], 'legacy-ready-queue')
+    summary = s.get('ledger_outbox', 'dm:legacy-ready-queue')['payload']['facts']['summary']
+    assert evidence['_id'] in summary
+    ready = independent and not (shared and isinstance(malformed, dict))
+    assert ('/ledger-admin complete-quest ' + q['_id'] in summary) == ready
+    assert s.select('ledger_relationships') == before
+
+
 def test_review_rechecks_authority_rank_resources_and_edited_scope(joined):
     l, s, src, *_ = joined
     q = pending(joined, shops=[str(oid(201))])
@@ -101,6 +152,33 @@ def test_review_rechecks_authority_rank_resources_and_edited_scope(joined):
     assert s.get("ledger_quests", q["_id"])["status"] == "pending_review"
     rejected = LedgerQuests(l).review(str(oid(10)), q["_id"], 100, approve=False, reason="Prerequisite shop disabled")
     assert rejected["status"] == "rejected"
+
+
+@pytest.mark.parametrize('malformed', [None, 'invalid', {}])
+def test_ready_queue_omits_malformed_project_and_advertised_completion_succeeds(joined, malformed):
+    l, s, _, composer, _, slack = joined
+    actor = str(oid(3))
+    l.join(actor)
+    Authority(l).grant(str(oid(10)), actor, ['quest_complete'], {'kind': 'global'}, 'Review shared outcomes')
+    service = LedgerQuests(l)
+    quests = []
+    for key in ('malformed-ready', 'valid-ready'):
+        q = service.review(str(oid(10)), pending(joined, 'cooperative', key=key)['_id'], 100)
+        for member, role in ((1, 'Design'), (2, 'Fabrication')):
+            service.contribute(str(oid(member)), key, 'join', role=role)
+            service.contribute(str(oid(member)), key, 'submit', description='Observed contribution.')
+            service.contribute(str(oid(10)), key, 'verify', member=str(oid(member)))
+        quests.append(q)
+    damaged = service.project(quests[0])
+    damaged['contributions'][str(oid(4))] = deepcopy(malformed)
+    s.put('ledger_relationships', damaged)
+    before = deepcopy(service.project(quests[0]))
+    Worker(l, composer, slack).admin_command(actor, ['review'], 'ready-actions')
+    summary = s.get('ledger_outbox', 'dm:ready-actions')['payload']['facts']['summary']
+    assert '/ledger-admin complete-quest malformed-ready' not in summary
+    assert '/ledger-admin complete-quest valid-ready' in summary
+    assert service.finalize(actor, 'valid-ready', 'Independently observed shared result.')['status'] == 'completed'
+    assert service.project(quests[0]) == before
 
 
 def test_disabling_superseded_cooperative_revision_preserves_active_project(joined):
