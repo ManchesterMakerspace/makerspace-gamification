@@ -16,6 +16,7 @@ from .domain import Denied, Ledger
 from .messages import button, escape, section
 from .prompt_library import EXAMPLE_FACTS
 from .review_notifications import ReviewDeliveryBusy
+from .result_summaries import SummaryBusy, SummaryPending
 from .sources import FIELDS, sid
 from .storage import enqueue, now
 from .views import home
@@ -50,6 +51,8 @@ class Worker:
             self.finish(collection, job, "pending", 15, "HistoryImportPending", deferred=True)
         except ReviewDeliveryBusy:
             self.finish(collection, job, "pending", 15, "ReviewDeliveryBusy", deferred=True)
+        except (SummaryBusy, SummaryPending) as exc:
+            self.finish(collection, job, "pending", exc.delay, type(exc).__name__, deferred=True)
         except Exception as exc:
             # Never log event payloads, prompts, member messages, or provider responses.
             code = getattr(exc, "code", None)
@@ -80,18 +83,24 @@ class Worker:
 
     def inbox(self, job):
         payload = job["payload"]
-        if job["kind"] == "reconcile_member":
-            self.ledger.reconcile(payload["member_id"], payload.get("historical", False))
+        if job["kind"] == "catalog_refresh":
+            from .catalog_cache import refresh
+            refresh(self.ledger, job)
+        elif job["kind"] == "reconcile_member":
+            self.ledger.reconcile(payload["member_id"], payload.get("historical", False),
+                                  action_id=f"{job['_id']}:{payload['member_id']}")
         elif job["kind"] == "reconcile_targets":
             for member_id in payload["members"]:
                 if self.ledger.participant(member_id):
-                    self.ledger.reconcile(member_id)
+                    self.ledger.reconcile(member_id, action_id=f"{job['_id']}:{member_id}")
         elif job["kind"] == "reconcile":
+            from .catalog_cache import schedule_refresh
+            schedule_refresh(self.store)
             from .review_notifications import reconcile
             reconcile(self.store)
             for p in self.store.select("ledger_participants"):
                 self.valid_identity(p["member_id"])
-                self.ledger.reconcile(p["member_id"])
+                self.ledger.reconcile(p["member_id"], action_id=f"{job['_id']}:{p['member_id']}")
             from .engagement import Engagement
             for profile in self.store.select("ledger_relationships", {"kind": "member_preferences"}):
                 self.valid_identity(profile["member_id"])
@@ -249,7 +258,7 @@ class Worker:
                 return "ignored_unjoined_channel"
         message_id = f"message:{channel}:{event['ts']}"
         self.store.atomic(lambda s: s.put("ledger_context", {"_id": message_id, "kind": "message", "member_id": member_id,
-            "channel": channel, "thread": thread, "text": text[:6000], "at": event["ts"], "conversation_requested": bool(addressed or continuing),
+            "channel": channel, "thread": thread, "text": text[:6000], "at": event["ts"], "at_order": float(event["ts"]), "conversation_requested": bool(addressed or continuing),
             "participating": self.ledger.active(member_id), "consent_generation": (self.ledger.participant(member_id) or {}).get("consent_generation", 0),
             "expires_at": now() + timedelta(days=30)}))
         from .conversations import self_progress_question
@@ -393,34 +402,40 @@ class Worker:
             output = self.composer.compose(args[1], args[2], EXAMPLE_FACTS)
             summary = f"Preview ({output['outcome']}, {output['prompt_variation']}): {output['text']}"
         elif args and args[0] == "review":
-            from .authority import Authority, evidence_capability
-            rows = []
-            for r in self.store.select("ledger_evidence", {"kind": "submission", "status": "pending"}):
-                if r.get("quest_link"):
-                    continue
-                try:
-                    l.reviewer(actor, r["member_id"], r.get("shop_id"), evidence_capability(r), shops=r.get("shop_ids"), quest=r.get("quest_link"))
-                    rows.append(r)
-                except Denied:
-                    continue
-            summary = "\n".join(f"{r['_id']}: {r['achievement']} — {r['description']}" for r in rows) or "No pending submissions you can review."
-            from .quest_policy import REVIEWED_KINDS
-            for q in self.store.select("ledger_quests", {"kind": {"$in": list(REVIEWED_KINDS)}, "status": "pending_review"}):
-                try:
-                    Authority(l).authorize(actor, q["creator"], "quest_publish", q["shop_ids"], q["logical_id"])
-                    summary += f"\nQuest publication: {q['_id']} — {q['title']}; use /ledger-admin publish-quest {q['_id']} or reject-quest {q['_id']}."
-                except Denied:
-                    pass
-            for doc in self.store.select("ledger_evidence", {"kind": "quest_submission", "status": "pending"}):
-                q = self.store.get("ledger_quests", doc["quest_revision"])
-                if not q:
-                    continue
-                try:
-                    Authority(l).authorize(actor, doc["member_id"], "quest_complete", q["shop_ids"], q["logical_id"], excluded=[q["creator"]])
-                    summary += f"\nQuest completion: {doc['_id']} — {doc['description']}"
-                except Denied:
-                    pass
-            summary += self.cooperative_reviews(actor)
+            from .read_options import optimized_reads
+            if optimized_reads():
+                from .display_reads import AdminDisplay
+                display = AdminDisplay(l, actor)
+                summary = display.pending_reviews() + self.cooperative_reviews(actor, display)
+            else:
+                from .authority import Authority, evidence_capability
+                rows = []
+                for r in self.store.select("ledger_evidence", {"kind": "submission", "status": "pending"}):
+                    if r.get("quest_link"):
+                        continue
+                    try:
+                        l.reviewer(actor, r["member_id"], r.get("shop_id"), evidence_capability(r), shops=r.get("shop_ids"), quest=r.get("quest_link"))
+                        rows.append(r)
+                    except Denied:
+                        continue
+                summary = "\n".join(f"{r['_id']}: {r['achievement']} — {r['description']}" for r in rows) or "No pending submissions you can review."
+                from .quest_policy import REVIEWED_KINDS
+                for q in self.store.select("ledger_quests", {"kind": {"$in": list(REVIEWED_KINDS)}, "status": "pending_review"}):
+                    try:
+                        Authority(l).authorize(actor, q["creator"], "quest_publish", q["shop_ids"], q["logical_id"])
+                        summary += f"\nQuest publication: {q['_id']} — {q['title']}; use /ledger-admin publish-quest {q['_id']} or reject-quest {q['_id']}."
+                    except Denied:
+                        pass
+                for doc in self.store.select("ledger_evidence", {"kind": "quest_submission", "status": "pending"}):
+                    q = self.store.get("ledger_quests", doc["quest_revision"])
+                    if not q:
+                        continue
+                    try:
+                        Authority(l).authorize(actor, doc["member_id"], "quest_complete", q["shop_ids"], q["logical_id"], excluded=[q["creator"]])
+                        summary += f"\nQuest completion: {doc['_id']} — {doc['description']}"
+                    except Denied:
+                        pass
+                summary += self.cooperative_reviews(actor)
         elif args and args[0] in ("approve", "reject") and len(args) >= 2:
             doc = self.store.get("ledger_evidence", args[1])
             if doc and doc.get("kind") == "quest_submission":
@@ -464,24 +479,56 @@ class Worker:
             summary = json.dumps(snapshot(self.store), default=str)
         l.notify(actor, "status", {"summary": summary}, key, exception=True, administrative=True)
 
-    def cooperative_reviews(self, actor):
+    def cooperative_reviews(self, actor, display=None):
         from .authority import Authority
         from .ledger_quests import LedgerQuests
         from .quest_policy import LEDGER_AUTHOR, REVIEWED_KINDS, cooperative
-        l, lines = self.ledger, []
+        from .read_options import optimized_reads
+        if display is None and optimized_reads():
+            from .display_reads import AdminDisplay
+            display = AdminDisplay(self.ledger, actor)
+        l, lines = display.ledger if display else self.ledger, []
         authority, service = Authority(l), LedgerQuests(l)
-        parents = [(q, q) for q in self.store.select("ledger_quests", {"status": "open", "kind": {"$nin": list(REVIEWED_KINDS)}})]
-        for project in self.store.select("ledger_relationships", {"kind": "quest_project", "status": "open"}):
-            q = self.store.get("ledger_quests", project["quest_revision"])
-            if q and cooperative(q) and q["status"] == "published" and project["quest_revision"] == q["_id"]:
-                parents.append((q, project))
-        for q, state in parents:
+        def parents():
+            quest_fields = ("kind", "quest_type", "status", "logical_id", "creator", "title", "target_rank",
+                            "shop_id", "shop_ids", "tool_ids", "disciplines", "description", "criteria")
+            query = {"status": "open", "kind": {"$nin": list(REVIEWED_KINDS)}}
+            batches = display.pages("ledger_quests", query, projection=dict.fromkeys((*quest_fields, "contributions"), 1)) if display else [self.store.select("ledger_quests", query)]
+            for batch in batches:
+                if display:
+                    people = {m for q in batch if isinstance(q.get("contributions"), dict)
+                              for m in q["contributions"]}
+                    display.warm_people(people)
+                    display.source.warm_quests(batch, people)
+                yield from ((q, q) for q in batch)
+            query = {"kind": "quest_project", "status": "open"}
+            projection = {**dict.fromkeys(("kind", "status", "logical_id", "quest_revision", "contributions"), 1),
+                          **dict.fromkeys(("quest." + field for field in quest_fields), 1), "quest._id": 1}
+            batches = display.joined_pages("ledger_relationships", query, "quest_revision", projection) if display else [self.store.select("ledger_relationships", query)]
+            for batch in batches:
+                store = display.store if display else self.store
+                if display:
+                    display.store.documents.update({("ledger_quests", p["quest_revision"]): p["quest"] for p in batch})
+                    display.store.documents.update({("ledger_relationships", p["_id"]): p for p in batch})
+                joined = [(store.get("ledger_quests", p["quest_revision"]), p) for p in batch]
+                joined = [(q, p) for q, p in joined if q and cooperative(q) and q["status"] == "published" and p["quest_revision"] == q["_id"]]
+                if display:
+                    people = {m for _, p in joined if isinstance(p.get("contributions"), dict)
+                              for m in p["contributions"]}
+                    display.warm_people(people)
+                    display.source.warm_quests([q for q, _ in joined], people)
+                yield from joined
+        for q, state in parents():
+            if display and len(lines) >= 100:
+                break
             raw_contributions = state.get("contributions")
             excluded = raw_contributions if isinstance(raw_contributions, dict) else ()
             contributions = {m: c for m, c in (raw_contributions.items() if isinstance(raw_contributions, dict) else ())
                              if isinstance(c, dict)}
             logical, shops = q.get("logical_id", q["_id"]), q.get("shop_ids") or [q.get("shop_id")]
             for member, contribution in contributions.items():
+                if display and len(lines) >= 100:
+                    break
                 if contribution.get("status") != "pending":
                     continue
                 try:
@@ -493,6 +540,8 @@ class Worker:
                         lines.append(f"Cooperative contribution: {q['_id']} · <@{uid}> — {contribution['description']}; use /ledger-admin verify-quest {q['_id']} <@{uid}>.")
                 except Denied:
                     continue
+            if display and len(lines) >= 100:
+                break
             if cooperative(q):
                 # Finalization reads every stored contribution, including unverified records.
                 if not isinstance(raw_contributions, dict) or any(
@@ -509,9 +558,9 @@ class Worker:
                     lines.append(f"Shared project ready: {q['_id']} — {q['title']}; use /ledger-admin complete-quest {q['_id']}.")
                 except Denied:
                     continue
-        return "".join("\n" + line for line in lines)
+        return "".join("\n" + line for line in (lines[:100] if display else lines))
 
-    def persist_composition(self, job, kind, audience, facts, conversation=None):
+    def persist_composition(self, job, kind, audience, facts, conversation=None, *, profile=None):
         current = self.store.get("ledger_outbox", job["_id"])
         if current.get("composed"):
             return current["composed"]
@@ -527,7 +576,8 @@ class Worker:
             if saved.get("lease") != job["lease"] or saved["status"] != "working":
                 raise Denied("Delivery was cancelled or its lease expired.")
             if not saved.get("prompt_selection"):
-                saved["prompt_selection"] = self.composer.reserve(s, kind, audience, scope)
+                saved["prompt_selection"] = (self.composer.reserve(s, kind, audience, scope, profile=profile)
+                                             if profile else self.composer.reserve(s, kind, audience, scope))
                 s.put("ledger_outbox", saved)
             elif "matrix" not in saved["prompt_selection"]:
                 # Upgrade pre-matrix reservations once without rerolling their voice.
@@ -535,8 +585,14 @@ class Worker:
                 s.put("ledger_outbox", saved)
             return saved["prompt_selection"]
         selection = self.store.atomic(reserve)
-        facts = self.prompt_facts(job["payload"].get("member_id"), kind, facts)
-        result = self.composer.compose(kind, audience, facts, conversation, selection=selection)
+        if profile == "guidance":
+            result = self.composer.guidance(facts, selection=selection)
+        else:
+            if profile is None:
+                facts = self.prompt_facts(job["payload"].get("member_id"), kind, facts)
+            result = self.composer.compose(kind, audience, facts, conversation, selection=selection)
+        if profile:
+            result["queue_age_seconds"] = max(0, (now() - current.get("created_at", current["available_at"])).total_seconds())
         def write(s):
             saved = s.get("ledger_outbox", job["_id"])
             if saved.get("lease") != job["lease"] or saved["status"] != "working":
@@ -545,6 +601,70 @@ class Worker:
             s.put("ledger_outbox", saved)
         self.store.atomic(write)
         return result
+
+    def deliver_guidance(self, job):
+        """An explicit self-only request; never an unsolicited coaching notice."""
+        payload = job["payload"]
+        member_id = payload["member_id"]
+        expected_uid = payload.get("slack_id")
+        def authorize():
+            participant = self.ledger.require(member_id)
+            if participant.get("consent_generation", 0) != payload["consent_generation"]:
+                raise Denied("This guidance request belongs to an earlier participation.")
+            uid = self.valid_identity(member_id)
+            if not uid or (expected_uid and uid != expected_uid):
+                raise Denied("Guidance requires a current human Slack identity.")
+            participant = self.ledger.require(member_id)
+            if participant.get("consent_generation", 0) != payload["consent_generation"]:
+                raise Denied("This guidance request belongs to an earlier participation.")
+            self.assert_live_job(job)
+            return uid
+        uid = authorize()
+        expected_uid = uid
+        current = self.store.get("ledger_outbox", job["_id"])
+        if current.get("delivery"):
+            return
+        parent = None
+        if payload.get("summary_id"):
+            parent = self.store.get("ledger_evidence", payload["summary_id"])
+            if (not parent or parent.get("kind") != "notification_summary" or
+                    parent["member_id"] != member_id or parent.get("authorization") != "game" or
+                    parent.get("consent_generation") != payload["consent_generation"] or
+                    parent.get("identity") != uid or
+                    not parent.get("ts") or not parent.get("channel", "").startswith("D")):
+                raise Denied("Guidance is available only on your own current result.")
+        facts = current.get("guidance_facts")
+        if facts is None:
+            from .progress import progress
+            facts = progress(self.ledger, member_id)
+            facts.pop("next_rank", None)
+            def snapshot(s):
+                saved = s.get("ledger_outbox", job["_id"])
+                if saved.get("lease") != job["lease"] or saved["status"] != "working":
+                    raise Denied("Guidance was cancelled.")
+                saved.setdefault("guidance_facts", facts)
+                s.put("ledger_outbox", saved)
+                return saved["guidance_facts"]
+            facts = self.store.atomic(snapshot)
+        composed = self.persist_composition(job, "conversation", "member", facts, profile="guidance")
+        from .conversations import restricted_answer
+        text = composed["text"]
+        if restricted_answer(self.ledger, member_id, text):
+            text = next(iter(facts.get("blockers") or facts.get("suggestions") or []), "Use /ledger progress to review your progress.")
+        authorize()
+        channel = parent["channel"] if parent else self.slack.conversations_open(users=uid)["channel"]["id"]
+        authorize()
+        response = self.post_message(channel=channel, text=text, blocks=[section(text)],
+            client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"])),
+            **({"thread_ts": parent["ts"]} if parent else {}))
+        if not isinstance(response.get("ts"), str) or not response["ts"]:
+            raise ValueError("Slack did not confirm the guidance timestamp.")
+        def receipt(s):
+            saved = s.get("ledger_outbox", job["_id"])
+            if saved.get("lease") == job["lease"] and saved["status"] == "working":
+                saved["delivery"] = {"channel": channel, "ts": response["ts"], "at": now()}
+                s.put("ledger_outbox", saved)
+        self.store.atomic(receipt)
 
     def identity_facts(self, member_id, prefix="member"):
         member = self.ledger.sources.member(member_id) or {}
@@ -575,6 +695,11 @@ class Worker:
         p = job["payload"]
         kind = job["kind"]
         member_id = p.get("member_id")
+        if kind in ("summary_flush", "summary_delivery"):
+            from .result_summaries import flush, deliver
+            return flush(self, job) if kind == "summary_flush" else deliver(self, job)
+        if kind == "guidance":
+            return self.deliver_guidance(job)
         if kind in ("review_notice", "quest_review_notice"):
             from .review_notifications import deliver
             return deliver(self, job)
@@ -707,14 +832,33 @@ class Worker:
             return
         if kind == "rank_art":
             from .rules import RANKS
+            participant = self.ledger.require(member_id)
+            generation = participant.get("consent_generation", 0)
+            if p.get("consent_generation", generation) != generation:
+                raise Denied("Rank artwork belongs to an earlier participation.")
             slot = p["slot"]
             display = self.ledger.presentation(slot)
             # Supplied art has baked-in labels. Never show an obsolete rank name.
             if display["name"] == RANKS[slot - 1][0]:
-                dm = self.slack.conversations_open(users=uid)["channel"]["id"]
+                parent = self.store.get("ledger_evidence", p["summary_id"]) if p.get("summary_id") else None
+                if p.get("summary_id"):
+                    participant = self.ledger.participant(member_id)
+                    if (not parent or parent["member_id"] != member_id or
+                            parent.get("authorization") != "game" or parent.get("identity") != uid or
+                            parent.get("consent_generation") != participant.get("consent_generation", 0)):
+                        raise Denied("Rank artwork no longer belongs to this participation.")
+                    if not parent.get("ts"):
+                        raise SummaryPending()
+                dm = parent["channel"] if parent else self.slack.conversations_open(users=uid)["channel"]["id"]
+                if self.valid_identity(member_id) != uid:
+                    raise Denied("Rank artwork requires the original Slack identity.")
+                latest = self.ledger.require(member_id)
+                if latest.get("consent_generation", 0) != generation:
+                    raise Denied("Rank artwork belongs to an earlier participation.")
                 self.assert_live_job(job)
                 self.slack.files_upload_v2(file=str(Path(__file__).parent / "assets" / f"rank-{slot}.png"),
-                                          title=display["name"], channel=dm)
+                                          title=display["name"], channel=dm,
+                                          **({"thread_ts": parent["ts"]} if parent else {}))
             return
         if kind == "conversation":
             self.ledger.require_member(member_id)
@@ -723,26 +867,15 @@ class Worker:
             request = self.store.get("ledger_context", p["message_id"])
             if not request:
                 raise Denied("The original request was deleted.")
-            managed = {c["channel_id"] for c in self.store.select("ledger_channels", {"kind": "channel"})}
-            unrelated = not p["channel"].startswith("D") and p["channel"] not in managed
+            unrelated = not p["channel"].startswith("D") and not self.store.exists(
+                "ledger_channels", {"kind": "channel", "channel_id": p["channel"]})
             if unrelated:
                 requested = (request.get("conversation_requested") or self.chat_addressed(request["text"]) or
                              self.store.get("ledger_context", f"thread:{p['channel']}:{p['thread']}"))
                 if p.get("ambient") or not requested:
                     raise Denied("Ambient questions require a registered Ledger channel.")
-            query = {"kind": {"$in": ["message", "reply"]}, "channel": p["channel"]}
-            if not p["channel"].startswith("D"):
-                query["thread"] = p["thread"]
-            context = [c for c in self.store.select("ledger_context", query) if c["_id"] != p["message_id"]
-                       and (not unrelated or c["kind"] == "reply" or c.get("conversation_requested"))
-                       and (c["kind"] == "reply" or self.ledger.sources.permitted(c["member_id"]))]
-            from .conversations import restricted_answer
-            context = [c for c in context if not restricted_answer(self.ledger, member_id, c["text"])
-                       and (c["member_id"] != member_id or (c.get("consent_generation", 0) == p.get("consent_generation", 0)
-                            and c.get("participating", True) == p.get("participating", True)))]
-            context.sort(key=lambda c: float(c["at"]))
-            history = [{"role": "assistant" if c["kind"] == "reply" else "user", "content": c["text"][:600] if c["kind"] == "reply" else
-                       f"Author {self.ledger.sources.slack_id(c['member_id'])}: {c['text'][:600]}"} for c in context[-6:]]
+            from .context_reads import history as read_history
+            history = read_history(self.ledger, p, unrelated)
             from .conversations import converse
             current = self.store.get("ledger_outbox", job["_id"])
             composed = current.get("composed")
@@ -792,7 +925,7 @@ class Worker:
             self.store.atomic(lambda s: s.put("ledger_context", {"_id": f"reply:{p['channel']}:{response['ts']}", "kind": "reply",
                 "member_id": member_id, "channel": p["channel"], "thread": p["thread"], "text": composed["text"],
                 "participating": self.ledger.active(member_id), "consent_generation": p.get("consent_generation", 0),
-                "at": response["ts"], "expires_at": now() + timedelta(days=30)}))
+                "at": response["ts"], "at_order": float(response["ts"]), "expires_at": now() + timedelta(days=30)}))
             return
         audience, facts = p["audience"], p.get("facts", {})
         if p.get("administrative") or "/ledger-admin" in json.dumps(facts):
@@ -923,6 +1056,10 @@ class Worker:
             return
         e["deliveries"][audience] = receipt
         s.put("ledger_evidence", e)
+        if e.get("result_summary"):
+            from .result_summaries import track_kudos
+            track_kudos(Ledger(s, self.ledger.sources), e)
+            return
         from .kudos import delivery_facts
         ledger = Ledger(s, self.ledger.sources)
         ledger.notify(e["giver"], "delivery", delivery_facts(ledger, e), f"receipt:{e['_id']}:{audience}:{receipt['status']}", exception=True)
@@ -977,6 +1114,9 @@ def ingest_mqtt(store, topic, payload, retained=False):
         raise ValueError("Invalid bridge payload")
     envelope = json_util.loads(document)
     doc = envelope.get("document") if isinstance(envelope, dict) else None
+    if collection in ("shops", "tools"):
+        from .catalog_cache import schedule_refresh
+        schedule_refresh(store)
     if collection == "checkins":
         if not isinstance(doc, dict) or not doc.get("_id"):
             return False

@@ -215,7 +215,9 @@ def character_sheet(ledger, member):
 
 
 def progress_view(ledger, member):
-    return modal("dismiss", "Your next rank", progress_blocks(ledger, member) + [navigation()], submit="Done")
+    return modal("dismiss", "Your next rank", progress_blocks(ledger, member) + [
+        {"type": "actions", "elements": [button("Suggest a next step", "guidance_next_step", "")]},
+        navigation()], submit="Done")
 
 
 def preferences(ledger, member):
@@ -335,8 +337,21 @@ def delegates(ledger, actor):
     blocks.extend(checkbox("cap_" + cap, cap.replace("_", " ").title()) for cap in sorted(CAPABILITIES))
     blocks.extend([select_input("scope_kind", "Authority scope", [option(k.title(), k) for k in ("global", "shops", "quest")]),
         text_input("scope_ids", "Shop IDs or quest ID (any revision)", optional=True), text_input("reason", "Required reason", multiline=True)])
-    for g in ledger.store.select("ledger_relationships", {"kind": "delegation", "status": "active"})[:30]:
-        if Authority(ledger).staff_scope(actor)["kind"] == "global" or g["grantor"] == actor:
-            blocks.append(section(f"Grant {escape(g['_id'])}\nDelegate: {escape(ledger.sources.slack_id(g['delegate']))}\nCapabilities: {escape(', '.join(g['capabilities']))}\nScope: {escape(json.dumps(g['scope']))}"))
+    from .read_options import optimized_reads
+    scope = Authority(ledger).staff_scope(actor)
+    if optimized_reads():
+        query = {"kind": "delegation", "status": "active"}
+        if not scope or scope["kind"] != "global":
+            query["grantor"] = actor
+        grants = ledger.store.select("ledger_relationships", query,
+            projection=dict.fromkeys(("delegate", "grantor", "capabilities", "scope"), 1),
+            sort=[("at", 1), ("_id", 1)], limit=30, max_time_ms=2000)
+        names = ledger.sources.slack_ids([g["delegate"] for g in grants])
+    else:
+        grants = ledger.store.select("ledger_relationships", {"kind": "delegation", "status": "active"})[:30]
+        names = {g["delegate"]: ledger.sources.slack_id(g["delegate"]) for g in grants}
+    for g in grants:
+        if scope and (scope["kind"] == "global" or g["grantor"] == actor):
+            blocks.append(section(f"Grant {escape(g['_id'])}\nDelegate: {escape(names.get(g['delegate']))}\nCapabilities: {escape(', '.join(g['capabilities']))}\nScope: {escape(json.dumps(g['scope']))}"))
             blocks.append({"type": "actions", "elements": [button("Revoke grant", "delegate_revoke", g["_id"])]})
     return modal("delegate_grant", "Review delegates", blocks, submit="Grant authority")

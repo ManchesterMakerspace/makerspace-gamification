@@ -244,8 +244,8 @@ def test_source_notifications_supply_tool_credit_and_challenge_details(joined):
     store.put('ledger_evidence', {'_id': 'approved-learning', 'kind': 'submission', 'member_id': member,
         'status': 'approved', 'catalog_id': 'learning-test', 'achievement': 'challenge', 'at': now()})
     ledger.reconcile(member)
-    facts = {j['payload']['type']: j['payload']['facts'] for j in store.select('ledger_outbox')
-             if j['kind'] == 'message' and j['payload'].get('audience') == 'member'}
+    facts = {event['type']: event['facts'] for owner in store.select('ledger_evidence',
+             {'kind': 'notification_summary', 'member_id': member}) for event in owner['events']}
     assert facts['checkout_earned']['tool_name'] == 'Tool1-1'
     assert facts['checkout_granted']['tool_name'] == 'Tool1-2'
     assert facts['checkout_earned']['shop_name'] == facts['checkout_granted']['shop_name'] == 'Shop1'

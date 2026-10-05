@@ -25,7 +25,7 @@ var LedgerMongoRoles = (() => {
   // Exactly the collections where MongoStore.indexes() calls create_index().
   const indexedCollections = new Set([
     "ledger_participants", "ledger_inbox", "ledger_outbox", "ledger_evidence",
-    "ledger_awards", "ledger_context", "ledger_relationships", "ledger_quests",
+    "ledger_awards", "ledger_context", "ledger_relationships", "ledger_quests", "ledger_catalog",
   ]);
 
   function buildRoles(sourceDatabase = "makerauth", ledgerDatabase = "makerauth") {

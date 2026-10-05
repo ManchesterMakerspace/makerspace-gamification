@@ -12,6 +12,7 @@ from .storage import enqueue, now
 
 MAJOR = {"rank_up", "shop_complete", "boss", "stewardship"}
 CHALLENGES = {"challenge", "first_build", "boss", "stewardship", "develop_mentor", "mentoring"}
+RESULT_XP = CHALLENGES | {"checkout_earned", "checkout_granted", "volunteer_credit", "quest", "recruitment"}
 
 
 class Denied(ValueError):
@@ -156,7 +157,8 @@ class Ledger:
         if p["rank"]:
             self._invite(member_id, f"rank:{p['rank']}", explicit=True)
         if first and p["rank"] == 1:
-            enqueue(self.store, "ledger_outbox", f"art:welcome:{member_id}", "rank_art", {"member_id": member_id, "slot": 1})
+            enqueue(self.store, "ledger_outbox", f"art:welcome:{member_id}", "rank_art", {"member_id": member_id, "slot": 1,
+                    "consent_generation": p["consent_generation"]})
         enqueue(self.store, "ledger_inbox", f"import:{member_id}:{p['revision']}", "reconcile_member", {"member_id": member_id, "historical": True})
         self.notify(member_id, "onboarding" if first else "return", {"summary": "Your skills and XP are retained and continue accruing silently if you opt out."}, f"join:{member_id}:{p['revision']}")
         from .engagement import Engagement
@@ -179,7 +181,8 @@ class Ledger:
         self.store.put("ledger_evidence", {"_id": f"consent:{member_id}:{p['revision']}", "kind": "consent", "member_id": member_id, "opted_in": False, "at": now()})
         for job in self.store.select("ledger_outbox", {"status": {"$in": ["pending", "working"]}}):
             payload = job["payload"]
-            if payload.get("member_id") == member_id and job["kind"] in ("invite", "message", "mqtt", "conversation", "welcome", "quest_draft") and not payload.get("peer_kudos"):
+            if payload.get("member_id") == member_id and job["kind"] in ("invite", "message", "mqtt", "conversation", "welcome", "quest_draft",
+                    "summary_flush", "summary_delivery", "guidance", "rank_art") and not payload.get("peer_kudos"):
                 job["status"] = "cancelled"
                 self.store.put("ledger_outbox", job)
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
@@ -221,17 +224,23 @@ class Ledger:
                 raise Denied("Only a current member of that channel may invite someone back.")
         self._invite(target, channel_key, explicit=True, inviter=actor)
 
-    def notify(self, member_id, kind, facts, key, exception=False, administrative=False):
+    def notify(self, member_id, kind, facts, key, exception=False, administrative=False, *, action_id=None):
         if not exception and not self.active(member_id):
             return
+        positive_xp = kind in RESULT_XP and amount(facts.get("xp_change", "0")) > 0
+        verified_milestone = kind in CHALLENGES | {"quest"} and facts.get("verified_milestone") is True
+        informational_unlock = kind == "quest" and str(key).startswith("quest-unlock:")
+        if action_id and not exception and not administrative and (positive_xp or verified_milestone or kind in MAJOR or informational_unlock):
+            from .result_summaries import collect
+            return collect(self, action_id, member_id, kind, facts, str(key))
         enqueue(self.store, "ledger_outbox", f"dm:{key}", "message", {"member_id": member_id,
                 "type": kind, "audience": "member", "facts": facts, "exception": exception, "administrative": administrative})
 
-    def major(self, member_id, kind, facts, key, historical=False):
+    def major(self, member_id, kind, facts, key, historical=False, *, action_id=None):
         if historical or not self.active(member_id) or kind not in MAJOR:
             return
         facts = {**facts, "type": kind}
-        self.notify(member_id, kind, facts, key)
+        summary_id = self.notify(member_id, kind, facts, key, action_id=action_id)
         pending = [j for j in self.store.select("ledger_outbox", {"status": "pending"})
                    if j["kind"] == "message" and j["payload"].get("coalesce") == member_id]
         if pending:
@@ -243,8 +252,9 @@ class Ledger:
                 "type": kind, "audience": "shared", "coalesce": member_id, "facts": {"achievements": [facts]}}, delay=60)
         enqueue(self.store, "ledger_outbox", f"mqtt:{key}", "mqtt", {"member_id": member_id,
                 "event_id": key, "type": kind, "achievement": facts, "ruleset": self.participant(member_id)["ruleset"], "occurred_at": now().isoformat()})
+        return summary_id
 
-    def award(self, member_id, source, desired, kind, historical=False, facts=None):
+    def award(self, member_id, source, desired, kind, historical=False, facts=None, *, action_id=None):
         """Set an evidence contribution; append only the delta, including reversals."""
         p = self.participant(member_id)
         if not p:
@@ -261,8 +271,9 @@ class Ledger:
                         "source": source, "delta": str(delta), "at": now(), "ruleset": p["ruleset"]})
         p.update(xp=str(amount(p["xp"]) + delta), revision=p["revision"] + 1)
         self.store.put("ledger_participants", p)
-        if not historical and kind != "kudos" and (delta <= 0 or kind not in ("boss", "stewardship")):
-            self.notify(member_id, kind if delta > 0 else "correction", {**(facts or {}), "xp_change": str(delta), "xp_total": p["xp"]}, award_id)
+        if not historical and kind != "kudos" and (delta <= 0 or kind not in ("boss", "stewardship") or action_id):
+            self.notify(member_id, kind if delta > 0 else "correction", {**(facts or {}), "award_id": award_id,
+                        "xp_change": str(delta), "xp_total": p["xp"]}, award_id, action_id=action_id)
         return True
 
     def kudos(self, giver, recipient, message, *, key, shop=None, tool=None, public=False, invite=False, expected_participation=None, emoji=None):
@@ -305,18 +316,33 @@ class Ledger:
                     "message": message, "emoji": selected_emoji(emoji), "shop": shop, "tool": tool, "shop_name": (shop_doc or {}).get("name"),
                     "tool_name": (tool_doc or {}).get("name"), "public": bool(public), "invite": bool(invite),
                     "participating_at_submission": participating, "xp_awarded": bool(eligible),
-                    "at": now(), "day": day, "week": week, "deliveries": {}}
+                    "at": now(), "day": day, "week": week, "deliveries": {},
+                    "result_summary": True, "action_id": f"kudos:{key}"}
         self.store.put("ledger_evidence", evidence)
         from .engagement import Engagement
         Engagement(self).capture(giver, evidence["_id"], "kudos_metadata", at=evidence["at"], metadata={"shop": shop, "tool": tool})
         if eligible:
-            self.award(recipient, evidence["_id"], "17", "kudos")
-            self._advance(recipient)
+            awarded = self.award(recipient, evidence["_id"], "17", "kudos", action_id=evidence["action_id"])
+            progression_summary = self._advance(recipient, action_id=evidence["action_id"])
+            # Keep ordinary recipient kudos as its original note. If it also
+            # caused progression, that existing result must report the award.
+            if awarded and progression_summary:
+                account_key = f"account:{recipient}:{evidence['_id']}"
+                account = self.store.get("ledger_evidence", account_key)
+                award_id = f"{account_key}:{account['revision']}"
+                award = self.store.get("ledger_awards", award_id)
+                from .result_summaries import collect
+                collect(self, evidence["action_id"], recipient, "kudos", {"award_id": award_id,
+                        "xp_change": award["delta"], "xp_total": self.participant(recipient)["xp"]}, award_id)
         if invite and not participating and self.active(giver):
             self._sponsor(giver, recipient, notify=False)
         for audience in ["recipient"] + (["shared"] if public else []):
             enqueue(self.store, "ledger_outbox", f"{evidence['_id']}:{audience}", "kudos",
                     {"evidence": evidence["_id"], "audience": audience, "member_id": recipient, "peer_kudos": True})
+        from .result_summaries import finish_action, track_kudos
+        evidence["summary_id"] = track_kudos(self, evidence)
+        self.store.put("ledger_evidence", evidence)
+        finish_action(self, evidence["action_id"])
         return evidence
 
     def sponsor(self, giver, recipient):
@@ -337,12 +363,12 @@ class Ledger:
             self.notify(recipient, "invitation", {"sponsor": giver}, key, exception=True)
         return rel
 
-    def _recruitment(self, member_id, at):
+    def _recruitment(self, member_id, at, *, action_id=None):
         p = self.participant(member_id)
         rel = self.store.get("ledger_relationships", f"sponsor:{member_id}")
         if not p or not rel or rel["status"] != "accepted" or rel.get("rewarded") or not at or at <= p["first_opt_in"]:
             return
-        self.award(rel["giver"], f"recruit:{member_id}", "11", "recruitment")
+        self.award(rel["giver"], f"recruit:{member_id}", "11", "recruitment", action_id=action_id)
         rel["rewarded"] = True
         self.store.put("ledger_relationships", rel)
 
@@ -372,7 +398,7 @@ class Ledger:
             raise ValueError("Unknown progression version")
         return self.publish_ranks(actor, old["ranks"])
 
-    def _advance(self, member_id, historical=False):
+    def _advance(self, member_id, historical=False, *, action_id=None):
         p = self.participant(member_id)
         if not p or not self.sources.permitted(member_id):
             return
@@ -395,13 +421,15 @@ class Ledger:
         p.update(rank=rank, revision=p["revision"] + 1)
         self.store.put("ledger_participants", p)
         from .quests import Quests
-        Quests(self).unlock_notice(member_id)
+        Quests(self).unlock_notice(member_id, action_id=action_id if not historical else None)
         self._invite(member_id, f"rank:{rank}")
-        self.major(member_id, "rank_up", {"rank": self.presentation(rank)["name"], "slot": rank,
+        summary_id = self.major(member_id, "rank_up", {"rank": self.presentation(rank)["name"], "slot": rank,
                    "old_slot": old_slot, "old_rank": self.presentation(old_slot)["name"],
-                   "new_slot": rank, "new_rank": self.presentation(rank)["name"]}, f"rank:{member_id}:{rank}:{p['revision']}", historical)
+                   "new_slot": rank, "new_rank": self.presentation(rank)["name"]}, f"rank:{member_id}:{rank}:{p['revision']}", historical, action_id=action_id)
         if not historical and self.active(member_id) and rank <= 6:
-            enqueue(self.store, "ledger_outbox", f"art:{member_id}:{rank}:{p['revision']}", "rank_art", {"member_id": member_id, "slot": rank})
+            enqueue(self.store, "ledger_outbox", f"art:{member_id}:{rank}:{p['revision']}", "rank_art", {"member_id": member_id, "slot": rank,
+                    "summary_id": summary_id, "consent_generation": p.get("consent_generation", 0)})
+        return summary_id
 
     def correct_rank(self, actor, member_id, slot, reason):
         return self.tx("_correct_rank", actor, member_id, slot, reason)
@@ -419,7 +447,8 @@ class Ledger:
         Quests(self).cleanup(member_id)
         self.notify(member_id, "correction", {"summary": reason, "rank": self.presentation(slot)["name"]}, str(uuid4()))
 
-    def release_rank(self, actor, member_id, reason):
+    def release_rank(self, actor, member_id, reason, *, action_id=None):
+        action_id = action_id or "rank-release:" + str(uuid4())
         def release(s):
             d = Ledger(s, self.sources)
             d.reviewer(actor, member_id)
@@ -430,7 +459,9 @@ class Ledger:
             p.update(rank_hold=False, revision=p["revision"] + 1)
             s.put("ledger_participants", p)
             s.put("ledger_awards", {"_id": str(uuid4()), "kind": "rank_hold_release", "member_id": member_id, "actor": actor, "reason": reason, "at": now()})
-            d._advance(member_id)
+            d._advance(member_id, action_id=action_id)
+            from .result_summaries import finish_action
+            finish_action(d, action_id)
         self.store.atomic(release)
 
     def publish_catalog(self, actor, doc):
@@ -502,10 +533,17 @@ class Ledger:
             s.put("ledger_evidence", doc)
         self.store.atomic(update)
 
-    def review(self, actor, evidence_id, approve=True, reason=""):
-        return self.tx("_review", actor, evidence_id, approve, reason)
+    def review(self, actor, evidence_id, approve=True, reason="", *, action_id=None):
+        action_id = action_id or "review:" + str(uuid4())
+        def run(s):
+            d = Ledger(s, self.sources)
+            result = d._review(actor, evidence_id, approve, reason, action_id=action_id)
+            from .result_summaries import finish_action
+            finish_action(d, action_id)
+            return result
+        return self.store.atomic(run)
 
-    def _review(self, actor, evidence_id, approve, reason, quest_review=False):
+    def _review(self, actor, evidence_id, approve, reason, quest_review=False, *, action_id=None):
         doc = self.store.get("ledger_evidence", evidence_id)
         if not doc or doc.get("kind") != "submission":
             raise ValueError("Unknown submission.")
@@ -534,15 +572,43 @@ class Ledger:
             raise ValueError("A correction or rejection requires a reason.")
         self.store.put("ledger_awards", {"_id": str(uuid4()), "kind": "review", "evidence": evidence_id, "actor": actor,
                        "before": doc["status"], "after": "approved" if approve else "rejected", "reason": reason, "at": now(), **audit})
+        new_verification = approve and doc["status"] != "approved"
+        # A review may finalize before the first silent import. Snapshot only
+        # this reviewed milestone's account, so unrelated catch-up stays silent.
+        account_key = f"account:{doc['member_id']}:challenge:{doc['catalog_id']}"
+        prior_account = self.store.get("ledger_evidence", account_key) or {}
         doc.update(status="approved" if approve else "rejected", reviewer=actor, reviewed_at=now(), reason=reason)
         self.store.put("ledger_evidence", doc)
-        self._reconcile(doc["member_id"])
+        self._reconcile(doc["member_id"], action_id=action_id)
+        if action_id and new_verification and doc["achievement"] in CHALLENGES:
+            catalog = self.store.get("ledger_catalog", doc["catalog_id"]) or {}
+            reviewed_result = {"verified_milestone": True, "milestone_id": evidence_id, "xp_outcome_known": True,
+                               "challenge_title": catalog.get("title"), "summary": "Independently verified milestone."}
+            current_account = self.store.get("ledger_evidence", account_key) or {}
+            if (not doc.get("quest_link") and doc["achievement"] != "mentoring" and
+                    current_account.get("revision", 0) != prior_account.get("revision", 0)):
+                award_id = f"{account_key}:{current_account['revision']}"
+                reviewed_award = self.store.get("ledger_awards", award_id) or {}
+                if amount(reviewed_award.get("delta", "0")) > 0:
+                    reviewed_result.update(award_id=award_id, xp_change=reviewed_award["delta"],
+                                           xp_total=self.participant(doc["member_id"])["xp"])
+            self.notify(doc["member_id"], doc["achievement"], reviewed_result,
+                        "verified:" + evidence_id, action_id=action_id)
         return doc
 
-    def reconcile(self, member_id, historical=False):
-        return self.tx("_reconcile", member_id, historical)
+    def reconcile(self, member_id, historical=False, *, action_id=None):
+        # Generate outside the retryable callback, so a Mongo transaction retry
+        # cannot split one result across multiple summary owners.
+        action_id = action_id or "reconcile:" + str(uuid4())
+        def run(s):
+            d = Ledger(s, self.sources)
+            result = d._reconcile(member_id, historical, action_id=action_id)
+            from .result_summaries import finish_action
+            finish_action(d, action_id)
+            return result
+        return self.store.atomic(run)
 
-    def _reconcile(self, member_id, historical=False):
+    def _reconcile(self, member_id, historical=False, *, action_id=None):
         from .admin_access import sync_review_membership
         sync_review_membership(self, member_id)
         from .authority import Authority
@@ -582,7 +648,7 @@ class Ledger:
             metrics["checkouts"] += 1
             shops.add(sid(tool.get("shop_id")))
             if not historical:
-                self._recruitment(member_id, checkout.get("checked_out_at"))
+                self._recruitment(member_id, checkout.get("checked_out_at"), action_id=action_id)
         metrics["shops"] = len(shops - {None})
         taught = self.sources.rows("tool_checkouts", {"approved_by_id": object_id(member_id)})
         active_taught = [c for c in taught if not c.get("revoked_at") and c.get("member_id") and sid(c.get("member_id")) != member_id
@@ -609,7 +675,7 @@ class Ledger:
                 tasks = self.sources.rows("volunteer_tasks", {"_id": object_id(credit["task_id"])}) if credit.get("task_id") else []
                 details[f"credit:{credit['_id']}"] = {"volunteer_credits": str(value), "challenge_title": tasks[0].get("title") if tasks else None}
             if not historical:
-                self._recruitment(member_id, credit.get("created_at"))
+                self._recruitment(member_id, credit.get("created_at"), action_id=action_id)
                 if credit.get("created_at"):
                     Engagement(self).capture(member_id, f"volunteer:{credit['_id']}", "volunteer", at=credit["created_at"], metadata={"credit_value": str(value)})
         metrics["volunteer"] = str(volunteer)
@@ -633,7 +699,7 @@ class Ledger:
                 catalog = self.store.get("ledger_catalog", doc["catalog_id"]) or {}
                 details[f"challenge:{unique}"] = {"challenge_title": catalog.get("title")}
             if not historical:
-                self._recruitment(member_id, doc["at"])
+                self._recruitment(member_id, doc["at"], action_id=action_id)
         metrics["learners"] = len(learner_ids - {None})
         # Freeze completed sets, so adding tools later never revokes a completed-shop milestone.
         for catalog in self.store.select("ledger_catalog", {"kind": "shop_completion"}):
@@ -644,23 +710,23 @@ class Ledger:
             if catalog.get("tool_ids") and set(catalog["tool_ids"]).issubset(active) and not self.store.get("ledger_awards", achievement_id):
                 self.store.put("ledger_awards", {"_id": achievement_id, "kind": "shop_completion", "member_id": member_id,
                     "catalog_id": catalog["_id"], "shop_id": catalog["shop_id"], "at": now()})
-                self.major(member_id, "shop_complete", {"shop": (self.sources.shop(catalog["shop_id"]) or {}).get("name", "Shop")}, achievement_id, historical)
+                self.major(member_id, "shop_complete", {"shop": (self.sources.shop(catalog["shop_id"]) or {}).get("name", "Shop")}, achievement_id, historical, action_id=action_id)
         metrics["completed_shops"] = len(self.store.select("ledger_awards", {"kind": "shop_completion", "member_id": member_id}))
         for source, (value, kind) in desired.items():
-            changed = self.award(member_id, source, value, kind, historical, facts=details.get(source))
+            changed = self.award(member_id, source, value, kind, historical, facts=details.get(source), action_id=action_id)
             if changed and kind in ("boss", "stewardship"):
-                self.major(member_id, kind, {"milestone": kind, **details.get(source, {})}, f"{member_id}:{source}", historical)
+                self.major(member_id, kind, {"milestone": kind, **details.get(source, {})}, f"{member_id}:{source}", historical, action_id=action_id)
         for account in self.store.select("ledger_evidence", {"kind": "account", "member_id": member_id}):
             source = account["source"]
             if source.startswith(("checkout:", "teaching:", "credit:", "challenge:")) and source not in desired:
-                self.award(member_id, source, "0", "correction", historical)
+                self.award(member_id, source, "0", "correction", historical, action_id=action_id)
         p = self.participant(member_id)
         p["metrics"] = metrics
         p["last_reconciled"] = now()
         p["import_pending"] = False
         self.store.put("ledger_participants", p)
-        self._advance(member_id, historical)
-        Quests(self).unlock_notice(member_id)
+        self._advance(member_id, historical, action_id=action_id)
+        Quests(self).unlock_notice(member_id, action_id=action_id if not historical else None)
 
     def preferences(self, member_id, observation, arrival_mentions):
         def run(s):

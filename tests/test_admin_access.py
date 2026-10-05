@@ -109,9 +109,12 @@ def test_invitation_picker_searches_before_eligibility_with_constant_database_re
     assert [o['value'] for o in options] == [member(3)]
     assert per_member.call_count < 15  # Actor authorization only; independent of directory size.
     member_queries = [call for call in bounded.call_args_list if call.args[0] == 'members']
-    assert len(member_queries) == 1 and '$and' in member_queries[0].args[1]
-    assert member_queries[0].args[3] == 500
-    assert len(bounded.call_args_list) == 3
+    directory_queries = [call for call in member_queries if '$and' in call.args[1]]
+    assert len(directory_queries) == 1 and directory_queries[0].args[3] == 500
+    # Actor checks now use bounded singleton/member-ID reads too. They stay
+    # constant while the one directory query applies search before its cap.
+    assert len(member_queries) <= 4
+    assert len([call for call in bounded.call_args_list if call.args[0] != 'members']) == 2
 
 
 @pytest.mark.parametrize('change', ['duplicate_member', 'duplicate_user', 'invalid_uid', 'invalidated', 'revoked', 'merged', 'joined'])

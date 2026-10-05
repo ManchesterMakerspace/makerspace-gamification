@@ -47,19 +47,30 @@ def conversation_policy(matrix):
 
 
 def restricted_answer(ledger, member, content):
+    return restriction_filter(ledger, member)(content)
+
+
+def restriction_filter(ledger, member):
+    """Build one current visibility context for a bounded display operation."""
     from .admin_access import command_eligible
-    if "/ledger-admin" in content and not command_eligible(ledger, member):
-        return True
     p = ledger.participant(member) if ledger.active(member) else None
     slot = p["rank"] if p else 0
-    for rank in ledger.store.get("ledger_catalog", "rank_display")["ranks"]:
-        if rank["slot"] > slot and re.search(r"(?<!\w)" + re.escape(rank["name"]) + r"(?!\w)", content, re.I):
-            return True
+    ranks = [re.compile(r"(?<!\w)" + re.escape(r["name"]) + r"(?!\w)", re.I)
+             for r in ledger.store.get("ledger_catalog", "rank_display")["ranks"] if r["slot"] > slot]
     from .quest_policy import REVIEWED_KINDS, cooperative
-    for quest in ledger.store.select("ledger_quests", {"kind": {"$in": list(REVIEWED_KINDS)}}):
-        if not cooperative(quest) and quest["target_rank"] > slot and quest.get("title") and quest["title"].casefold() in content.casefold():
-            return True
-    return False
+    titles = [q["title"].casefold() for q in ledger.store.select("ledger_quests", {
+        "kind": {"$in": list(REVIEWED_KINDS)}, "target_rank": {"$gt": slot}},
+        projection={"kind": 1, "quest_type": 1, "title": 1}) if not cooperative(q) and q.get("title")]
+    admin = None
+    def restricted(content):
+        nonlocal admin
+        if "/ledger-admin" in content:
+            if admin is None:
+                admin = command_eligible(ledger, member)
+            if not admin:
+                return True
+        return any(r.search(content) for r in ranks) or any(t in content.casefold() for t in titles)
+    return restricted
 
 
 def self_progress_question(text):

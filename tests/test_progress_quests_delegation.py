@@ -444,13 +444,20 @@ def test_source_membership_revocation_is_permanent_before_reconciliation(joined)
 
 def test_launch_unlock_notice_is_once_per_highest_capability(joined):
     l, s, *_ = joined
+    def unlocks():
+        legacy = [j['_id'] for j in s.select('ledger_outbox') if j['_id'].startswith('dm:quest-unlock:')]
+        grouped = [event['event_id'] for owner in s.select('ledger_evidence', {'kind': 'notification_summary'})
+                   for event in owner['events'] if event['event_id'].startswith('quest-unlock:')]
+        return legacy + grouped
     set_participant(l, s, 1, rank=3)
     l.reconcile(member(1))
     l.reconcile(member(1))
-    assert len([j for j in s.select('ledger_outbox') if j['_id'].startswith('dm:quest-unlock:')]) == 1
+    assert len(unlocks()) == 1
     set_participant(l, s, 1, rank=4)
     l.reconcile(member(1))
-    assert len([j for j in s.select('ledger_outbox') if j['_id'].startswith('dm:quest-unlock:')]) == 2
+    assert len(unlocks()) == 2
+    l.reconcile(member(1))
+    assert len(unlocks()) == 2
 
 
 def test_async_draft_applies_suggestions_with_new_input_ids_and_preserves_review_submission(joined):

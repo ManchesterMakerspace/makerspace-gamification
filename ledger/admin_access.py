@@ -55,6 +55,31 @@ def invitation_eligible(ledger, target):
     return ledger.member_eligible(target) and not (ledger.participant(target) or {}).get("opted_in", False)
 
 
+def delegate_candidates(ledger, actor, search):
+    """Fill autocomplete after current identity checks, using bounded pages."""
+    result, cursor = [], None
+    while len(result) < 100:
+        query = {"opted_in": True, "member_id": {"$ne": actor}}
+        if cursor is not None:
+            query["_id"] = {"$gt": cursor}
+        page = ledger.store.select("ledger_participants", query, projection={"member_id": 1},
+                                   sort=[("_id", 1)], limit=32, max_time_ms=2000)
+        if not page:
+            break
+        members = [p["member_id"] for p in page]
+        linked = ledger.sources.identities(members)
+        flags = {d["_id"]: d for d in ledger.store.select("ledger_catalog", {
+            "_id": {"$in": ["identity:" + m for m in members]}}, projection={"bot": 1, "deactivated": 1})}
+        for member in members:
+            doc, flag = linked.get(member), flags.get("identity:" + member, {})
+            if (not doc or doc.get("status") not in ("activeMember", "pending") or flag.get("bot") or flag.get("deactivated")
+                    or search not in doc["slack_id"].casefold()):
+                continue
+            result.append((member, doc["slack_id"]))
+        cursor = page[-1]["_id"]
+    return result[:100]
+
+
 def invitation_candidates(ledger, search):
     """Read a bounded name match set and batch eligibility without per-member queries."""
     query = {"merged_at": None, "status": {"$nin": ["revoked", "suspended"]}}

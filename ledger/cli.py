@@ -20,7 +20,23 @@ from .storage import connect, connect_database, enqueue
 from .worker import Worker, ingest_mqtt
 
 
-def dependencies():
+CHANNEL_KINDS = ["remove", "invite", "provision_slot", "review_channel_invite"]
+RESULT_KINDS = ["summary_flush", "summary_delivery"]
+INTERACTIVE_KINDS = ["conversation", "guidance"]
+
+
+def outbox_filters(queue):
+    """Disjoint lanes: slow routine delivery cannot claim interactive/results work."""
+    if queue == "channels":
+        return {"kinds": CHANNEL_KINDS}
+    if queue == "results":
+        return {"kinds": RESULT_KINDS}
+    if queue == "interactive":
+        return {"kinds": INTERACTIVE_KINDS}
+    return {"exclude": CHANNEL_KINDS + RESULT_KINDS + INTERACTIVE_KINDS}
+
+
+def database_ledger():
     # Legacy MONGO_URI is a compatibility fallback only. Never use one new
     # credential for the other connection when its counterpart is missing.
     legacy_uri = os.environ.get("MONGO_URI")
@@ -31,7 +47,12 @@ def dependencies():
     legacy_database = os.environ.get("MONGO_DATABASE")
     store = connect(ledger_uri, os.environ.get("LEDGER_DATABASE") or legacy_database)
     sources = Sources(connect_database(source_uri, os.environ.get("MLAB_DATABASE") or legacy_database))
-    ledger = Ledger(store, sources)
+    return Ledger(store, sources)
+
+
+def dependencies():
+    ledger = database_ledger()
+    store = ledger.store
     api = ChatAPI(os.environ.get("LEDGER_LLM_BASE_URL", "http://localhost:8000/v1"), os.environ.get("LEDGER_LLM_MODEL", DEFAULT_MODEL), os.environ.get("LEDGER_LLM_API_KEY", ""))
     composer = Composer(store, api, matrix=PromptMatrix.from_env())
     client = WebClient(token=os.environ["SLACK_BOT_TOKEN"], timeout=10, retry_handlers=[])
@@ -105,9 +126,10 @@ def bootstrap(ledger, client):
 
 def main():
     parser = argparse.ArgumentParser(description="The Ledger")
-    parser.add_argument("action", choices=["init", "bootstrap", "serve", "worker", "reconcile", "dry-run", "prompt-matrix"])
+    parser.add_argument("action", choices=["init", "bootstrap", "serve", "worker", "reconcile", "dry-run", "prompt-matrix", "prepare-reads"])
+    parser.add_argument("--verify", action="store_true", help="Compare prepared optimized reads with legacy reads without sending messages")
     parser.add_argument("--port", type=int, default=3000)
-    parser.add_argument("--queue", choices=["all", "inbox", "outbox", "channels", "engagement"], default="all")
+    parser.add_argument("--queue", choices=["all", "inbox", "outbox", "channels", "engagement", "results", "interactive"], default="all")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if args.action == "prompt-matrix":
@@ -120,6 +142,18 @@ def main():
     if args.action == "serve":
         with make_server("0.0.0.0", args.port, make_app()) as server:
             server.serve_forever()
+        return
+    if args.action == "prepare-reads":
+        from .read_preparation import prepare, verify
+        ledger = database_ledger()
+        ledger.store.ready()
+        ledger.sources.ready()
+        result = prepare(ledger)
+        if args.verify:
+            result["verification"] = verify(ledger)
+        print(json.dumps(result, default=str))
+        if args.verify and result["verification"]["mismatches"]:
+            raise SystemExit(1)
         return
     ledger, composer, client = dependencies()
     ledger.store.ready()
@@ -138,26 +172,32 @@ def main():
     elif args.action == "reconcile":
         ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"manual:{time.time_ns()}", "reconcile", {}))
     elif args.action == "worker":
-        connection = broker(ledger.store, subscribe=args.queue in ("all", "inbox")) if args.queue not in ("channels", "engagement") else None
+        connection = broker(ledger.store, subscribe=args.queue in ("all", "inbox")) if args.queue in ("all", "inbox", "outbox") else None
         worker = Worker(ledger, composer, client, connection, os.environ["SLACK_BOT_USER_ID"])
+        if args.queue in ("all", "inbox"):
+            from .catalog_cache import schedule_refresh
+            schedule_refresh(ledger.store)
         stop = Event()
         def run(queue):
             last = 0
-            channel_kinds = ["remove", "invite", "provision_slot", "review_channel_invite"]
+            last_metrics = 0
             while not stop.is_set():
                 try:
+                    if time.monotonic() - last_metrics >= 60:
+                        from .read_metrics import log_metrics
+                        log_metrics()
+                        last_metrics = time.monotonic()
                     if queue == "inbox" and time.monotonic() - last >= 300:
                         ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"periodic:{int(time.time() // 300)}", "reconcile", {}))
                         last = time.monotonic()
                     worked = worker.step("ledger_inbox", exclude=["engagement"]) if queue == "inbox" else worker.step("ledger_inbox", kinds=["engagement"]) if queue == "engagement" else worker.step(
-                        "ledger_outbox", kinds=channel_kinds if queue == "channels" else None,
-                        exclude=channel_kinds if queue == "outbox" else None)
+                        "ledger_outbox", **outbox_filters(queue))
                     if not worked:
                         stop.wait(0.25)
                 except Exception as exc:
                     logging.warning("Worker queue %s unavailable: %s", queue, type(exc).__name__)
                     stop.wait(2)
-        queues = ["inbox", "outbox", "channels", "engagement"] if args.queue == "all" else [args.queue]
+        queues = ["inbox", "outbox", "channels", "engagement", "results", "interactive"] if args.queue == "all" else [args.queue]
         threads = [Thread(target=run, args=(q,), name=q, daemon=True) for q in queues]
         for thread in threads:
             thread.start()

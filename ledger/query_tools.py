@@ -10,16 +10,12 @@ from pymongo import timeout
 
 from .domain import Denied
 from .progress import progress
-from .sources import object_id, sid
+from .sources import object_id
+from .source_reads import CATALOG_FIELDS
 from .storage import now
+from .read_options import optimized_reads
 
-PROJECTIONS = {
-    "shops": ["name", "disabled", "wiki_url", "out_of_service", "out_of_service_note"],
-    "tools": ["name", "description", "wiki_url", "shop_id", "prerequisite_ids", "open", "out_of_service", "disabled"],
-    "tool_checkouts": ["tool_id", "checked_out_at"],
-    "volunteer_tasks": ["title", "description", "shop_id", "status", "prerequisite_tool_ids", "next_available", "days"],
-    "volunteer_events": ["title", "description", "shop_id", "status", "event_date", "prerequisite_tool_ids"],
-}
+PROJECTIONS = {name: fields.split() for name, fields in CATALOG_FIELDS.items()}
 QUERY_TOOL = {"type": "function", "function": {"name": "query_makerspace", "description": "Read enabled shops/tools, your clearances, and available volunteer opportunities.",
     "parameters": {"type": "object", "properties": {
         "collection": {"type": "string", "enum": list(PROJECTIONS)}, "search": {"type": "string", "maxLength": 100},
@@ -92,55 +88,17 @@ class QueryTools:
                 raise TimeoutError("Makerspace read deadline exceeded")
             return self.l.sources.bounded(name, query, fields, cap, max(1, int(remaining * 1000)))
         try:
-            query = {}
-            if search:
-                query["name" if collection in ("shops", "tools") else "title"] = {"$regex": re.escape(search), "$options": "i"}
-            if collection in ("shops", "tools"):
-                query["disabled"] = {"$ne": True}
-            # Resolve enabled catalog joins with a fail-closed bound. Never let
-            # a disabled parent leak through a tool or clearance result.
-            shops = read("shops", {"disabled": {"$ne": True}}, ["name", "disabled"], 1001)
-            if len(shops) > 1000:
-                raise ValueError("Enabled catalog exceeds the supported bound")
-            shop_ids = [r["_id"] for r in shops]
-            if "shop_id" in args:
-                selected = object_id(args["shop_id"])
-                shop_ids = [i for i in shop_ids if i == selected]
-            if collection == "shops":
-                query["_id"] = {"$in": shop_ids}
-            elif collection == "tools":
-                query["shop_id"] = {"$in": shop_ids}
-                if "tool_id" in args:
-                    query["_id"] = object_id(args["tool_id"])
-                if "out_of_service" in args:
-                    query["out_of_service"] = args["out_of_service"] if args["out_of_service"] else {"$ne": True}
-            elif collection == "tool_checkouts":
-                if search:
-                    query.pop("title", None)
-                tool_query = {"disabled": {"$ne": True}, "shop_id": {"$in": shop_ids}}
-                if search:
-                    tool_query["name"] = {"$regex": re.escape(search), "$options": "i"}
-                if "tool_id" in args:
-                    tool_query["_id"] = object_id(args["tool_id"])
-                if "out_of_service" in args:
-                    tool_query["out_of_service"] = args["out_of_service"] if args["out_of_service"] else {"$ne": True}
-                tools = read("tools", tool_query, ["name", "shop_id"], 1001)
-                if len(tools) > 1000:
-                    raise ValueError("Tool catalog exceeds the supported bound")
-                query.update(member_id=object_id(self.member), revoked_at=None, tool_id={"$in": [t["_id"] for t in tools]})
-            else:
+            if optimized_reads():
                 today = now().astimezone(ZoneInfo("America/New_York")).date()
                 boundary = datetime.combine(today, datetime.min.time(), timezone.utc)
-                query["$and"] = [{"$or": [{"shop_id": {"$in": shop_ids}}, {"shop_id": None}]}]
-                if "shop_id" in args:
-                    query["shop_id"] = object_id(args["shop_id"])
-                if collection == "volunteer_tasks":
-                    query.update(status={"$in": ["available", "reusable", "repeatable", "recurring"]})
-                    query["$and"].append({"$or": [{"next_available": None}, {"next_available": {"$lte": boundary}}]})
-                else:
-                    query.update(status="open")
-                    query["$and"].append({"$or": [{"event_date": None}, {"event_date": {"$gte": boundary}}]})
-            rows = read(collection, query, PROJECTIONS[collection], limit + 1)
+                remaining = 2 - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise TimeoutError("Makerspace read deadline exceeded")
+                rows = self.l.sources.catalog_query(collection, search=search, shop_id=args.get("shop_id"),
+                    tool_id=args.get("tool_id"), out_of_service=args.get("out_of_service"), member_id=self.member,
+                    boundary=boundary, limit=limit + 1, timeout_ms=max(1, int(remaining * 1000)))
+            else:
+                rows = self._legacy_rows(args, read)
             truncated = len(rows) > limit
             rows = rows[:limit]
             for r in rows:
@@ -153,3 +111,51 @@ class QueryTools:
             return {"status": "ok", "collection": collection, "results": normalize(rows), "retrieved_at": now().isoformat(), "truncated": truncated}
         except (PyMongoError, OSError, TimeoutError):
             return {"status": "unavailable", "collection": collection, "results": [], "retrieved_at": now().isoformat(), "truncated": False}
+
+    def _legacy_rows(self, args, read):
+        collection, search = args["collection"], args.get("search", "")
+        query = {}
+        if search:
+            query["name" if collection in ("shops", "tools") else "title"] = {"$regex": re.escape(search), "$options": "i"}
+        if collection in ("shops", "tools"):
+            query["disabled"] = {"$ne": True}
+        shops = read("shops", {"disabled": {"$ne": True}}, ["name", "disabled"], 1001)
+        if len(shops) > 1000:
+            raise ValueError("Enabled catalog exceeds the supported bound")
+        shop_ids = [row["_id"] for row in shops]
+        if "shop_id" in args:
+            shop_ids = [identifier for identifier in shop_ids if identifier == object_id(args["shop_id"])]
+        if collection == "shops":
+            query["_id"] = {"$in": shop_ids}
+        elif collection == "tools":
+            query["shop_id"] = {"$in": shop_ids}
+            if "tool_id" in args:
+                query["_id"] = object_id(args["tool_id"])
+            if "out_of_service" in args:
+                query["out_of_service"] = args["out_of_service"] if args["out_of_service"] else {"$ne": True}
+        elif collection == "tool_checkouts":
+            query.pop("title", None)
+            tool_query = {"disabled": {"$ne": True}, "shop_id": {"$in": shop_ids}}
+            if search:
+                tool_query["name"] = {"$regex": re.escape(search), "$options": "i"}
+            if "tool_id" in args:
+                tool_query["_id"] = object_id(args["tool_id"])
+            if "out_of_service" in args:
+                tool_query["out_of_service"] = args["out_of_service"] if args["out_of_service"] else {"$ne": True}
+            tools = read("tools", tool_query, ["name", "shop_id"], 1001)
+            if len(tools) > 1000:
+                raise ValueError("Tool catalog exceeds the supported bound")
+            query.update(member_id=object_id(self.member), revoked_at=None, tool_id={"$in": [tool["_id"] for tool in tools]})
+        else:
+            today = now().astimezone(ZoneInfo("America/New_York")).date()
+            boundary = datetime.combine(today, datetime.min.time(), timezone.utc)
+            query["$and"] = [{"$or": [{"shop_id": {"$in": shop_ids}}, {"shop_id": None}]}]
+            if "shop_id" in args:
+                query["shop_id"] = object_id(args["shop_id"])
+            if collection == "volunteer_tasks":
+                query.update(status={"$in": ["available", "reusable", "repeatable", "recurring"]})
+                query["$and"].append({"$or": [{"next_available": None}, {"next_available": {"$lte": boundary}}]})
+            else:
+                query.update(status="open")
+                query["$and"].append({"$or": [{"event_date": None}, {"event_date": {"$gte": boundary}}]})
+        return read(collection, query, PROJECTIONS[collection], args.get("limit", 10) + 1)

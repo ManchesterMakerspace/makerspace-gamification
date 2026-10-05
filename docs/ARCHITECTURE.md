@@ -13,6 +13,12 @@ flowchart LR
     Game --> Outbox[(ledger_outbox)]
     Outbox --> Channels[Independent channel worker]
     Outbox --> Delivery[Delivery worker]
+    Outbox --> Results[Results worker]
+    Outbox --> Interactive[Conversation / guidance worker]
+    Results --> AI
+    Results --> Slack
+    Interactive --> AI
+    Interactive --> Slack
     Delivery --> AI[vLLM / Qwen3.8-27B-NVFP4]
     Delivery --> Slack
     Channels --> Slack
@@ -29,6 +35,8 @@ Mongo transactions use snapshot reads and majority writes. Award/source identiti
 
 Workers claim jobs with 120-second leases. Expired leases can be recovered; an old worker cannot complete a newer lease. Transient failures retry with backoff, honoring Slack `Retry-After`. Ordinary jobs stop after ten attempts and become visible as failed; channel removals keep retrying. The channel queue runs independently of accounting and generation. Persist composed text before delivery, then reuse it on retries.
 
+New action results use durable owners in `ledger_evidence` and immutable revisions in `ledger_outbox`. Completed transactions flush immediately; unresolved kudos flush at a fixed 60-second deadline and later edit the same DM. Delivery locks, fingerprints, stable post identifiers, and consent generations protect retries and concurrent revisions. The `results` and `interactive` lanes isolate summary and conversation work from routine delivery. Python renders facts; optional narration and requested guidance have ten-second generation budgets. See [result lifecycle and rollout](RESULT_SUMMARIES.md).
+
 MQTT startup is asynchronous so broker outages do not gate Slack queues. A welcome awaiting history import is a dependency wait (`HistoryImportPending`), deferred fifteen seconds without consuming a delivery attempt. Alert on prolonged waits and check accounting. Consent success is shown after the write, and repeat join requests read saved state rather than reopen consent.
 
 Known successful kudos destinations are skipped on recovery, with separate DM/shared receipts. Database award decisions are exactly once. Slack/network timeouts after remote acceptance have an inherently uncertain delivery outcome: stable `client_msg_id` is reused, but this application does not promise universal exactly-once external delivery. File uploads and channel creation likewise need operator inspection after an ambiguous timeout. Bind an already created channel through `LEDGER_CHANNELS`/bootstrap instead of creating a duplicate.
@@ -40,7 +48,7 @@ Known successful kudos destinations are skipped on recovery, with separate DM/sh
 | `ledger_participants` | Consent projection, pinned ruleset, decimal-string XP, rank, metrics, revision |
 | `ledger_relationships` | Pending/confirmed sponsorship and mutually accepted buddy relationships |
 | `ledger_rulesets` | Immutable seven-slot progression versions and publication head |
-| `ledger_catalog` | Live rank presentation, frozen shop/challenge definitions, identity cache, maintenance control |
+| `ledger_catalog` | Live rank presentation, frozen shop/challenge definitions, identity observations, maintenance control, quest display heads and expiring sanitized catalog generations |
 | `ledger_evidence` | Consent audit, source balances, kudos originals/decisions/receipts, reviewable evidence, coverage, feedback |
 | `ledger_awards` | Append-only XP deltas, shop completion snapshots, rank history, review/correction audit |
 | `ledger_quests` | Preapproved cooperative volunteer work and verified contributions |
@@ -53,6 +61,8 @@ Known successful kudos destinations are skipped on recovery, with separate DM/sh
 No synthetic safety checkouts are written for rank badges. Nonparticipant kudos creates recognition evidence, not a participant profile or XP balance. Context edits replace cached text and deletions remove it. Requests deleted before delivery are suppressed. Opted-out users' cached messages are excluded from subsequent AI context.
 
 ## Existing Mongo bindings
+
+Interactive reads use fixed source `$lookup`/`$graphLookup` pipelines, bounded owned quest/history pages and server-side aggregate metrics. Source joins stay within `MLAB_URI`; owned joins stay within `LEDGER_URI`, preserving separate-cluster support. Sanitized shop/tool labels and topology can use a display generation no older than five minutes; live tools, parents, prerequisites, clearances, identity, consent and authority still gate every result. Preparation adds only owned indexes and display/order metadata; [interactive read optimization](QUERY_OPTIMIZATION.md) defines freshness, compatibility and rollout.
 
 `ledger/sources.py` is the allowlisted read adapter; it intentionally omits billing detail, addresses, access codes, internal notes, and revocation reasons.
 

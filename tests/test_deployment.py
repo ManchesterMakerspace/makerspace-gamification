@@ -82,7 +82,8 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
     calls = set()
     for path in (ROOT / 'ledger').glob('*.py'):
         for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and hasattr(WebClient, node.func.attr):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and not node.func.attr.startswith('_') and hasattr(WebClient, node.func.attr)):
                 calls.add(node.func.attr)
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'call'
                     and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 'users_list'):
@@ -106,7 +107,7 @@ def test_compose_routes_private_inference_and_keeps_cleanup_independent():
     assert set(tunnel['environment']) == {'TUNNEL_TOKEN'}
     assert 'env_file' not in ai and 'env_file' not in tunnel
     assert set(tunnel['depends_on']) == {'ledger-web'}
-    for name in ('ledger-web', 'ledger-accounting', 'ledger-delivery', 'ledger-channels'):
+    for name in ('ledger-web', 'ledger-accounting', 'ledger-delivery', 'ledger-channels', 'ledger-engagement'):
         service = services[name]
         assert 'env_file' not in service
         assert 'ledger-ai' not in service.get('depends_on', {})
@@ -114,3 +115,5 @@ def test_compose_routes_private_inference_and_keeps_cleanup_independent():
         assert service['environment']['LEDGER_LLM_MODEL'] == ai['command'][ai['command'].index('--served-model-name') + 1]
         assert 'http://ledger-ai:8000/v1' in service['environment']['LEDGER_LLM_BASE_URL']
         assert 'CLOUDFLARE_TUNNEL_TOKEN' not in service['environment']
+        assert service['environment']['LEDGER_OPTIMIZED_READS'] == '${LEDGER_OPTIMIZED_READS:-false}'
+        assert service['environment']['LEDGER_QUERY_METRICS'] == '${LEDGER_QUERY_METRICS:-false}'

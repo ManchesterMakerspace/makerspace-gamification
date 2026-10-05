@@ -251,3 +251,133 @@ def test_mentoring_requires_acknowledgment_and_independent_review(joined):
     l.acknowledge(str(oid(2)), doc["_id"])
     l.review(str(oid(10)), doc["_id"])
     assert l.participant(str(oid(1)))["metrics"]["mentoring"] == 1
+
+
+def test_reconciliation_groups_exact_xp_and_keeps_duplicate_pass_silent(joined):
+    l, s, source, *_ = joined
+    member = str(oid(1))
+    l.reconcile(member, historical=True)
+    source.data["tool_checkouts"] = [
+        {"_id": oid(801), "member_id": oid(1), "tool_id": oid(311)},
+        {"_id": oid(802), "member_id": oid(1), "tool_id": oid(312)}]
+    source.data["volunteer_credits"] = [
+        {"_id": oid(803), "member_id": oid(1), "status": "approved", "credit_value": "0.5"}]
+    l.reconcile(member, action_id="source-pass")
+    owners = s.select("ledger_evidence", {"kind": "notification_summary", "action_id": "source-pass"})
+    assert len(owners) == 1
+    owner = owners[0]
+    assert owner["member_id"] == member and owner["complete"]
+    assert Decimal(owner["xp_total"]) == Decimal("161.5")
+    assert sum(Decimal(e["facts"].get("xp_change", "0")) for e in owner["events"]) == Decimal("161.5")
+    assert len({e["facts"]["award_id"] for e in owner["events"]}) == 3
+    assert not [j for j in s.select("ledger_outbox", {"kind": "message"})
+                if j["payload"].get("type") in {"checkout_earned", "volunteer_credit"}]
+    l.reconcile(member, action_id="source-pass")
+    assert s.get("ledger_evidence", owner["_id"])["events"] == owner["events"]
+
+
+def test_verified_mentoring_joins_result_but_acknowledgment_stays_immediate(joined):
+    l, s, *_ = joined
+    member = str(oid(1))
+    l.reconcile(member, historical=True)
+    doc = l.submit(member, "mentoring-session", "Helped with joinery", [str(oid(2))])
+    assert [j for j in s.select("ledger_outbox", {"kind": "message"})
+            if j["payload"]["facts"].get("submission") == doc["_id"]]
+    l.acknowledge(str(oid(2)), doc["_id"])
+    l.review(str(oid(10)), doc["_id"], action_id="verified-session")
+    owner, = s.select("ledger_evidence", {"kind": "notification_summary", "action_id": "verified-session"})
+    assert owner["complete"] and Decimal(owner["xp_total"]) == 0
+    assert any(e["facts"].get("milestone_id") == doc["_id"] and e["facts"]["verified_milestone"]
+               for e in owner["events"])
+
+
+def test_review_before_import_reports_its_actual_award_and_keeps_catchup_silent(joined):
+    from ledger.result_summaries import _game_facts
+    l, s, source, *_ = joined
+    member = str(oid(1))
+    assert l.participant(member)["import_pending"]
+    source.data["tool_checkouts"] = [
+        {"_id": oid(901), "member_id": oid(1), "tool_id": oid(311)},
+        {"_id": oid(902), "member_id": oid(1), "tool_id": oid(312)}]
+    doc = l.submit(member, "first-build", "Safe completed build")
+    l.review(str(oid(10)), doc["_id"], action_id="review-before-import")
+    owner, = s.select("ledger_evidence", {"kind": "notification_summary", "action_id": "review-before-import"})
+    facts = _game_facts(owner)
+    assert l.participant(member)["xp"] == "231"
+    assert facts["xp_change"] == "100"
+    assert "You earned 100 XP." in facts["summary"] and "No XP" not in facts["summary"]
+    assert {event["type"] for event in owner["events"]} == {"first_build"}
+    verified, = owner["events"]
+    award = s.get("ledger_awards", verified["facts"]["award_id"])
+    assert award["delta"] == "100" and verified["facts"]["xp_outcome_known"]
+
+
+def test_group_completion_before_import_reports_each_verified_boss_award(joined):
+    from ledger.community import Community
+    from ledger.result_summaries import _game_facts
+    l, s, source, *_ = joined
+    source.data["volunteer_tasks"] = [{"_id": oid(903), "title": "Build together"}]
+    community = Community(l)
+    quest = community.create_quest(str(oid(11)), "Build together", "Working shared outcome", ["wood", "metal"], str(oid(903)))
+    for n, role in [(1, "wood"), (2, "metal")]:
+        community.quest(str(oid(n)), quest["_id"], "join", role=role)
+        community.quest(str(oid(n)), quest["_id"], "submit", description="Completed my contribution")
+    community.quest(str(oid(10)), quest["_id"], "verify", member=str(oid(1)))
+    community.quest(str(oid(10)), quest["_id"], "verify", member=str(oid(2)), action_id="group-before-import")
+    owners = s.select("ledger_evidence", {"kind": "notification_summary", "action_id": "group-before-import"})
+    assert {owner["member_id"] for owner in owners} == {str(oid(1)), str(oid(2))}
+    for owner in owners:
+        facts = _game_facts(owner)
+        assert owner["complete"] and facts["xp_change"] == "500"
+        assert "You earned 500 XP." in facts["summary"] and "No XP" not in facts["summary"]
+
+
+def test_kudos_rank_result_has_separate_recipient_owner_and_preserves_authored_note(joined):
+    from ledger.result_summaries import _game_facts
+    l, s, *_ = joined
+    giver, recipient = str(oid(1)), str(oid(2))
+    participant = l.participant(recipient)
+    participant.update(xp="290", import_pending=False, metrics={"checkouts": 2, "first_build": 1})
+    s.put("ledger_participants", participant)
+    note = "*Thank you* for helping me learn this technique."
+    evidence = l.kudos(giver, recipient, note, key="rank-change", expected_participation=True)
+    assert evidence["result_summary"] and evidence["message"] == note
+    owners = s.select("ledger_evidence", {"kind": "notification_summary", "action_id": evidence["_id"]})
+    giver_owner, = [o for o in owners if o["member_id"] == giver]
+    recipient_owner, = [o for o in owners if o["member_id"] == recipient]
+    assert giver_owner["authorization"] == "peer_kudos" and giver_owner["_id"] == evidence["summary_id"]
+    assert "xp_total" not in giver_owner and not giver_owner["complete"]
+    assert recipient_owner["authorization"] == "game" and recipient_owner["complete"]
+    assert any(e["type"] == "rank_up" for e in recipient_owner["events"])
+    facts = _game_facts(recipient_owner)
+    assert facts["xp_change"] == "17" and facts["xp_total"] == "307"
+    assert "You earned 17 XP." in facts["summary"]
+    art, = [j for j in s.select("ledger_outbox", {"kind": "rank_art"})
+            if j["payload"]["member_id"] == recipient and j["payload"]["slot"] == 2]
+    assert art["payload"]["summary_id"] == recipient_owner["_id"]
+    assert art["payload"]["consent_generation"] == participant["consent_generation"]
+
+
+def test_ordinary_kudos_does_not_create_standalone_recipient_xp_summary(joined):
+    l, s, *_ = joined
+    giver, recipient = str(oid(1)), str(oid(2))
+    evidence = l.kudos(giver, recipient, "Thank you for your help.", key="ordinary", expected_participation=True)
+    assert evidence["xp_awarded"] and l.participant(recipient)["xp"] == "17"
+    assert not s.select("ledger_evidence", {"kind": "notification_summary", "action_id": evidence["_id"],
+                                             "member_id": recipient, "authorization": "game"})
+    assert [j for j in s.select("ledger_outbox", {"kind": "kudos"}) if j["payload"]["evidence"] == evidence["_id"]]
+
+
+def test_rank_hold_release_groups_earned_advancement_and_art(joined):
+    l, s, *_ = joined
+    member = str(oid(1))
+    participant = l.participant(member)
+    participant.update(xp="310", rank_hold=True, import_pending=False, metrics={"checkouts": 2, "first_build": 1})
+    s.put("ledger_participants", participant)
+    l.release_rank(str(oid(10)), member, "Independent resolution", action_id="hold-release")
+    owner, = s.select("ledger_evidence", {"kind": "notification_summary", "action_id": "hold-release"})
+    assert owner["complete"] and owner["xp_total"] == "310"
+    assert any(e["type"] == "rank_up" for e in owner["events"])
+    assert [j for j in s.select("ledger_outbox", {"kind": "rank_art"}) if j["payload"].get("summary_id") == owner["_id"]]
+    assert not [j for j in s.select("ledger_outbox", {"kind": "message"})
+                if j["payload"].get("audience") == "member" and j["payload"].get("type") == "rank_up"]

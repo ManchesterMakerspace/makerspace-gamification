@@ -4,6 +4,8 @@ x-ledger-environment: &ledger-environment
   LEDGER_URI: ${LEDGER_URI:-}
   MLAB_DATABASE: ${MLAB_DATABASE:-}
   LEDGER_DATABASE: ${LEDGER_DATABASE:-}
+  LEDGER_OPTIMIZED_READS: ${LEDGER_OPTIMIZED_READS:-false}
+  LEDGER_QUERY_METRICS: ${LEDGER_QUERY_METRICS:-false}
   MONGO_URI: ${MONGO_URI:-}
   MONGO_DATABASE: ${MONGO_DATABASE:-}
   SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
@@ -62,6 +64,18 @@ services:
     build: .
     environment: *ledger-environment
     command: ["ledger", "worker", "--queue", "channels"]
+    restart: unless-stopped
+
+  ledger-results:
+    build: .
+    environment: *ledger-environment
+    command: ["ledger", "worker", "--queue", "results"]
+    restart: unless-stopped
+
+  ledger-interactive:
+    build: .
+    environment: *ledger-environment
+    command: ["ledger", "worker", "--queue", "interactive"]
     restart: unless-stopped
 
   ledger-engagement:
