@@ -35,7 +35,9 @@ def test_rejected_picker_selection_drops_only_emoji(env, emoji):
     assert not s.select('ledger_participants')
 
 
-def test_nonparticipant_kudos_full_form_options_updates_and_receipts(env):
+@pytest.mark.parametrize('selected', [':clap:', ':kudo:', ':kudos:', ':fix_parrot:', ':first_place_medal:',
+                                    ':fistbump:', ':duct_tape:', ':thankyou:', ':teamwork:'])
+def test_nonparticipant_kudos_full_form_options_updates_and_receipts(env, selected):
     l, s, _, composer, _, slack = env
     ui = SlackUI(l, composer)
     ui.command({'user_id': 'U1', 'command': '/kudos', 'text': '', 'trigger_id': 'T'}, slack)
@@ -44,21 +46,24 @@ def test_nonparticipant_kudos_full_form_options_updates_and_receipts(env):
     detail = ui.submission(form(first, {'recipient': mid(2)}), slack)['view']
     emoji = next(b for b in detail['blocks'] if b.get('block_id') == 'emoji')
     assert emoji['optional'] and emoji['element']['type'] == 'static_select'
-    fields = {'emoji': ':clap:', 'message': '*Thanks!*', 'public': True, 'invitation': 'yes', 'shop': mid(201)}
+    assert [o['value'] for o in emoji['element']['options'][:8]] == [
+        ':kudo:', ':kudos:', ':fix_parrot:', ':first_place_medal:', ':fistbump:', ':duct_tape:', ':thankyou:', ':teamwork:']
+    fields = {'emoji': selected, 'message': '*Thanks!*', 'public': True, 'invitation': 'yes', 'shop': mid(201)}
     body = form(detail, fields)
     body['actions'] = [{'action_id': 'shop'}]
     ui.action(body, slack)
     updated = slack.views_update.call_args.kwargs['view']
     assert slack.views_update.call_args.kwargs['hash'] == 'h1'
-    assert next(b for b in updated['blocks'] if b.get('block_id') == 'emoji')['element']['initial_option']['value'] == ':clap:'
+    assert next(b for b in updated['blocks'] if b.get('block_id') == 'emoji')['element']['initial_option']['value'] == selected
     fields['tool'] = mid(311)
     ui.submission(form(updated, fields), slack)
     receipt = s.select('ledger_evidence', {'kind': 'kudos'})[0]
-    assert receipt['emoji'] == ':clap:' and not receipt['xp_awarded']
+    assert receipt['emoji'] == selected and not receipt['xp_awarded']
     assert not s.select('ledger_relationships', {'kind': 'sponsor'})
     w = Worker(l, composer, slack)
     for audience in ('recipient', 'shared'):
         w.outbox(claim(s, receipt['_id'] + ':' + audience))
+        assert selected in slack.chat_postMessage.call_args.kwargs['text']
     ack = s.get('ledger_outbox', 'ack:' + receipt['_id'])
     w.outbox(claim(s, ack['_id']))
     assert 'Kudos accepted' in slack.chat_postMessage.call_args.kwargs['text']

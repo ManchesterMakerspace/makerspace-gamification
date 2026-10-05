@@ -129,6 +129,8 @@ The bot must be invited to existing private game channels before `ledger bootstr
 
 ## Kudos emoji and consent
 
+The picker begins with silver star (`:kudo:`), gold star (`:kudos:`), fixed it! (`:fix_parrot:`), First place (`:first_place_medal:`), fistbump! (`:fistbump:`), used the force (`:duct_tape:`), Thank You (`:thankyou:`), and Teamwork! (`:teamwork:`). Custom shortcodes refer to the workspace's existing emoji.
+
 The `/kudos` sending modal offers an optional emoji picker. Its selection is saved with the submission and survives shop/recipient changes and retries. Negative/offensive selections (including `:poop:`, `:-1:`, `:middle_finger:`, `:clown_face:`, aliases and tone variants) and unknown picker values are silently dropped. The selected emoji and a space precede "You have received kudos from <SENDER>" in the recipient DM; SENDER is a validated Slack mention. The public Ledge Chat header includes the same emoji, recipient and sender. Authored formatting and emoji in the message body remain untouched and are never sent to inference.
 
 Both sending and receiving are available without game opt-in. Recipient participation still controls XP; one giver/recipient/week and five recipient/day qualifying XP caps still apply, and extra thanks still deliver. Nonparticipant senders can request public delivery and an invitation, but do not become recruitment sponsors. Requested acknowledgments/receipts are delivered without opt-in. Public-channel scopes and subscriptions have changed: update the manifest and reinstall the app before verifying joined-channel chat.
