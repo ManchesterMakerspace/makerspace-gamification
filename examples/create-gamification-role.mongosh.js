@@ -13,8 +13,10 @@ db = db.getSiblingDB("admin");
 // For separate credentials, assign these roles to two different database users:
 db.createRole(roles.source); // MLAB_URI user: source reads only.
 db.createRole(roles.ledger); // LEDGER_URI user: named Ledger collections only.
+// Optional; uncomment and assign to MLAB_URI only when Rails event-note persistence is enabled.
+// db.createRole(roles.ticket_note_writer);
 
 // Optional alternative when one gamification user must hold both sets of rights:
-// db.createRole(roles.gamification);
+// db.createRole(roles.gamification); // Includes the optional ticket-note grants.
 // A role is not a user; assign it when provisioning the corresponding DB user.
 // No user/role administration permissions are granted to the application roles.

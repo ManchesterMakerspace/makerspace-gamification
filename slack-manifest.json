@@ -78,7 +78,8 @@
         "im:history",
         "im:write",
         "users:read",
-        "files:write"
+        "files:write",
+        "files:read"
       ]
     }
   },

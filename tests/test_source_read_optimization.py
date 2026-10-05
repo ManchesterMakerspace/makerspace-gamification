@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 from pymongo import MongoClient, timeout
 from pymongo.errors import OperationFailure
+from bson.int64 import Int64
 
 from conftest import oid
 from ledger.catalog_cache import display_catalog, refresh
@@ -419,8 +420,14 @@ def _explain_returned(database, collection, pipeline):
         count = final.get("nReturned", final.get("$cursor", {}).get("executionStats", {}).get("nReturned"))
     else:
         count = plan.get("executionStats", {}).get("nReturned")
-    assert type(count) is int, "executionStats did not expose a final nReturned"
+    assert isinstance(count, int) and not isinstance(count, bool), "executionStats did not expose a final nReturned"
     return count
+
+
+def test_explain_accepts_bson_int64_return_count():
+    database = MagicMock()
+    database.command.return_value = {"executionStats": {"nReturned": Int64(3)}}
+    assert _explain_returned(database, "tools", []) == 3
 
 
 @pytest.mark.parametrize("plan,expected", [

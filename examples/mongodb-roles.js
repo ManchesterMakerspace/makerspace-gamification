@@ -15,6 +15,7 @@ var LedgerMongoRoles = (() => {
   const sourceCollections = [
     "members", "slack_users", "shops", "tools", "tool_checkouts",
     "volunteer_credits", "volunteer_tasks", "volunteer_events", "earned_memberships", "groups", "checkins", "cards",
+    "fix_tickets", "fix_ticket_events",
   ];
   const ledgerCollections = [
     "ledger_participants", "ledger_relationships", "ledger_rulesets",
@@ -45,11 +46,18 @@ var LedgerMongoRoles = (() => {
       if (indexedCollections.has(collection)) actions.push("createIndex");
       return { resource: { db: ledgerDatabase, collection }, actions };
     });
+    // Optional best-effort Rails event note persistence. It also needs update
+    // on fix_tickets so the ticket and event revision can commit together.
+    const ticketNoteWriter = [
+      { resource: { db: sourceDatabase, collection: "fix_tickets" }, actions: ["find", "update"] },
+      { resource: { db: sourceDatabase, collection: "fix_ticket_events" }, actions: ["find", "insert"] },
+    ];
     return {
       source: { role: "gamification_source_reader", privileges: reads, roles: [] },
       ledger: { role: "gamification_ledger_writer", privileges: writes, roles: [] },
-      // Optional single-user role: the union, still no legacy writes or wildcard.
-      gamification: { role: "gamification", privileges: [...reads, ...writes], roles: [] },
+      ticket_note_writer: { role: "gamification_ticket_note_writer", privileges: ticketNoteWriter, roles: [] },
+      // Optional single-user role includes the explicitly scoped note grants.
+      gamification: { role: "gamification", privileges: [...reads, ...writes, ...ticketNoteWriter], roles: [] },
     };
   }
 

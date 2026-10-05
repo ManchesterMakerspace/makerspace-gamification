@@ -57,6 +57,9 @@ services:
     environment:
       <<: *ledger-environment
       MQTT_CLIENT_ID: ledger-delivery
+      # Drive credentials are available only to the worker that delivers images.
+      LEDGER_TICKET_GOOGLE_ACCESS_TOKEN: ${LEDGER_TICKET_GOOGLE_ACCESS_TOKEN:-}
+      LEDGER_TICKET_GOOGLE_FOLDER_ID: ${LEDGER_TICKET_GOOGLE_FOLDER_ID:-}
     command: ["ledger", "worker", "--queue", "outbox"]
     # AI startup/outages must not block delivery via canned fallbacks.
     restart: unless-stopped

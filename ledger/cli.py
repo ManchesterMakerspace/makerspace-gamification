@@ -180,6 +180,7 @@ def main():
         stop = Event()
         def run(queue):
             last = 0
+            last_ticket_scan = 0
             last_metrics = 0
             while not stop.is_set():
                 try:
@@ -189,6 +190,9 @@ def main():
                         last_metrics = time.monotonic()
                     if queue == "inbox" and time.monotonic() - last >= 300:
                         ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"periodic:{int(time.time() // 300)}", "reconcile", {}))
+                        if time.monotonic() - last_ticket_scan >= 3600:
+                            ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"ticket-quest-reconcile:{int(time.time() // 3600)}", "ticket_quest_reconcile", {}))
+                            last_ticket_scan = time.monotonic()
                         last = time.monotonic()
                     worked = worker.step("ledger_inbox", exclude=["engagement"]) if queue == "inbox" else worker.step("ledger_inbox", kinds=["engagement"]) if queue == "engagement" else worker.step(
                         "ledger_outbox", **outbox_filters(queue))

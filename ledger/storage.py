@@ -159,6 +159,7 @@ class MongoStore:
         self.db.ledger_evidence.create_index([("kind", 1), ("status", 1), ("shop_id", 1)])
         self.db.ledger_evidence.create_index([("kind", 1), ("member_id", 1), ("day", 1)])
         self.db.ledger_evidence.create_index([("kind", 1), ("status", 1), ("lease_until", 1)])
+        self.db.ledger_evidence.create_index([("kind", 1), ("announcement_channel", 1), ("announcement_ts", 1)])
         self.db.ledger_catalog.create_index([("kind", 1), ("quest_type", 1), ("target_rank", 1), ("title_key", 1), ("revision", 1), ("_id", 1)])
         self.db.ledger_catalog.create_index([("kind", 1), ("quest_type", 1), ("title_key", 1), ("revision", 1), ("_id", 1)])
         self.db.ledger_catalog.create_index([("kind", 1), ("active", 1), ("title_key", 1), ("_id", 1)])

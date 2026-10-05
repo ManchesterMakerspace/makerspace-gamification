@@ -154,6 +154,46 @@ def test_game_results_deduplicate_awards_and_keep_unrelated_actions_separate(joi
     assert button["action_id"] == "guidance_next_step" and button["value"] == owner_id
 
 
+def test_paused_worker_cancels_game_summary_flush_and_queued_delivery(joined):
+    ledger, store, _, _, _, slack = joined
+    w = worker(joined)
+    member = str(oid(1))
+
+    flush_owner = summaries.collect(ledger, "paused-flush", member, "challenge",
+                                    {"xp_change": "5"}, "award1")
+    summaries.finish_action(ledger, "paused-flush")
+    store.put("ledger_catalog", {"_id": "control", "paused": True})
+    flush_revision = store.get("ledger_evidence", flush_owner)["content_revision"]
+    with pytest.raises(Denied, match="paused"):
+        w.outbox(claim(store, f"summary-flush:{flush_owner}:{flush_revision}"))
+    assert store.get("ledger_evidence", flush_owner).get("snapshot_job_id") is None
+
+    store.put("ledger_catalog", {"_id": "control", "paused": False})
+    delivery_owner = summaries.collect(ledger, "paused-delivery", member, "rank_up",
+                                       {"rank": "Novice"}, "rank1")
+    summaries.finish_action(ledger, "paused-delivery")
+    delivery = flush(w, delivery_owner)
+    store.put("ledger_catalog", {"_id": "control", "paused": True})
+    with pytest.raises(Denied, match="paused"):
+        w.outbox(delivery)
+    slack.chat_postMessage.assert_not_called()
+    w.persist_composition.assert_not_called()
+
+
+def test_paused_worker_still_delivers_peer_kudos_summary_exception(joined):
+    ledger, store, _, _, _, slack = joined
+    w = worker(joined)
+    evidence, owner_id = kudos(joined, public=False)
+    receipt(ledger, evidence["_id"], "recipient", "delivered")
+    store.put("ledger_catalog", {"_id": "control", "paused": True})
+    revision = store.get("ledger_evidence", owner_id)["content_revision"]
+    flush_job = claim(store, f"summary-flush:{owner_id}:{revision}")
+    w.outbox(flush_job)
+    owner = store.get("ledger_evidence", owner_id)
+    w.outbox(claim(store, owner["snapshot_job_id"]))
+    assert slack.chat_postMessage.call_args.kwargs["channel"] == "DU1"
+
+
 def test_event_during_generation_supersedes_old_revision(joined):
     ledger, store, _, _, _, slack = joined
     w = worker(joined)
