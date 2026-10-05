@@ -297,6 +297,7 @@ class TicketQuests:
             owns_pending = self.store.atomic(reserve_claim)
 
         image_valid = False
+        claim_rejected = False
         if jpeg and owns_pending and self.worker:
             try:
                 image_valid = bool(self._download_jpeg({"image_file_id": jpeg["id"]}))
@@ -309,6 +310,11 @@ class TicketQuests:
                     raise
                 log.warning("ticket quest image check exhausted response=%s error_type=%s",
                             response_id, type(exc).__name__)
+                jpeg = None
+            except Image.DecompressionBombError:
+                # Pillow rejects the decoded image before the explicit pixel
+                # limit can run. Reject this claim and release its reservation.
+                claim_rejected = True
                 jpeg = None
             except (ValueError, OSError):
                 jpeg = None
@@ -324,7 +330,9 @@ class TicketQuests:
                   "member_id": member_id, "slack_id": event["user"], "channel": channel, "thread_ts": root,
                   "message_ts": event["ts"], "text": text,
                   "image_file_id": jpeg.get("id") if jpeg else None,
-                  "eligible": bool(eligible), "created_at": now(), "delivery": None}
+                  "eligible": bool(eligible), "claim_rejected": claim_rejected,
+                  "rejection_reason": "unsafe_image_dimensions" if claim_rejected else None,
+                  "created_at": now(), "delivery": None}
         winner = False
         def accept(s):
             nonlocal winner
@@ -337,7 +345,8 @@ class TicketQuests:
             owns_claim = claim.get("response_id") == response_id
             deadline_ok = bool(latest and latest.get("deadline") and (
                 claim.get("claimed_at") <= latest["deadline"] if owns_claim else latest["deadline"] > now()))
-            valid = (eligible and latest and latest.get("status") == "open" and not latest.get("winner_member_id")
+            valid = (eligible and not claim_rejected and latest and latest.get("status") == "open"
+                     and not latest.get("winner_member_id")
                      and (not claim or owns_claim) and deadline_ok
                      and participant and participant.get("opted_in") and current_member.active(member_id)
                      and self.sources.good_standing(member_id) and member_id != latest.get("reporter_id"))
@@ -575,7 +584,13 @@ class TicketQuests:
             self.store.atomic(save)
         image_url = image_url or response.get("image_url")
         self._write_event_note(quest, response, image_url)
-        if job["payload"].get("winner"):
+        if response.get("claim_rejected"):
+            summary = ("Tell the participant their oversized JPEG claim was rejected because the image exceeded safe "
+                       "dimensions. Give a brief, snarky but kind Ledger-style quip, and invite a smaller image or a "
+                       "text-only sentence. Make clear this reply did not win or earn XP.")
+            fallback = ("That JPEG tried to smuggle a whole galaxy past the image gate. Claim rejected; try a smaller "
+                        "image or a text-only sentence.")
+        elif job["payload"].get("winner"):
             summary = "Thank the responder for being first to qualify for the ticket verification quest."
             fallback = "You were first to qualify for this quest."
         elif response.get("eligible"):
@@ -586,7 +601,7 @@ class TicketQuests:
             fallback = "Thanks for helping with the ticket verification."
         narration = self.worker.persist_composition(job, "status", "shared", {"summary": summary}).get("text", "")
         message = narration or fallback
-        if job["payload"].get("winner"):
+        if job["payload"].get("winner") and not response.get("claim_rejected"):
             message += f" Recorded {quest.get('xp_awarded', 0)} XP."
         self.worker.post_message(channel=response["channel"], thread_ts=response["thread_ts"], text=message,
             client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"] + ":thanks")), unfurl_links=False)

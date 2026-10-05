@@ -156,6 +156,49 @@ def test_permanently_unavailable_jpeg_falls_back_to_no_image_xp(joined):
     assert response.get("image_file_id") is None
 
 
+def test_decompression_bomb_rejects_claim_releases_reservation_and_narrates(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    unsafe = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.250", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "huge-jpeg", "mimetype": "image/jpeg"}]}
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=Image.DecompressionBombError("too many pixels")):
+        assert service.response_event(unsafe, "decompression-bomb") is True
+
+    saved_quest = store.get("ledger_evidence", quest["_id"])
+    rejected = store.select("ledger_evidence", {"kind": "broken_ticket_quest_response"})[0]
+    assert saved_quest["status"] == "open"
+    assert saved_quest.get("pending_claim") is None
+    assert saved_quest.get("winner_member_id") is None
+    assert rejected["claim_rejected"] is True
+    assert rejected["rejection_reason"] == "unsafe_image_dimensions"
+    assert rejected["eligible"] is False
+    assert rejected.get("image_file_id") is None
+    assert ledger.participant(str(oid(2)))["xp"] == "0"
+
+    outbox = store.get("ledger_outbox", rejected["_id"])
+    assert outbox["payload"]["winner"] is False
+    ledger.join(str(oid(3)))
+    text_claim = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U3", "ts": "903.251", "text": "I checked the motor and confirmed the issue."}
+    assert service.response_event(text_claim, "after-bomb") is True
+    assert store.get("ledger_evidence", quest["_id"])["winner_member_id"] == str(oid(3))
+    assert ledger.participant(str(oid(3)))["xp"] == "66"
+
+    _, _, _, composer, _, slack = joined
+    worker = Worker(ledger, composer, slack, bot_id="UBOT")
+    worker.persist_composition = MagicMock(return_value={"text": "That image was too large for the Ledger's scanner."})
+    response = store.get("ledger_evidence", rejected["_id"])
+    response.update(delivery={"fix_channel": "CFIX"}, rails_note_written=True)
+    store.put("ledger_evidence", response)
+    service = TicketQuests(ledger, worker)
+    service._deliver_response({"_id": rejected["_id"], "payload": {"response_id": rejected["_id"], "winner": False}})
+    facts = worker.persist_composition.call_args.args[3]
+    assert "snarky" in facts["summary"] and "Ledger" in facts["summary"]
+    assert "too large" in slack.chat_postMessage.call_args.kwargs["text"]
+
+
 def test_deleted_or_forbidden_image_errors_are_permanent_but_ratelimits_retry():
     slack_response = MagicMock()
     slack_response.get.side_effect = lambda key: "file_not_found" if key == "error" else None
