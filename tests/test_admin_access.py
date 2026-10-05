@@ -1,17 +1,22 @@
 import json
+from unittest.mock import patch
 
 import pytest
+from pymongo import timeout
+from pymongo.errors import NetworkTimeout
+from slack_sdk import WebClient
 
 from conftest import oid
 from ledger import views
-from ledger.admin_access import command_eligible, help_text, invite
+from ledger.admin_access import command_eligible, help_text, invite, invitation_eligible
 from ledger.authority import Authority
 from ledger.conversations import restricted_answer
 from ledger.domain import Denied
-from ledger.slack_app import SlackUI
+from ledger.http import HTTPApp
+from ledger.slack_app import SlackUI, build_app
 from ledger.storage import enqueue
 from ledger.worker import Worker
-from test_slack import form
+from test_slack import form, request
 from test_worker import claim
 
 
@@ -77,6 +82,87 @@ def test_invitation_picker_filters_opt_in_revocation_and_invalid_identities(admi
     for n in (1, 4, 5, 6, 7, 8, 10):
         with pytest.raises(Denied):
             invite(l, member(10), member(n), '', '', f'invalid-{n}')
+
+
+@pytest.mark.parametrize('search', ['  aDa   LoVeLaCe ', 'Lovelace Ada', 'ada'])
+def test_invitation_picker_matches_name_tokens_case_and_whitespace(admins, search):
+    l, _, src, comp, *_ = admins
+    src.data['members'][2].update(firstname='Ada', lastname='Lovelace')
+    options = SlackUI(l, comp).options({'user': {'id': 'U10'}, 'action_id': 'invite_recipient', 'value': search})['options']
+    assert [(o['value'], o['text']['text']) for o in options] == [(member(3), 'Ada Lovelace')]
+
+
+def test_invitation_picker_preserves_slack_id_fallback_for_nameless_member(admins):
+    l, _, src, comp, *_ = admins
+    src.data['members'][2].update(firstname='', lastname='')
+    options = SlackUI(l, comp).options({'user': {'id': 'U10'}, 'action_id': 'invite_recipient', 'value': 'u3'})['options']
+    assert [(o['value'], o['text']['text']) for o in options] == [(member(3), 'U3')]
+
+
+def test_invitation_picker_searches_before_eligibility_with_constant_database_reads(admins):
+    l, s, src, comp, *_ = admins
+    for n in range(1000, 2000):
+        src.data['members'].append({'_id': oid(n), 'firstname': 'Unrelated', 'lastname': 'Person', 'status': 'activeMember'})
+        src.data['slack_users'].append({'_id': oid(n + 10000), 'member_id': oid(n), 'slack_id': f'U{n}'})
+    with patch.object(src, 'bounded', wraps=src.bounded) as bounded, patch.object(src, 'member', wraps=src.member) as per_member:
+        options = SlackUI(l, comp).options({'user': {'id': 'U10'}, 'action_id': 'invite_recipient', 'value': 'maker3'})['options']
+    assert [o['value'] for o in options] == [member(3)]
+    assert per_member.call_count < 15  # Actor authorization only; independent of directory size.
+    member_queries = [call for call in bounded.call_args_list if call.args[0] == 'members']
+    assert len(member_queries) == 1 and '$and' in member_queries[0].args[1]
+    assert member_queries[0].args[3] == 500
+    assert len(bounded.call_args_list) == 3
+
+
+@pytest.mark.parametrize('change', ['duplicate_member', 'duplicate_user', 'invalid_uid', 'invalidated', 'revoked', 'merged', 'joined'])
+def test_invitation_picker_batch_matches_submission_eligibility(admins, change):
+    l, _, src, comp, *_ = admins
+    if change == 'duplicate_member':
+        src.data['slack_users'].append({'_id': oid(900), 'member_id': oid(3), 'slack_id': 'UOTHER'})
+    if change == 'duplicate_user':
+        src.data['slack_users'].append({'_id': oid(900), 'member_id': oid(4), 'slack_id': 'U3'})
+    if change == 'invalid_uid': src.data['slack_users'][2]['slack_id'] = 'bad uid'
+    if change == 'invalidated': src.data['slack_users'][2]['invalidated_at'] = 'invalid'
+    if change == 'revoked': src.data['members'][2]['status'] = 'revoked'
+    if change == 'merged': src.data['members'][2]['merged_at'] = 'merged'
+    if change == 'joined': l.join(member(3))
+    assert not invitation_eligible(l, member(3))
+    options = SlackUI(l, comp).options({'user': {'id': 'U10'}, 'action_id': 'invite_recipient', 'value': 'Maker3'})['options']
+    assert options == []
+
+
+def test_bare_peer_invite_returns_usage_without_queuing_work(joined):
+    l, s, _, comp, _, slack = joined
+    before = s.select('ledger_inbox')
+    with pytest.raises(ValueError, match=r'Use /ledger invite @member'):
+        SlackUI(l, comp).command({'user_id': 'U1', 'command': '/ledger', 'text': 'invite', 'trigger_id': 'T'}, slack)
+    assert s.select('ledger_inbox') == before
+    SlackUI(l, comp).command({'user_id': 'U1', 'command': '/ledger', 'text': 'invite <@U2> chat', 'trigger_id': 'T'}, slack)
+    assert any(j.get('payload', {}).get('command') == '/ledger invite <@U2> chat' for j in s.select('ledger_inbox'))
+
+
+def test_signed_picker_callback_finds_member_with_database_deadline(admins):
+    l, store, _, composer, *_ = admins
+    ui = SlackUI(l, composer)
+    app = HTTPApp(build_app(ui, 'xoxb-test', 'test-signing-secret', 'T1', 'UBOT', WebClient(token='xoxb-test')), store)
+    payload = {'type': 'block_suggestion', 'team': {'id': 'T1'}, 'user': {'id': 'U10'},
+               'action_id': 'invite_recipient', 'value': 'Maker3', 'view': views.admin_invitation()}
+    with patch('ledger.slack_app.timeout', wraps=timeout) as deadline:
+        status, response = request(app, {'payload': json.dumps(payload)}, 'application/x-www-form-urlencoded', path='/slack/interactions')
+    assert status == 200 and [o['value'] for o in json.loads(response)['options']] == [member(3)]
+    deadline.assert_called_once_with(2)
+
+
+def test_signed_picker_database_timeout_returns_empty_options_without_killing_request(admins, caplog):
+    l, store, src, composer, *_ = admins
+    app = HTTPApp(build_app(SlackUI(l, composer), 'xoxb-test', 'test-signing-secret', 'T1', 'UBOT', WebClient(token='xoxb-test')), store)
+    payload = {'type': 'block_suggestion', 'team': {'id': 'T1'}, 'user': {'id': 'U10'},
+               'action_id': 'invite_recipient', 'value': 'Maker3', 'view': views.admin_invitation()}
+    with patch.object(src, 'bounded', side_effect=NetworkTimeout('PRIVATE_CONNECTION_DETAILS')):
+        status, response = request(app, {'payload': json.dumps(payload)}, 'application/x-www-form-urlencoded', path='/slack/interactions')
+    assert status == 200 and json.loads(response) == {'options': []}
+    assert 'error_type=NetworkTimeout' in caplog.text
+    assert 'PRIVATE_CONNECTION_DETAILS' not in response + caplog.text
 
 
 @pytest.mark.parametrize('sender,expected', [('The Archivist', 'The Archivist'), ('', 'Maker10 Test')])
