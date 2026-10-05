@@ -28,6 +28,7 @@ TERMINAL = {"resolved", "rejected", "withdrawn"}
 ACTIVE = {"open", "in_progress", "waiting_for_parts"}
 VALID_CATEGORIES = {"damaged", "broken"}
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_IMAGE_PIXELS = 20_000_000
 DEFAULT_CONFIG = {"enabled": False, "quest_channel_id": "", "fix_channel_id": "",
                   "duration_hours": 18, "xp_with_image": 100, "xp_without_image": 66,
                   "revision": 0}
@@ -77,6 +78,8 @@ def sanitize_jpeg(content):
     source = Image.open(BytesIO(content))
     if source.format not in ("JPEG", "JPG"):
         return None
+    if source.width * source.height > MAX_IMAGE_PIXELS:
+        return None
     image = ImageOps.exif_transpose(source).convert("RGB")
     output = BytesIO()
     image.save(output, format="JPEG", quality=92, optimize=True)
@@ -124,10 +127,9 @@ class TicketQuests:
                 ticket = self._ticket(ticket_id)
             except (ValueError, PyMongoError):
                 return
-            if ticket:
-                if settings.get("enabled"):
-                    self._consider(ticket, settings)
-                self._refresh_quest(ticket, settings, current)
+            if ticket and settings.get("enabled"):
+                self._consider(ticket, settings)
+            self._refresh_quest(ticket, settings, current, ticket_id=ticket_id)
             return
 
         # Use a durable watermark to recover MQTT events after outages. The first
@@ -150,7 +152,7 @@ class TicketQuests:
         quests = self.store.select("ledger_evidence", {"kind": "broken_ticket_quest", "status": {"$in": ["announcing", "open"]}})
         for quest in quests:
             ticket = self._ticket(quest["ticket_id"])
-            self._refresh_quest(ticket, settings, current)
+            self._refresh_quest(ticket, settings, current, ticket_id=quest["ticket_id"])
         if settings.get("enabled"):
             self.store.atomic(lambda s: s.put("ledger_catalog", {"_id": "broken_ticket_quest_scan", "updated_after": current}))
 
@@ -181,16 +183,19 @@ class TicketQuests:
             return True
         self.store.atomic(reserve)
 
-    def _refresh_quest(self, ticket, settings, current):
-        if not ticket:
+    def _refresh_quest(self, ticket, settings, current, *, ticket_id=None):
+        if ticket is None and ticket_id is None:
             return
-        key = ticket_key(ticket["_id"])
+        key = ticket_key(ticket["_id"] if ticket is not None else ticket_id)
         quest = self.store.get("ledger_evidence", key)
         if not quest or quest.get("status") not in ("announcing", "open") or quest.get("winner_member_id"):
             return
-        eligible = ticket.get("status") in ACTIVE and ticket.get("category") in VALID_CATEGORIES
-        outcome = ("closed" if ticket.get("status") in TERMINAL else
+        eligible = ticket is not None and ticket.get("status") in ACTIVE and ticket.get("category") in VALID_CATEGORIES
+        outcome = ("deleted" if ticket is None else
+                   "closed" if ticket.get("status") in TERMINAL else
                    "ineligible" if not eligible else None)
+        final_status = ticket.get("status") if ticket is not None else "deleted"
+        final_category = ticket.get("category") if ticket is not None else quest.get("category")
         if quest.get("status") == "announcing":
             if not outcome:
                 return
@@ -199,7 +204,7 @@ class TicketQuests:
                 if not latest or latest.get("status") != "announcing":
                     return
                 latest.update(status="closed", outcome_at=current, outcome=outcome,
-                              final_ticket_status=ticket.get("status"), final_ticket_category=ticket.get("category"))
+                              final_ticket_status=final_status, final_ticket_category=final_category)
                 s.put("ledger_evidence", latest)
                 pending = s.get("ledger_outbox", f"ticket-quest-announcement:{latest['ticket_key']}")
                 if pending and pending.get("status") in ("pending", "working"):
@@ -216,8 +221,8 @@ class TicketQuests:
             if not latest or latest.get("status") != "open" or latest.get("winner_member_id"):
                 return False
             latest.update(status="expired" if outcome == "expired" else "closed", outcome_at=current,
-                          outcome=outcome, final_ticket_status=ticket.get("status"),
-                          final_ticket_category=ticket.get("category"))
+                          outcome=outcome, final_ticket_status=final_status,
+                          final_ticket_category=final_category)
             s.put("ledger_evidence", latest)
             enqueue(s, "ledger_outbox", f"ticket-quest-update:{key}:{outcome}", "ticket_quest_update", {"quest_id": key, "outcome": outcome})
             return True
@@ -242,6 +247,7 @@ class TicketQuests:
         if quest.get("status") == "open":
             ticket = self._ticket(quest["ticket_id"])
             if not ticket:
+                self._refresh_quest(None, config(self.ledger), now(), ticket_id=quest["ticket_id"])
                 return True
             if (ticket.get("status") in TERMINAL or ticket.get("status") not in ACTIVE
                     or ticket.get("category") not in VALID_CATEGORIES):
@@ -361,6 +367,10 @@ class TicketQuests:
             facts = {"summary": (f"The verification quest for ticket #{quest['ticket_key']} closed because it is no longer an eligible "
                                   f"damaged/broken ticket (category: {quest.get('final_ticket_category') or 'unknown'}, "
                                   f"status: {quest.get('final_ticket_status') or 'unknown'}).")}
+            narration = self.worker.persist_composition(job, "status", "shared", facts).get("text", "")
+            text = (narration + "\n" if narration else "") + facts["summary"]
+        elif job["payload"]["outcome"] == "deleted":
+            facts = {"summary": f"The verification quest for ticket #{quest['ticket_key']} closed because the source ticket was deleted."}
             narration = self.worker.persist_composition(job, "status", "shared", facts).get("text", "")
             text = (narration + "\n" if narration else "") + facts["summary"]
         else:

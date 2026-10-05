@@ -182,6 +182,32 @@ def test_quest_closes_when_ticket_becomes_ineligible(joined, change):
     assert store.get("ledger_outbox", f"ticket-quest-update:{quest['_id']}:ineligible")
 
 
+@pytest.mark.parametrize("targeted", [True, False])
+def test_deleted_ticket_closes_quest_during_targeted_or_hourly_reconciliation(joined, targeted):
+    _, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    source.data["fix_tickets"].clear()
+    service.reconcile(735) if targeted else service.reconcile()
+    closed = store.get("ledger_evidence", quest["_id"])
+    assert closed["status"] == "closed"
+    assert closed["outcome"] == "deleted"
+    assert closed["final_ticket_status"] == "deleted"
+    assert store.get("ledger_outbox", f"ticket-quest-update:{quest['_id']}:deleted")
+
+
+def test_reply_to_deleted_ticket_closes_quest_instead_of_leaving_it_open(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    source.data["fix_tickets"].clear()
+    handled = service.response_event({"type": "message", "channel": "CQUEST",
+        "thread_ts": quest["announcement_ts"], "user": "U2", "ts": "906.001",
+        "text": "I checked the tool and confirmed the issue."}, "deleted-ticket-reply")
+    assert handled is True
+    closed = store.get("ledger_evidence", quest["_id"])
+    assert closed["status"] == "closed" and closed["outcome"] == "deleted"
+    assert ledger.participant(str(oid(2)))["xp"] == "0"
+
+
 def test_ticket_quest_announcement_narration_uses_persisted_composition(joined):
     ledger, store, _, composer, _, slack = joined
     composer.compose = MagicMock()
@@ -249,6 +275,14 @@ def test_jpeg_sanitizer_strips_exif_and_rejects_non_jpeg():
     png = BytesIO()
     image.save(png, format="PNG")
     assert sanitize_jpeg(png.getvalue()) is None
+
+
+def test_jpeg_sanitizer_rejects_excessive_dimensions_before_transform():
+    source = MagicMock(format="JPEG", width=5000, height=5000)
+    with patch("ledger.ticket_quests.Image.open", return_value=source), \
+         patch("ledger.ticket_quests.ImageOps.exif_transpose") as transpose:
+        assert sanitize_jpeg(b"jpeg") is None
+    transpose.assert_not_called()
 
 
 def test_config_save_records_revision_and_audit(joined):
