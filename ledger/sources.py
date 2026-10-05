@@ -23,6 +23,10 @@ FIELDS = {
     "cards": "uid member_id validity",
     "earned_memberships": "member_id status",
     "groups": "groupName subscription subscription_id expiry",
+    # Ticket documents are read only for verification quests. Keep these
+    # projections narrow; notes and private attribution are never sent to AI.
+    "fix_tickets": "reporter_id category status created_at updated_at revision slack_ticket_ts slack_ticket_channel_id",
+    "fix_ticket_events": "ticket_id actor_id kind field_changes revision created_at completed_at",
 }
 
 

@@ -308,7 +308,10 @@ def _authorized(worker, owner):
     member_id = owner["member_id"]
     def check():
         if owner["authorization"] == "peer_kudos":
-            worker.ledger.require_member(member_id)
+            # Receipt jobs are explicit pause exceptions, but still require the
+            # same live, permitted human identity as peer kudos itself.
+            if not worker.ledger.member_eligible(member_id):
+                raise Denied("A valid linked human Slack account is required.")
         else:
             participant = worker.ledger.require(member_id)
             if participant.get("consent_generation", 0) != owner["consent_generation"]:

@@ -203,3 +203,9 @@ def test_mongosh_example_creates_only_the_two_scoped_roles_in_admin():
     assert [r["role"] for r in roles] == ["gamification_source_reader", "gamification_ledger_writer"]
     assert all(p["actions"] == ["find"] for p in roles[0]["privileges"])
     assert all(p["resource"]["collection"].startswith("ledger_") for p in roles[1]["privileges"])
+
+
+def test_ticket_note_writer_is_separate_and_limited_to_revision_event_path():
+    role = definition("mongosh", "ticket_note_writer")
+    grants = {(p["resource"]["collection"], tuple(p["actions"])) for p in role["privileges"]}
+    assert grants == {("fix_tickets", ("find", "update")), ("fix_ticket_events", ("find", "insert"))}

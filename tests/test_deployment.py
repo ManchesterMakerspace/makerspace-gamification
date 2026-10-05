@@ -68,13 +68,14 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
     assert not settings['socket_mode_enabled'] and not settings['token_rotation_enabled']
     scopes = set(MANIFEST['oauth_config']['scopes']['bot'])
     assert scopes == {'commands', 'app_mentions:read', 'chat:write', 'groups:read', 'groups:history',
-                      'groups:write', 'im:write', 'im:history', 'users:read', 'files:write', 'channels:read', 'channels:history'}
+                      'groups:write', 'im:write', 'im:history', 'users:read', 'files:write', 'files:read', 'channels:read', 'channels:history'}
     # Inventory actual SDK calls: new methods require an explicit permission review.
     method_scopes = {
         'users_info': {'users:read'}, 'users_list': {'users:read'}, 'conversations_info': {'groups:read', 'channels:read'},
         'conversations_members': {'groups:read'}, 'conversations_create': {'groups:write'},
         'conversations_invite': {'groups:write'}, 'conversations_kick': {'groups:write'},
-        'conversations_open': {'im:write'}, 'files_upload_v2': {'files:write'},
+        'conversations_open': {'im:write'}, 'conversations_replies': {'groups:history', 'channels:history'},
+        'files_upload_v2': {'files:write'}, 'files_info': {'files:read'},
         'chat_postMessage': {'chat:write'}, 'chat_getPermalink': set(),
         'chat_update': {'chat:write'},
         'views_open': set(), 'views_update': set(), 'views_publish': set(),

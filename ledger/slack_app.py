@@ -148,6 +148,17 @@ class SlackUI:
             return self.open(client, body, views.admin_invitation())
         if text == "help" or (text == "" and self.ledger.sources.role(actor) not in ("admin", "board_member")):
             return self.open(client, body, views.modal("dismiss", "Administration", [section(help_text(self.ledger, actor))], submit="Done"))
+        if text == "ticket-quests":
+            from .ticket_quests import config
+            current = config(self.ledger)
+            return self.open(client, body, views.modal("ticket_quest_config", "Broken ticket quests", [
+                section("Configure optional quests for new damaged/broken tickets. Channel IDs are required; credentials stay in deployment secrets."),
+                views.checkbox("enabled", "Enable new ticket quests", current.get("enabled", False)),
+                views.text_input("quest_channel_id", "Quest announcement channel ID", current.get("quest_channel_id", "")),
+                views.text_input("fix_channel_id", "Fix Tickets channel ID", current.get("fix_channel_id", "")),
+                views.text_input("duration_hours", "Quest duration in hours (1–168)", str(current["duration_hours"]), max_length=3),
+                views.text_input("xp_with_image", "XP with JPEG image (0–500)", str(current["xp_with_image"]), max_length=3),
+                views.text_input("xp_without_image", "XP without image (0–500)", str(current["xp_without_image"]), max_length=3)], submit="Save settings"))
         if text == "delegates":
             return self.open(client, body, views.delegates(self.ledger, actor))
         if text.startswith("publish-quest ") or text.startswith("reject-quest "):
@@ -253,7 +264,7 @@ class SlackUI:
             self.confirm_human(data["invite_recipient"], client)
             invite(self.ledger, actor, data["invite_recipient"], data.get("sender"), data.get("message"), meta["key"])
             return {}
-        if callback.startswith(("ranks_", "template_")) or callback in ("catalog", "quest_create"):
+        if callback.startswith(("ranks_", "template_")) or callback in ("catalog", "quest_create", "ticket_quest_config"):
             from .admin_access import require_command
             require_command(self.ledger, actor)
             self.ledger.admin(actor)
@@ -280,6 +291,19 @@ class SlackUI:
         if callback == "member_quest_review":
             from .quests import Quests
             Quests(self.ledger).publish(actor, meta["quest"], int(data["reward"]), data["classification"], meta["approve"], data.get("reason", ""), data.get("catalog") or None)
+            return {}
+        if callback == "ticket_quest_config":
+            from .ticket_quests import TicketQuests
+            registered_chat = self.ledger.store.get("ledger_channels", "chat") or {}
+            if data["quest_channel_id"].strip() != registered_chat.get("channel_id"):
+                raise ValueError("Use the currently configured Ledge Chat channel for quest announcements.")
+            fix_channel = client.conversations_info(channel=data["fix_channel_id"].strip())["channel"]
+            if fix_channel.get("is_member") is not True or fix_channel.get("is_ext_shared"):
+                raise ValueError("Invite The Ledger bot to a non-externally-shared Fix Tickets channel first.")
+            values = {key: int(data[key]) for key in ("duration_hours", "xp_with_image", "xp_without_image")}
+            values.update(enabled=data.get("enabled", False), quest_channel_id=data["quest_channel_id"].strip(),
+                          fix_channel_id=data["fix_channel_id"].strip())
+            TicketQuests(self.ledger).save_config(actor, values)
             return {}
         if callback == "ledger_quest_review":
             from .ledger_quests import LedgerQuests

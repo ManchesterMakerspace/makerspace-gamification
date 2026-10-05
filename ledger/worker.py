@@ -106,6 +106,9 @@ class Worker:
                 self.valid_identity(profile["member_id"])
                 Engagement(self.ledger).notice(profile["member_id"])
             self.reconcile_channels()
+        elif job["kind"] in ("ticket_quest_change", "ticket_quest_reconcile"):
+            from .ticket_quests import TicketQuests
+            TicketQuests(self.ledger).reconcile(job["payload"].get("ticket_id"))
         elif job["kind"] == "slack_event":
             outcome = self.event(payload, job["_id"])
             log.info("Slack event processed job=%s outcome=%s", job["_id"], outcome or "handled")
@@ -238,6 +241,11 @@ class Worker:
             return "ignored_bot_or_subtype"
         if not member:
             return "ignored_unlinked_identity"
+        if kind == "message" and event.get("thread_ts"):
+            from .ticket_quests import TicketQuests
+            handled = TicketQuests(self.ledger, worker=self).response_event(event, key)
+            if handled:
+                return handled
         member_id = sid(member["_id"])
         is_dm = event.get("channel_type") == "im" or channel.startswith("D")
         text = event.get("text", "")
@@ -695,9 +703,11 @@ class Worker:
         p = job["payload"]
         kind = job["kind"]
         member_id = p.get("member_id")
-        if kind in ("summary_flush", "summary_delivery"):
-            from .result_summaries import flush, deliver
-            return flush(self, job) if kind == "summary_flush" else deliver(self, job)
+        if kind.startswith("ticket_quest_"):
+            if (self.store.get("ledger_catalog", "control") or {}).get("paused"):
+                raise ReviewDeliveryBusy()
+            from .ticket_quests import TicketQuests
+            return TicketQuests(self.ledger, worker=self).deliver(job)
         if kind == "guidance":
             return self.deliver_guidance(job)
         if kind in ("review_notice", "quest_review_notice"):
@@ -725,6 +735,9 @@ class Worker:
             return deliver_invitation(self, job)
         if (self.store.get("ledger_catalog", "control") or {}).get("paused") and not p.get("exception"):
             raise Denied("Game delivery paused by an operator.")
+        if kind in ("summary_flush", "summary_delivery"):
+            from .result_summaries import flush, deliver
+            return flush(self, job) if kind == "summary_flush" else deliver(self, job)
         if kind == "provision_slot":
             slot = p["slot"]
             if not self.store.get("ledger_channels", f"rank:{slot}"):
@@ -1114,6 +1127,15 @@ def ingest_mqtt(store, topic, payload, retained=False):
         raise ValueError("Invalid bridge payload")
     envelope = json_util.loads(document)
     doc = envelope.get("document") if isinstance(envelope, dict) else None
+    if collection in ("fix_tickets", "fix_ticket_events"):
+        if not isinstance(doc, dict) or doc.get("_id") is None:
+            return False
+        ticket_id = doc.get("_id") if collection == "fix_tickets" else doc.get("ticket_id")
+        if ticket_id is None:
+            return False
+        key = "ticket-quest-mqtt:" + hashlib.sha256(topic.encode() + payload).hexdigest()
+        store.atomic(lambda s: enqueue(s, "ledger_inbox", key, "ticket_quest_change", {"ticket_id": sid(ticket_id)}))
+        return True
     if collection in ("shops", "tools"):
         from .catalog_cache import schedule_refresh
         schedule_refresh(store)
