@@ -11,6 +11,8 @@ The service creates independent PyMongo clients for its two data sources:
 
 Both URIs can name the same Atlas cluster and `makerauth` database with different database-user credentials. They can also point at different databases/clusters. The Ledger connection must support transactions. Source reads are independent of the Ledger transaction; reconciliation handles source changes, rather than claiming a cross-client atomic snapshot. `/ready` checks connectivity to both and transaction capability on the Ledger side.
 
+Action summaries use existing owned `ledger_evidence` and `ledger_outbox`; no collection or role privilege is added. `ledger init` adds an evidence index on `kind`, `action_id`, and `authorization` for completed-action lookup. Existing role examples continue to cover these reads, writes, and index initialization.
+
 ```dotenv
 MLAB_URI=mongodb+srv://gamification_source_reader:ENCODED_PASSWORD@YOUR_CLUSTER.mongodb.net/makerauth?authSource=admin
 LEDGER_URI=mongodb+srv://gamification_ledger_writer:ENCODED_PASSWORD@YOUR_CLUSTER.mongodb.net/makerauth?authSource=admin
@@ -65,13 +67,21 @@ Quest-inspiration redaction also reads a complete bounded `members` directory th
 | `members`, `slack_users`, `shops`, `tools`, `tool_checkouts`, `volunteer_credits`, `volunteer_tasks`, `volunteer_events`, `earned_memberships`, `groups`, `checkins`, `cards` in the source database | `find` | Identity, review scope, catalog, evidence, membership, read-only queries, and internal arrival resolution |
 | `ledger_participants`, `ledger_relationships`, `ledger_rulesets`, `ledger_catalog`, `ledger_evidence`, `ledger_awards`, `ledger_quests`, `ledger_projects`, `ledger_channels`, `ledger_message_templates`, `ledger_inbox`, `ledger_outbox`, `ledger_context` in the Ledger database | `find`, `insert`, `update` | Reads, upserts, accounting, and leased jobs |
 | `ledger_context` only | `remove` | Reflect deleted Slack messages in cached context |
-| `ledger_participants`, `ledger_inbox`, `ledger_outbox`, `ledger_evidence`, `ledger_awards`, `ledger_context`, `ledger_relationships`, `ledger_quests` only | `createIndex` | The indexes created by `ledger init` and `ledger bootstrap`, including context TTL, review grants, acceptances, quests, and observations |
+| `ledger_participants`, `ledger_inbox`, `ledger_outbox`, `ledger_evidence`, `ledger_awards`, `ledger_context`, `ledger_relationships`, `ledger_quests`, `ledger_catalog` only | `createIndex` | Owned indexes created by initialization/preparation, including context/catalog TTL, review grants, acceptances, quest heads and observations |
 
 Mongo `update` plus `insert` permits upserts; `insert` permits implicit creation of the named ordinary collections. The service does not call `dropCollection`, `dropDatabase`, `dropIndex`, `collMod`, role/user administration, or validation bypass. Its own `ping`/`hello`, transaction management, and TTL processing do not require adding a blanket `readWrite`, `dbAdmin`, or cluster-administration role. The listed index privilege supports the existing initialization commands; an operator who handles initialization separately can remove that action from steady-state users. [Privilege actions](https://www.mongodb.com/docs/manual/reference/privilege-actions/), [collection creation access](https://www.mongodb.com/docs/manual/reference/method/db.createcollection/).
 
 There is no wildcard `ledger_*` resource in the examples: each collection is named. Future collections need an intentional role update. `checkout_approvers` remains a trigger-only topic. `volunteer_events` has bounded query reads; `checkins` and `cards` have internal arrival-only reads and are not exposed to conversation tools. The separate ChangeStream2MQTT service retains its own credentials and change-stream permissions; the Ledger user needs no `changeStream` or oplog access.
 
 Mongo collection roles grant access to whole documents, not individual fields. The source adapter's projection still excludes sensitive fields from application use and AI context; it is not a field-level database authorization boundary.
+
+## Interactive-read preparation
+
+The [optimized read path](QUERY_OPTIMIZATION.md) uses fixed read-only aggregation joins inside each connection's database. Source `$lookup`/`$graphLookup` inputs remain allowlisted existing collections and use their existing `find` grants; no source index, view, write or stream permission is added. Owned quest joins and aggregate counts use existing owned `find` grants. Role-inventory tests include aggregation join inputs and the count/exists/batch helpers, rather than relying only on direct `find` calls.
+
+The only new action/resource is `CREATE_INDEX` on `ledger_catalog`. It supports generation/source-ID and generation/shop compound indexes, challenge/quest display indexes and the `expires_at` TTL index. Quest heads order by `title_key`, `revision`, `_id`; acceptances order by `title_key`, `quest_revision`, `_id`. Other new context/quest/acceptance compound indexes use already granted owned collections. Review/provision the updated role before `ledger prepare-reads --verify`; the application never provisions Atlas roles itself. It backfills owned display/order metadata, including challenge/open-quest title keys, and expiring cache generations without deleting business records or changing consent/accounting. Server TTL requires no extra application `remove` action; explicit application deletion remains limited to `ledger_context`.
+
+No new collection, wildcard privilege or direct change-stream grant is required. The existing bridge's events and five-minute reconciliation schedule display refreshes; source safety/identity/consent checks remain current. The sample environment keeps optimized reads off until preparation and shadow comparison complete. Reverting the read flag does not require removing indexes or metadata.
 
 ## Self-managed `db.createRole()` equivalent
 

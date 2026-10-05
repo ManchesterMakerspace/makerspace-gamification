@@ -332,10 +332,12 @@ class SlackUI:
             except ConsentChanged:
                 data.pop("invitation", None)
                 return {"response_action": "update", "view": views.kudos_form(self.ledger, meta["recipient"], meta["key"], data)}
-            from .kudos import delivery_facts
-            self.ledger.store.atomic(lambda s: enqueue(s, "ledger_outbox", f"ack:{result['_id']}", "message", {
-                "member_id": actor, "type": "delivery", "audience": "member", "exception": True, "peer_kudos": True,
-                "facts": delivery_facts(self.ledger, result, acknowledged=True)}))
+            if not result.get("result_summary"):
+                # Previously accepted actions retain their original delivery flow.
+                from .kudos import delivery_facts
+                self.ledger.store.atomic(lambda s: enqueue(s, "ledger_outbox", f"ack:{result['_id']}", "message", {
+                    "member_id": actor, "type": "delivery", "audience": "member", "exception": True, "peer_kudos": True,
+                    "facts": delivery_facts(self.ledger, result, acknowledged=True)}))
         elif callback == "ranks_preview":
             ranks = []
             for i in range(1, 8):
@@ -394,6 +396,20 @@ class SlackUI:
             self.ledger.require_member(actor)
         else:
             self.ledger.require(actor)
+        if name == "guidance_next_step":
+            participant = self.ledger.require(actor)
+            if value:
+                owner = self.ledger.store.get("ledger_evidence", value)
+                if (not owner or owner.get("kind") != "notification_summary" or owner.get("member_id") != actor or
+                        owner.get("authorization") != "game" or
+                        owner.get("consent_generation") != participant.get("consent_generation", 0)):
+                    raise Denied("Choose your own current game result for guidance.")
+            key = "guidance:" + body.get("trigger_id", action.get("action_ts", ""))
+            self.ledger.store.atomic(lambda s: enqueue(s, "ledger_outbox", key, "guidance", {
+                "member_id": actor, "summary_id": value or None,
+                "slack_id": body["user"]["id"],
+                "consent_generation": participant.get("consent_generation", 0)}))
+            return
         if name in ("stats", "progress", "achievements", "preferences", "browse_quests", "quest_author"):
             fn = {"stats": views.character_sheet, "progress": views.progress_view, "achievements": views.achievements,
                   "preferences": views.preferences, "browse_quests": views.quest_browser, "quest_author": views.quest_author}[name]
@@ -461,6 +477,10 @@ class SlackUI:
             return {"options": [views.option(title, target) for target, title in invitation_candidates(self.ledger, search)]}
         if name == "delegate":
             self.ledger.staff(actor)
+            from .read_options import optimized_reads
+            if optimized_reads():
+                from .admin_access import delegate_candidates
+                return {"options": [views.option(title, member) for member, title in delegate_candidates(self.ledger, actor, search)]}
             return {"options": [views.option(self.ledger.sources.slack_id(p["member_id"]) or "Member", p["member_id"])
                 for p in self.ledger.store.select("ledger_participants", {"opted_in": True}) if p["member_id"] != actor and self.ledger.active(p["member_id"])
                 and self.ledger.sources.good_standing(p["member_id"]) and search in (self.ledger.sources.slack_id(p["member_id"]) or "").casefold()][:100]}

@@ -2,6 +2,7 @@
 from uuid import uuid4
 from .domain import Denied
 from .storage import now, enqueue
+from .rules import amount
 
 
 class Community:
@@ -48,8 +49,9 @@ class Community:
         l.store.atomic(lambda s: s.put("ledger_quests", doc))
         return doc
 
-    def quest(self, actor, quest_id, action, role=None, description=None, member=None):
+    def quest(self, actor, quest_id, action, role=None, description=None, member=None, *, action_id=None):
         l = self.ledger
+        action_id = action_id or "community-quest:" + str(uuid4())
         q = l.store.get("ledger_quests", quest_id)
         if q and q.get("kind") == "ledger_quest":
             from .ledger_quests import LedgerQuests
@@ -94,10 +96,23 @@ class Community:
                         s.put("ledger_evidence", {"_id": key, "kind": "submission", "achievement": "boss", "catalog_id": f"quest:{quest_id}",
                               "member_id": m, "description": contribution["description"], "learners": [], "acknowledged": [],
                               "shop_id": q.get("shop_id"), "status": "approved", "reviewer": contribution["reviewer"], "at": now(), **review_authority})
-                        d._reconcile(m)
+                        account_key = f"account:{m}:challenge:quest:{quest_id}"
+                        prior_account = s.get("ledger_evidence", account_key) or {}
+                        d._reconcile(m, action_id=action_id)
+                        facts = {"verified_milestone": True, "milestone_id": key, "xp_outcome_known": True,
+                                 "quest_title": q["title"]}
+                        account = s.get("ledger_evidence", account_key) or {}
+                        if account.get("revision", 0) != prior_account.get("revision", 0):
+                            award_id = f"{account_key}:{account['revision']}"
+                            award = s.get("ledger_awards", award_id) or {}
+                            if amount(award.get("delta", "0")) > 0:
+                                facts.update(award_id=award_id, xp_change=award["delta"], xp_total=d.participant(m)["xp"])
+                        d.notify(m, "boss", facts, "verified:" + key, action_id=action_id)
             else:
                 raise ValueError("Unknown quest action.")
             s.put("ledger_quests", q)
+            from .result_summaries import finish_action
+            finish_action(d, action_id)
             return q
         return l.store.atomic(run)
 

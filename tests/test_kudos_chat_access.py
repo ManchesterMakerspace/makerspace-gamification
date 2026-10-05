@@ -64,13 +64,15 @@ def test_nonparticipant_kudos_full_form_options_updates_and_receipts(env, select
     for audience in ('recipient', 'shared'):
         w.outbox(claim(s, receipt['_id'] + ':' + audience))
         assert selected in slack.chat_postMessage.call_args.kwargs['text']
-    ack = s.get('ledger_outbox', 'ack:' + receipt['_id'])
-    w.outbox(claim(s, ack['_id']))
-    assert 'Kudos accepted' in slack.chat_postMessage.call_args.kwargs['text']
-    delivery = s.get('ledger_outbox', 'dm:receipt:' + receipt['_id'] + ':shared:delivered')
+    assert s.get('ledger_outbox', 'ack:' + receipt['_id']) is None
+    owner = s.get('ledger_evidence', receipt['summary_id'])
+    flush = next(j for j in s.select('ledger_outbox', {'kind': 'summary_flush'})
+                 if j['payload']['summary_id'] == owner['_id'])
+    w.outbox(claim(s, flush['_id']))
+    delivery = s.get('ledger_outbox', s.get('ledger_evidence', owner['_id'])['snapshot_job_id'])
     assert delivery['payload']['exception']
     w.outbox(claim(s, delivery['_id']))
-    assert 'delivered; DM: delivered; Ledge Chat: delivered' in slack.chat_postMessage.call_args.kwargs['text']
+    assert 'Your kudos reached <@U2> in DM and Ledge Chat. No XP was awarded.' in slack.chat_postMessage.call_args.kwargs['text']
     assert not s.select('ledger_participants')
 
 

@@ -58,16 +58,35 @@ def owned_collection_literals(tree):
     result = set()
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ('get', 'put', 'select', 'delete') and node.args):
+                and node.func.attr in ('get', 'put', 'put_many', 'select', 'delete', 'count', 'exists', 'aggregate') and node.args):
             receiver = node.func.value
-            # Dict.get also accepts similarly named application fields. Owned
-            # reads use the store attribute or the store transaction aliases.
-            if node.func.attr == 'get' and not (
+            # Dict.get/string.count also accept role-like text. Owned reads use
+            # the store attribute or the store transaction aliases.
+            if node.func.attr in ('get', 'count', 'exists', 'aggregate') and not (
                     isinstance(receiver, ast.Name) and receiver.id in ('store', 's', 'tx', 'self')
                     or isinstance(receiver, ast.Attribute) and receiver.attr == 'store'):
                 continue
             result.update(value for value in resolve(node.args[0]) if re.fullmatch(r'ledger_[a-z_]+', value))
     return result
+
+
+def joined_collection_literals(tree):
+    """Count only collection inputs of aggregation joins, never role/output names."""
+    collections = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if not isinstance(key, ast.Constant):
+                continue
+            if key.value == "$unionWith" and isinstance(value, ast.Constant) and isinstance(value.value, str):
+                collections.add(value.value)
+            elif key.value in ("$lookup", "$graphLookup", "$unionWith") and isinstance(value, ast.Dict):
+                name = "coll" if key.value == "$unionWith" else "from"
+                for nested_key, nested_value in zip(value.keys, value.values):
+                    if isinstance(nested_key, ast.Constant) and nested_key.value == name:
+                        collections.update(collection_literals(nested_value))
+    return collections
 
 
 def test_collection_inventory_ignores_role_kind_and_callback_names_but_follows_collection_lists():
@@ -83,15 +102,38 @@ store.get("ledger_quest", "real-collection-with-kind-name")
     assert owned_collection_literals(tree) == {'ledger_quests', 'ledger_new_collection', 'ledger_quest'}
 
 
+def test_inventory_covers_read_helpers_and_nested_join_inputs_only():
+    tree = ast.parse('''
+store.count("ledger_awards")
+store.exists("ledger_catalog")
+store.put_many("ledger_evidence", [])
+text.count("ledger_fake_role")
+labels.exists("ledger_fake_kind")
+store.aggregate("ledger_relationships", [
+    {"$lookup": {"from": "ledger_quests", "as": "ledger_quest_author",
+                  "pipeline": [{"$lookup": {"from": "members", "as": "member"}}]}},
+    {"$graphLookup": {"from": "tools", "as": "ancestors"}},
+    {"$unionWith": {"coll": "ledger_evidence"}}, {"$unionWith": "shops"},
+    {"$lookup": {"pipeline": [{"$documents": [{"from": "not_a_collection"}]}], "as": "rows"}}
+])
+role = {"from": "ledger_quest_author"}
+''')
+    assert owned_collection_literals(tree) == {'ledger_awards', 'ledger_catalog', 'ledger_relationships', 'ledger_evidence'}
+    assert joined_collection_literals(tree) == {'ledger_quests', 'members', 'tools', 'ledger_evidence', 'shops'}
+
+
 def test_role_grants_match_actual_collections_deletes_and_indexes():
     trees = [ast.parse(path.read_text(encoding="utf-8")) for path in (ROOT / "ledger").glob("*.py")]
     collections, sources, deletes, indexed = set(), set(), set(), set()
     for tree in trees:
         collections.update(owned_collection_literals(tree))
+        joins = joined_collection_literals(tree)
+        collections.update(name for name in joins if name.startswith("ledger_"))
+        sources.update(name for name in joins if not name.startswith("ledger_"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
-            if node.func.attr in ("rows", "bounded") and node.args:
+            if node.func.attr in ("rows", "bounded", "by_ids", "_aggregate", "_projected_rows", "catalog_query") and node.args:
                 # Includes the shops/tools conditional dropdown expression.
                 sources.update(collection_literals(node.args[0]))
             if node.func.attr == "delete" and node.args and isinstance(node.args[0], ast.Constant):

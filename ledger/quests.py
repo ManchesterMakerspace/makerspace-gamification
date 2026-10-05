@@ -67,6 +67,10 @@ class Quests:
         return q
 
     def listing(self, member, search=""):
+        from .read_options import optimized_reads
+        if optimized_reads():
+            from .quest_discovery import QuestDiscovery
+            return QuestDiscovery(self.l, member).listing(search)
         rows = []
         for q in self.l.store.select("ledger_quests", {"kind": {"$in": list(REVIEWED_KINDS)}, "status": "published"}):
             if not individual(q):
@@ -107,6 +111,10 @@ class Quests:
         raise ValueError("Choose a published quest title.")
 
     def options(self, member, search=""):
+        from .read_options import optimized_reads
+        if optimized_reads():
+            from .quest_discovery import QuestDiscovery
+            return QuestDiscovery(self.l, member).options(search)
         rows = [("q:" + q["_id"], q["title"]) for q in self.listing(member, search)]
         for prefix, collection, query in [("c", "ledger_catalog", {"kind": "challenge", "active": True}),
                 ("g", "ledger_quests", {"$or": [{"status": "open"},
@@ -203,7 +211,8 @@ class Quests:
                      catalog_id=catalog_id, reviewer=actor, reviewed_at=now(), review_authority=audit, reason=reason)
             s.put("ledger_quests", q)
             if approve:
-                s.put("ledger_catalog", {"_id": "quest-head:" + q["logical_id"], "revision": key})
+                from .quest_discovery import quest_head
+                s.put("ledger_catalog", quest_head(q))
             s.put("ledger_evidence", {"_id": "quest-review:" + key, "kind": "quest_review", "quest": key, "actor": actor, **audit, "at": now(), "reason": reason, "status": q["status"]})
             d.notify(q["creator"], "quest", {"quest_title": q["title"], "summary": "Quest " + q["status"] + ". Publication grants no XP."}, "quest-review:" + key)
             return q
@@ -229,7 +238,8 @@ class Quests:
             q["acceptance_count"] = q.get("acceptance_count", 0) + 1
             s.put("ledger_quests", q)
             doc = {"_id": f"acceptance:{member}:{q['logical_id']}", "kind": "quest_acceptance", "member_id": member,
-                   "quest_revision": key, "logical_id": q["logical_id"], "rank": d.participant(member)["rank"], "reward": q["reward"], "at": now()}
+                   "quest_revision": key, "logical_id": q["logical_id"], "rank": d.participant(member)["rank"], "reward": q["reward"], "at": now(),
+                   "title": q["title"], "title_key": q["title"].casefold()}
             s.put("ledger_relationships", doc)
             return doc
         return self.l.store.atomic(run)
@@ -274,7 +284,8 @@ class Quests:
             return doc
         return self.l.store.atomic(run)
 
-    def verify(self, actor, evidence, approve=True, reason=""):
+    def verify(self, actor, evidence, approve=True, reason="", *, action_id=None):
+        action_id = action_id or "quest-review:" + str(uuid4())
         def run(s):
             d = Ledger(s, self.l.sources)
             doc = s.get("ledger_evidence", evidence)
@@ -291,7 +302,7 @@ class Quests:
             if approve and doc.get("specialized_evidence"):
                 # Existing evidence gates still apply; reconciliation suppresses
                 # the catalog XP for this quest-linked milestone.
-                d._review(actor, doc["specialized_evidence"], True, reason, quest_review=True)
+                d._review(actor, doc["specialized_evidence"], True, reason, quest_review=True, action_id=action_id)
             doc.update(status="approved" if approve else "rejected", reviewer=actor, review_authority=audit, reason=reason, reviewed_at=now())
             s.put("ledger_evidence", doc)
             s.put("ledger_evidence", {"_id": review_id, "kind": "quest_completion_review", "evidence": evidence,
@@ -306,10 +317,14 @@ class Quests:
                     d.touch(q["creator"])
                     q["completion_count"] = q.get("completion_count", 0) + 1
                     s.put("ledger_quests", q)
-                    d.award(doc["member_id"], completion, str(accepted["reward"]), "quest", facts={"quest_title": q["title"], "summary": "Independently verified quest completion."})
-                    d._advance(doc["member_id"])
+                    d.award(doc["member_id"], completion, str(accepted["reward"]), "quest", facts={"quest_title": q["title"], "summary": "Independently verified quest completion."}, action_id=action_id)
+                    d.notify(doc["member_id"], "quest", {"quest_title": q["title"], "summary": "Independently verified quest completion.",
+                             "verified_milestone": True, "milestone_id": completion, "xp_outcome_known": True}, "verified:" + completion, action_id=action_id)
+                    d._advance(doc["member_id"], action_id=action_id)
                     if not generated(q):
                         d.notify(q["creator"], "quest", {"quest_title": q["title"], "summary": "An independent reviewer verified a member's completion."}, completion + ":author")
+            from .result_summaries import finish_action
+            finish_action(d, action_id)
             return doc
         return self.l.store.atomic(run)
 
@@ -349,7 +364,7 @@ class Quests:
                 q.update(status="disabled", disabled_at=now(), disable_reason="Author eligibility or corrected rank lost; reviewed republication required.")
                 self.l.store.put("ledger_quests", q)
 
-    def unlock_notice(self, member):
+    def unlock_notice(self, member, *, action_id=None):
         if not self.l.active(member):
             return
         p = self.l.participant(member)
@@ -357,4 +372,4 @@ class Quests:
         if capability and capability > p.get("quest_capability_notified", 0):
             p["quest_capability_notified"] = capability
             self.l.store.put("ledger_participants", p)
-            self.l.notify(member, "quest", {"summary": f"You can author quests for enabled rank slots 1–{capability}. Use /ledger-quests create. Independent publication review is required."}, f"quest-unlock:{member}:{capability}")
+            self.l.notify(member, "quest", {"summary": f"You can author quests for enabled rank slots 1–{capability}. Use /ledger-quests create. Independent publication review is required."}, f"quest-unlock:{member}:{capability}", action_id=action_id)

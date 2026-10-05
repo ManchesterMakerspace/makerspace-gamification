@@ -18,7 +18,21 @@ def member(n):
     return str(oid(n))
 
 
-def test_kudos_ack_and_success_dm_use_recipient_aware_custom_json_and_sender_history(joined):
+def legacy_evidence(store, evidence):
+    """Simulate actions accepted before summary routing; their receipts still drain."""
+    owner_id = evidence.pop('summary_id', None)
+    evidence.pop('result_summary', None)
+    evidence.pop('action_id', None)
+    store.put('ledger_evidence', evidence)
+    if owner_id:
+        store.delete('ledger_evidence', owner_id)
+        for job in store.select('ledger_outbox'):
+            if job['payload'].get('summary_id') == owner_id:
+                store.delete('ledger_outbox', job['_id'])
+    return evidence
+
+
+def test_legacy_kudos_ack_and_success_dm_use_custom_json_and_sender_history(joined):
     l, s, _, composer, api, slack = joined
     template = default_template('delivery', 'member')
     for index, variation in enumerate(template['variations']):
@@ -26,6 +40,8 @@ def test_kudos_ack_and_success_dm_use_recipient_aware_custom_json_and_sender_his
         variation['user'] = 'State {delivery_status}; recipient {recipient_mention}; DM {dm_status}; public {public_status}; XP {xp_result}.'
     composer.publish(member(10), template, l.admin)
     composer.choose = lambda variants: variants[0]
+    legacy_evidence(s, l.kudos(member(1), member(2), 'PRIVATE_AUTHORED_KUDOS',
+                             key='receipt-prompts', expected_participation=True))
     ui = SlackUI(l, composer)
     ui.submission(form(views.kudos_form(l, member(2), 'receipt-prompts'), {'message': 'PRIVATE_AUTHORED_KUDOS'}), slack)
     api.complete.assert_not_called()  # Interaction never waits for inference.
@@ -69,9 +85,10 @@ def test_kudos_ack_and_success_dm_use_recipient_aware_custom_json_and_sender_his
     ('failed', 'pending', 'pending'), ('failed', 'failed', 'failed'),
     ('cancelled', 'cancelled', 'cancelled'), ('delivered', 'delivered', 'delivered'),
 ])
-def test_public_and_private_receipt_statuses_remain_independent_and_body_private(joined, dm, public, expected):
+def test_legacy_receipt_statuses_remain_independent_and_body_private(joined, dm, public, expected):
     l, s, _, composer, api, slack = joined
     e = l.kudos(member(1), member(2), 'PRIVATE_KUDOS_BODY', key='states', public=True, expected_participation=True)
+    legacy_evidence(s, e)
     e['deliveries'] = {'recipient': {'status': dm}, 'shared': {'status': public}}
     s.put('ledger_evidence', e)
     w = Worker(l, composer, slack)
@@ -93,9 +110,10 @@ def test_public_and_private_receipt_statuses_remain_independent_and_body_private
     assert l.participant(member(2))['xp'] == '17'
 
 
-def test_nonparticipant_sender_receipts_are_varied_without_personal_progress(env):
+def test_legacy_nonparticipant_receipts_are_varied_without_personal_progress(env):
     l, s, _, composer, api, slack = env
     e = l.kudos(member(1), member(2), 'Thanks', key='outside', expected_participation=False)
+    legacy_evidence(s, e)
     w = Worker(l, composer, slack)
     w.outbox(claim(s, 'kudos:outside:recipient'))
     key = 'dm:receipt:kudos:outside:recipient:delivered'

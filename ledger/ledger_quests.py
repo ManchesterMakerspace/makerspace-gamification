@@ -68,7 +68,8 @@ class LedgerQuests:
                        "reason": reason, "status": reviewed["status"]}
             s.put("ledger_evidence", receipt)
             if approve:
-                s.put("ledger_catalog", {"_id": "quest-head:" + q["logical_id"], "revision": reviewed["_id"]})
+                from .quest_discovery import quest_head
+                s.put("ledger_catalog", quest_head(reviewed))
                 if cooperative(reviewed):
                     project_id = "cooperative:" + q["logical_id"]
                     if s.get("ledger_relationships", project_id):
@@ -134,7 +135,8 @@ class LedgerQuests:
         return {m: c for m, c in state["contributions"].items()
                 if c["status"] == "verified" and self.l.active(m) and Quests(self.l).prerequisites(q, m)}
 
-    def finalize(self, actor, key, description):
+    def finalize(self, actor, key, description, *, action_id=None):
+        action_id = action_id or "group-completion:" + str(uuid4())
         def run(s):
             d = Ledger(s, self.l.sources)
             q = s.get("ledger_quests", key)
@@ -165,8 +167,10 @@ class LedgerQuests:
                         "quest_revision": key, "logical_id": q["logical_id"], "description": contribution["description"],
                         "reviewer": actor, "review_authority": audit, "activity_at": contribution.get("submitted_at"), "at": now()})
                     d.award(member, completion, str(contribution["reward"]), "quest", facts={
-                        "quest_title": q["title"], "summary": "Independently verified shared quest completion."})
-                    d._advance(member)
+                        "quest_title": q["title"], "summary": "Independently verified shared quest completion."}, action_id=action_id)
+                    d.notify(member, "quest", {"quest_title": q["title"], "summary": "Independently verified shared quest completion.",
+                             "verified_milestone": True, "milestone_id": completion, "xp_outcome_known": True}, "verified:" + completion, action_id=action_id)
+                    d._advance(member, action_id=action_id)
             for member, contribution in state["contributions"].items():
                 if member not in eligible:
                     contribution.update(status="closed", reason="Project completed; contribution was not verified and currently eligible. No XP awarded.")
@@ -180,5 +184,7 @@ class LedgerQuests:
             s.put("ledger_evidence", {"_id": "group-complete:" + q["logical_id"], "kind": "quest_group_completion",
                 "quest_revision": key, "logical_id": q["logical_id"], "description": description,
                 "actor": actor, **authority, "members": sorted(eligible), "at": now()})
+            from .result_summaries import finish_action
+            finish_action(d, action_id)
             return state
         return self.l.store.atomic(run)

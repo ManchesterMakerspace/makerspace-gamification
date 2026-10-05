@@ -1,6 +1,6 @@
 # GB10 inference and Cloudflare Tunnel
 
-The supplied [compose.yaml](../compose.yaml) runs seven services: web ingress, four independent workers, vLLM, and cloudflared. Existing Mongo and MQTT remain external dependencies. All commands below run from the repository root on the deployment host.
+The supplied [compose.yaml](../compose.yaml) runs nine services: web ingress, six independent workers, vLLM, and cloudflared. Results and interactive workers isolate consolidated DMs and conversations/guidance from routine delivery. Existing Mongo and MQTT remain external dependencies. All commands below run from the repository root on the deployment host.
 
 ## Inference host and configuration
 
@@ -61,7 +61,7 @@ docker compose run --rm --no-deps ledger-accounting ledger dry-run
 docker compose up -d ledger-web cloudflared
 # Complete Slack request-URL verification, then create/bind the private channels.
 docker compose run --rm --no-deps ledger-accounting ledger bootstrap
-docker compose up -d ledger-accounting ledger-delivery ledger-channels ledger-engagement
+docker compose up -d ledger-accounting ledger-delivery ledger-channels ledger-engagement ledger-results ledger-interactive
 docker compose ps
 curl --fail "http://$(docker compose port ledger-web 3000)/ready"
 ```
@@ -76,13 +76,13 @@ api = ChatAPI(os.environ['LEDGER_LLM_BASE_URL'], os.environ['LEDGER_LLM_MODEL'],
 print(api.complete([
     {'role': 'system', 'content': 'You are The Ledger. Reply in one short sentence.'},
     {'role': 'user', 'content': 'Welcome a maker who just completed their first build.'},
-], max_tokens=128))
+], max_tokens=128, deadline=10))
 PY
 ```
 
 The adapter sends `chat_template_kwargs: {"enable_thinking": false}` with every request, matching the model's supported chat template. Server defaults also disable thinking. `--generation-config vllm` avoids model-repository sampling defaults overriding the service configuration; per-template temperature/token limits still apply. The [vLLM serving guide](https://docs.vllm.ai/en/latest/serving/online_serving/) and [reasoning guide](https://docs.vllm.ai/en/latest/features/reasoning_outputs/) describe these API options.
 
-Finally exercise a DM, all commands, modal dropdowns/submissions, App Home, a public kudos, private-channel invitations/removals, and a file-backed skill tree in Slack. Stop only `ledger-ai` briefly during the staff pilot and confirm canned messages, unchanged accounting, and working opt-out cleanup, then restart it. A failed completion gets one attempt within the existing fifteen-second deadline; already composed fallback messages are reused on delivery retries.
+Finally exercise a DM, all commands, modal dropdowns/submissions, App Home, a public kudos, private-channel invitations/removals, and a file-backed skill tree in Slack. Pilot the 60-second pending receipt, later edits, requested guidance, and rank artwork in result threads. Stop only `ledger-ai` briefly during the staff pilot and confirm factual/canned messages, unchanged accounting, and working opt-out cleanup, then restart it. Short result/guidance profiles get one ten-second attempt; other narration retains its existing bounds. Saved text is reused on delivery retries. See [result rollout](RESULT_SUMMARIES.md).
 
 Local automated checks validate the API contract, signed callback dispatch, manifest coverage, and Compose structure. A successful GB10 model load, authenticated Cloudflare route, and real Slack workspace installation must be verified on the deployment host; they are not simulated by those tests.
 
