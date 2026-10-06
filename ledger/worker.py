@@ -756,6 +756,32 @@ class Worker:
         self.store.atomic(write)
         return result
 
+    def _rank_transition_access(self, job, uid, store=None):
+        store = store or self.store
+        payload = job["payload"]
+        transition = payload["rank_transition"]
+        member_id = payload["member_id"]
+        new_slot = transition["new_slot"]
+        channel_key = payload.get("channel_key")
+        ledger = Ledger(store, self.ledger.sources)
+        participant = ledger.participant(member_id)
+        channel = store.get("ledger_channels", channel_key) if channel_key else None
+        membership = store.get("ledger_channels", f"membership:{member_id}:{channel_key}") if channel_key else None
+        if (not participant or not ledger.active(member_id)
+                or participant.get("consent_generation", 0) != transition["consent_generation"]
+                or participant.get("revision", 0) < payload.get("revision", 0)
+                or participant.get("rank", 0) < new_slot
+                or self.ledger.sources.slack_id(member_id) != uid
+                or channel_key != f"rank:{new_slot}"
+                or not channel or channel.get("_id") != channel_key
+                or channel.get("kind") != "channel" or channel.get("slot") != new_slot
+                or channel.get("channel_id") != payload.get("channel")
+                or not membership or membership.get("member_id") != member_id
+                or membership.get("channel_key") != channel_key
+                or membership.get("voluntary_leave") or not membership.get("desired")):
+            raise Denied("Rank transition is no longer authorized.")
+        return participant, membership, channel
+
     def deliver_rank_transition(self, job):
         payload = job["payload"]
         transition = payload["rank_transition"]
@@ -774,6 +800,7 @@ class Worker:
         uid = self.valid_identity(member_id)
         if not uid:
             raise Denied("Slack identity inactive.")
+        participant, membership, channel = self._rank_transition_access(job, uid)
 
         prior_channel = self.store.get("ledger_channels", f"rank:{old_slot}") if old_slot > 0 else None
         if old_slot > 0 and not prior_channel:
@@ -808,29 +835,33 @@ class Worker:
                 store.put("ledger_outbox", saved)
             self.store.atomic(save_prior)
 
-        participant = self.ledger.participant(member_id)
-        if (not self.ledger.active(member_id) or not participant
-                or participant.get("consent_generation", 0) != generation):
-            raise Denied("Rank transition belongs to an earlier participation.")
+        uid_now = self.valid_identity(member_id)
+        if not uid_now or uid_now != uid:
+            raise Denied("Rank transition belongs to an earlier Slack identity.")
+        participant, membership, channel = self._rank_transition_access(job, uid)
         self.assert_live_job(job)
         try:
             self.slack.conversations_invite(channel=channel["channel_id"], users=uid)
         except SlackApiError as exc:
             if exc.response.get("error") not in ("already_in_channel", "already_in_group"):
                 raise
-        participant = self.ledger.participant(member_id)
-        if (not self.ledger.active(member_id) or not participant
-                or participant.get("consent_generation", 0) != generation):
+        try:
+            if self.valid_identity(member_id) != uid:
+                raise Denied("Rank transition belongs to an earlier Slack identity.")
+            def commit_transition(s):
+                participant, new_membership, _ = self._rank_transition_access(job, uid, s)
+                # Serialize the access check against a concurrent rank correction.
+                s.put("ledger_participants", participant)
+                new_membership.update(present=True, desired=True)
+                s.put("ledger_channels", new_membership)
+            self.store.atomic(commit_transition)
+        except Denied:
             try:
                 self.slack.conversations_kick(channel=channel["channel_id"], user=uid)
             except SlackApiError as exc:
                 if exc.response.get("error") not in ("not_in_channel", "user_not_found"):
                     raise
-            raise Denied("Rank transition belongs to an earlier participation.")
-        new_membership = self.store.get("ledger_channels", membership["_id"])
-        if new_membership:
-            new_membership.update(present=True, desired=True)
-            self.store.atomic(lambda s: s.put("ledger_channels", new_membership))
+            raise
 
         if prior_channel:
             self.assert_live_job(job)

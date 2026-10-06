@@ -137,6 +137,7 @@ def test_rank_transition_announces_privately_to_old_and_new_rank_in_order(joined
     job['payload'].update(channel='CRANK2', channel_key='rank:2', revision=participant['revision'],
         rank_transition={'old_slot': 1, 'new_slot': 2,
                          'consent_generation': participant['consent_generation']})
+    s.put('ledger_outbox', job)
 
     w.outbox(claim(s, job['_id']))
 
@@ -148,6 +149,77 @@ def test_rank_transition_announces_privately_to_old_and_new_rank_in_order(joined
     assert messages[0]['channel'] == 'CRANK1'
     assert messages[-1]['channel'] == 'CRANK2'
     assert 'Novice' not in messages[0]['text']
+
+
+@pytest.mark.parametrize('change', ['rank_correction', 'voluntary_departure'])
+def test_rank_transition_revalidates_access_after_prior_channel_post(joined, change):
+    l, s, _, _, _, slack = joined
+    w = worker(joined)
+    member_id = str(oid(1))
+    participant = l.participant(member_id)
+    participant.update(rank=2, revision=participant['revision'] + 1)
+    s.put('ledger_participants', participant)
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:1', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:1', 'desired': True, 'present': True})
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:2', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:2', 'desired': True, 'present': False})
+    job = next(j for j in s.select('ledger_outbox', {'kind': 'invite'}) if j['payload']['member_id'] == member_id)
+    job['payload'].update(channel='CRANK2', channel_key='rank:2', revision=participant['revision'],
+        rank_transition={'old_slot': 1, 'new_slot': 2,
+                         'consent_generation': participant['consent_generation']})
+    s.put('ledger_outbox', job)
+
+    def mutate_during_post(**kwargs):
+        assert kwargs['channel'] == 'CRANK1'
+        if change == 'rank_correction':
+            l.correct_rank(str(oid(10)), member_id, 1, 'Correction during transition')
+        else:
+            target_membership = s.get('ledger_channels', f'membership:{member_id}:rank:2')
+            target_membership.update(voluntary_leave=True, desired=False)
+            s.put('ledger_channels', target_membership)
+        return {'ts': '123.456'}
+
+    slack.chat_postMessage.side_effect = mutate_during_post
+    with pytest.raises(Denied):
+        w.outbox(claim(s, job['_id']))
+
+    slack.conversations_invite.assert_not_called()
+    slack.conversations_kick.assert_not_called()
+    target_membership = s.get('ledger_channels', f'membership:{member_id}:rank:2')
+    if change == 'rank_correction':
+        assert l.participant(member_id)['rank'] == 1
+        assert not target_membership['present']
+    else:
+        assert not target_membership['desired']
+        assert target_membership['voluntary_leave']
+
+
+def test_rank_transition_compensates_if_rank_changes_during_invite(joined):
+    l, s, _, _, _, slack = joined
+    w = worker(joined)
+    member_id = str(oid(1))
+    participant = l.participant(member_id)
+    participant.update(rank=2, revision=participant['revision'] + 1)
+    s.put('ledger_participants', participant)
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:1', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:1', 'desired': True, 'present': True})
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:2', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:2', 'desired': True, 'present': False})
+    job = next(j for j in s.select('ledger_outbox', {'kind': 'invite'}) if j['payload']['member_id'] == member_id)
+    job['payload'].update(channel='CRANK2', channel_key='rank:2', revision=participant['revision'],
+        rank_transition={'old_slot': 1, 'new_slot': 2,
+                         'consent_generation': participant['consent_generation']})
+    s.put('ledger_outbox', job)
+    slack.conversations_invite.side_effect = lambda **kwargs: l.correct_rank(
+        str(oid(10)), member_id, 1, 'Correction during invite')
+
+    with pytest.raises(Denied):
+        w.outbox(claim(s, job['_id']))
+
+    slack.conversations_invite.assert_called_once_with(channel='CRANK2', users='U1')
+    slack.conversations_kick.assert_called_once_with(channel='CRANK2', user='U1')
+    assert l.participant(member_id)['rank'] == 1
+    assert not s.get('ledger_channels', f'membership:{member_id}:rank:2')['present']
 
 
 def test_voluntary_departure_and_lower_rank_reinvite(joined):
