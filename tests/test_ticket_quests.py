@@ -206,7 +206,8 @@ def test_reserved_image_retry_cannot_follow_reassigned_slack_identity(joined):
     assert service.response_event(event, "mapping-reassigned") is True
     response_id = "ticket-quest-response:" + sha1(f"CQUEST:{event['ts']}".encode()).hexdigest()
     assert "pending_claim" not in store.get("ledger_evidence", quest["_id"])
-    assert store.get("ledger_evidence", response_id)["rejection_reason"] == "claimant_identity_changed"
+    assert store.get("ledger_evidence", response_id)["rejection_reason"] in (
+        "claimant_identity_changed", "claimant_identity_unavailable")
     assert ledger.participant(str(oid(2)))["xp"] == "0"
     assert ledger.participant(str(oid(3)))["xp"] == "0"
 

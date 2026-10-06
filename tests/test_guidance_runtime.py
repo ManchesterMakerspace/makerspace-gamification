@@ -4,6 +4,7 @@ import hashlib
 import pytest
 import yaml
 from pathlib import Path
+from slack_sdk.errors import SlackApiError
 
 from conftest import oid
 from ledger.cli import outbox_filters
