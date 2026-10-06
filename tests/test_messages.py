@@ -7,7 +7,12 @@ from unittest.mock import patch
 import pytest
 
 from conftest import oid
-from ledger.messages import ChatAPI, Composer, default_template
+from ledger.messages import ChatAPI, Composer, button, default_template
+
+
+def test_button_omits_empty_optional_value_but_keeps_nonempty_value():
+    assert "value" not in button("Explore", "browse_quests", "")
+    assert button("Review", "review", "quest-123")["value"] == "quest-123"
 
 
 @contextmanager
