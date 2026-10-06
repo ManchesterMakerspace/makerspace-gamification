@@ -222,6 +222,75 @@ def test_rank_transition_compensates_if_rank_changes_during_invite(joined):
     assert not s.get('ledger_channels', f'membership:{member_id}:rank:2')['present']
 
 
+def test_rank_transition_compensates_if_identity_changes_during_invite(joined):
+    l, s, source, _, _, slack = joined
+    w = worker(joined)
+    member_id = str(oid(1))
+    participant = l.participant(member_id)
+    participant.update(rank=2, revision=participant['revision'] + 1)
+    s.put('ledger_participants', participant)
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:1', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:1', 'desired': True, 'present': True})
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:2', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:2', 'desired': True, 'present': False})
+    job = next(j for j in s.select('ledger_outbox', {'kind': 'invite'}) if j['payload']['member_id'] == member_id)
+    job['payload'].update(channel='CRANK2', channel_key='rank:2', revision=participant['revision'],
+        rank_transition={'old_slot': 1, 'new_slot': 2,
+                         'consent_generation': participant['consent_generation']})
+    s.put('ledger_outbox', job)
+
+    def reassign_during_invite(**kwargs):
+        source.data['slack_users'][0]['slack_id'], source.data['slack_users'][1]['slack_id'] = (
+            source.data['slack_users'][1]['slack_id'], source.data['slack_users'][0]['slack_id'])
+        return {'ok': True}
+
+    slack.conversations_invite.side_effect = reassign_during_invite
+    with pytest.raises(Denied):
+        w.outbox(claim(s, job['_id']))
+
+    slack.conversations_invite.assert_called_once_with(channel='CRANK2', users='U1')
+    slack.conversations_kick.assert_called_once_with(channel='CRANK2', user='U1')
+    assert not s.get('ledger_channels', f'membership:{member_id}:rank:2')['present']
+
+
+def test_rank_transition_re_resolves_identity_immediately_before_invite(joined):
+    l, s, source, _, _, slack = joined
+    w = worker(joined)
+    member_id = str(oid(1))
+    participant = l.participant(member_id)
+    participant.update(rank=2, revision=participant['revision'] + 1)
+    s.put('ledger_participants', participant)
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:1', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:1', 'desired': True, 'present': True})
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:2', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:2', 'desired': True, 'present': False})
+    job = next(j for j in s.select('ledger_outbox', {'kind': 'invite'}) if j['payload']['member_id'] == member_id)
+    job['payload'].update(channel='CRANK2', channel_key='rank:2', revision=participant['revision'],
+        rank_transition={'old_slot': 1, 'new_slot': 2,
+                         'consent_generation': participant['consent_generation']})
+    s.put('ledger_outbox', job)
+    original_valid_identity = w.valid_identity
+    identity_checks = 0
+
+    def reassign_on_final_identity_check(target_member):
+        nonlocal identity_checks
+        identity_checks += 1
+        if identity_checks == 3:
+            # Simulate the source mapping changing after prior-channel delivery,
+            # at the final authorization boundary before Slack's invite call.
+            source.data['slack_users'][0]['slack_id'], source.data['slack_users'][1]['slack_id'] = (
+                source.data['slack_users'][1]['slack_id'], source.data['slack_users'][0]['slack_id'])
+        return original_valid_identity(target_member)
+
+    w.valid_identity = reassign_on_final_identity_check
+    with pytest.raises(Denied):
+        w.outbox(claim(s, job['_id']))
+
+    slack.conversations_invite.assert_not_called()
+    slack.conversations_kick.assert_not_called()
+    assert not s.get('ledger_channels', f'membership:{member_id}:rank:2')['present']
+
+
 def test_voluntary_departure_and_lower_rank_reinvite(joined):
     l, s, *_ = joined
     w = worker(joined)
@@ -243,14 +312,25 @@ def test_voluntary_departure_and_lower_rank_reinvite(joined):
 def test_only_major_automatic_posts_coalesce_and_historical_posts_suppressed(joined):
     l, s, *_ = joined
     m = str(oid(1))
-    l.tx('major', m, 'challenge', {'challenge': 'small'}, 'small')
-    l.tx('major', m, 'rank_up', {'rank': 'Novice'}, 'rank')
     l.tx('major', m, 'shop_complete', {'shop': 'Wood'}, 'wood')
+    l.tx('major', m, 'rank_up', {'rank': 'Novice'}, 'rank')
+    l.tx('major', m, 'boss', {}, 'boss')
     l.tx('major', m, 'boss', {}, 'old', historical=True)
     shared = [j for j in s.select('ledger_outbox') if j['payload'].get('audience') == 'shared']
     assert len(shared) == 1 and len(shared[0]['payload']['facts']['achievements']) == 2
+    assert {fact['type'] for fact in shared[0]['payload']['facts']['achievements']} == {'boss', 'shop_complete'}
     assert shared[0]['available_at'] > now() + timedelta(seconds=55)
-    assert len(s.select('ledger_outbox', {'kind': 'mqtt'})) == 2
+    assert len(s.select('ledger_outbox', {'kind': 'mqtt'})) == 3
+
+
+def test_rank_up_is_not_added_to_existing_shared_announcement(joined):
+    l, s, *_ = joined
+    m = str(oid(1))
+    l.tx('major', m, 'shop_complete', {'shop': 'Wood'}, 'wood')
+    l.tx('major', m, 'rank_up', {'rank': 'Novice'}, 'rank')
+    shared = [j for j in s.select('ledger_outbox') if j['payload'].get('audience') == 'shared']
+    assert len(shared) == 1
+    assert [fact['type'] for fact in shared[0]['payload']['facts']['achievements']] == ['shop_complete']
 
 
 def test_context_edits_deletes_and_thread_authorization(joined):

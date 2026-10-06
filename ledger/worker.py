@@ -840,13 +840,16 @@ class Worker:
             raise Denied("Rank transition belongs to an earlier Slack identity.")
         participant, membership, channel = self._rank_transition_access(job, uid)
         self.assert_live_job(job)
+        invite_uid = self.valid_identity(member_id)
+        if not invite_uid or invite_uid != uid:
+            raise Denied("Rank transition belongs to an earlier Slack identity.")
         try:
-            self.slack.conversations_invite(channel=channel["channel_id"], users=uid)
+            self.slack.conversations_invite(channel=channel["channel_id"], users=invite_uid)
         except SlackApiError as exc:
             if exc.response.get("error") not in ("already_in_channel", "already_in_group"):
                 raise
         try:
-            if self.valid_identity(member_id) != uid:
+            if self.valid_identity(member_id) != invite_uid:
                 raise Denied("Rank transition belongs to an earlier Slack identity.")
             def commit_transition(s):
                 participant, new_membership, _ = self._rank_transition_access(job, uid, s)
@@ -857,7 +860,7 @@ class Worker:
             self.store.atomic(commit_transition)
         except Denied:
             try:
-                self.slack.conversations_kick(channel=channel["channel_id"], user=uid)
+                self.slack.conversations_kick(channel=channel["channel_id"], user=invite_uid)
             except SlackApiError as exc:
                 if exc.response.get("error") not in ("not_in_channel", "user_not_found"):
                     raise

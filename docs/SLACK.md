@@ -34,7 +34,7 @@ All modals, buttons, checkboxes, and external shop/tool/member dropdowns use the
 
 `/ledger-skills` hashes the exact accessible text equivalent and caches the generated PNG per member in `ledger_files`, along with the text checksum and cache timestamp. A later request reuses the Slack file through a Block Kit `slack_file` image when the text is unchanged and Slack still recognizes the file; changed text or a missing file triggers a new render and upload. Rank icons use the same collection and are checked before display; a permanently missing Slack file is evicted and replaced from the bundled PNG. Slack file retention or manual deletion therefore causes a fresh upload on the next request.
 
-On promotion, the prior-rank channel receives a short ascent message that does not name or imply the next rank. The bot invites the member to the new-rank channel, then removes them from the prior-rank channel and posts the welcome after the invite succeeds. The shipped `rank_up.json` shared variations generate both messages from a generic stage summary and the member's name; the next-rank label is not passed into those generations.
+On promotion, no rank-up announcement is sent to shared Ledge Chat. The prior-rank channel receives a short ascent message that does not name or imply the next rank. The bot invites the member to the new-rank channel, then removes them from the prior-rank channel and posts the welcome after the invite succeeds. The shipped `rank_up.json` shared-audience variations generate these private channel messages from a generic stage summary and the member's name; the next-rank label is not passed into those generations.
 
 ## Saved opt-in and chat replies
 

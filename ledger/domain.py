@@ -252,15 +252,18 @@ class Ledger:
             return
         facts = {**facts, "type": kind}
         summary_id = self.notify(member_id, kind, facts, key, action_id=action_id)
-        pending = [j for j in self.store.select("ledger_outbox", {"status": "pending"})
-                   if j["kind"] == "message" and j["payload"].get("coalesce") == member_id]
-        if pending:
-            job = pending[0]
-            job["payload"]["facts"]["achievements"].append(facts)
-            self.store.put("ledger_outbox", job)
-        else:
-            enqueue(self.store, "ledger_outbox", f"shared:{key}", "message", {"member_id": member_id,
-                "type": kind, "audience": "shared", "coalesce": member_id, "facts": {"achievements": [facts]}}, delay=60)
+        # Rank transitions are announced only in the prior/new private rank
+        # channels. The legacy shared renderer prepends the current rank.
+        if kind != "rank_up":
+            pending = [j for j in self.store.select("ledger_outbox", {"status": "pending"})
+                       if j["kind"] == "message" and j["payload"].get("coalesce") == member_id]
+            if pending:
+                job = pending[0]
+                job["payload"]["facts"]["achievements"].append(facts)
+                self.store.put("ledger_outbox", job)
+            else:
+                enqueue(self.store, "ledger_outbox", f"shared:{key}", "message", {"member_id": member_id,
+                    "type": kind, "audience": "shared", "coalesce": member_id, "facts": {"achievements": [facts]}}, delay=60)
         enqueue(self.store, "ledger_outbox", f"mqtt:{key}", "mqtt", {"member_id": member_id,
                 "event_id": key, "type": kind, "achievement": facts, "ruleset": self.participant(member_id)["ruleset"], "occurred_at": now().isoformat()})
         return summary_id
