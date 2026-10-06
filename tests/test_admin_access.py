@@ -183,7 +183,7 @@ def test_modal_invitation_keeps_sender_private_and_does_not_enroll(admins, sende
     assert sent['channel'] == 'DU3' and expected in sent['text'] and 'Come make something!' in sent['text']
     if sender:
         assert 'Maker10' not in json.dumps(sent) and 'U10' not in json.dumps(sent) and member(10) not in json.dumps(sent)
-    assert sent['blocks'][-1]['elements'][0]['value'] == ''
+    assert 'value' not in sent['blocks'][-1]['elements'][0]
     assert not l.participant(member(3))
     api.complete.assert_not_called()
 

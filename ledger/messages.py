@@ -490,4 +490,7 @@ def escape(text):
 
 
 def button(label, action, value):
-    return {"type": "button", "text": {"type": "plain_text", "text": label}, "action_id": action, "value": value}
+    element = {"type": "button", "text": {"type": "plain_text", "text": label}, "action_id": action}
+    if value not in (None, ""):
+        element["value"] = value
+    return element

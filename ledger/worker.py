@@ -59,6 +59,7 @@ class Worker:
             slack_error = exc.response.get("error") if isinstance(exc, SlackApiError) else None
             # Only known protocol codes belong in diagnostics, never arbitrary API text.
             safe_slack_errors = {"invalid_auth", "not_authed", "token_revoked", "account_inactive", "missing_scope",
+                                 "invalid_blocks",
                                  "channel_not_found", "not_in_channel", "user_not_found", "ratelimited", "no_permission"}
             log.warning("job %s failed: %s code=%s slack_error=%s", job["_id"], type(exc).__name__,
                         code if isinstance(code, int) else "none", slack_error if isinstance(slack_error, str) and slack_error in safe_slack_errors else "none")
@@ -834,10 +835,14 @@ class Worker:
             membership["present"] = False
             ledger = Ledger(store, self.ledger.sources)
             participant = ledger.participant(member_id)
-            if (not participant or not ledger.active(member_id)
-                    or participant.get("consent_generation", 0) != transition["consent_generation"]
-                    or participant.get("rank", 0) != transition["new_slot"]
-                    or membership.get("voluntary_leave")):
+            channel_record = store.get("ledger_channels", payload["channel_key"]) or {}
+            still_authorized = bool(participant and ledger.active(member_id)
+                and participant.get("rank", 0) >= transition["new_slot"]
+                and payload["channel_key"] == f"rank:{transition['new_slot']}"
+                and channel_record.get("channel_id") == channel
+                and channel_record.get("slot") == transition["new_slot"]
+                and membership.get("desired") and not membership.get("voluntary_leave"))
+            if not still_authorized:
                 membership["desired"] = False
             store.put("ledger_channels", membership)
         self.store.atomic(clear_membership)
@@ -868,8 +873,9 @@ class Worker:
         participant = self.ledger.participant(member_id)
         membership = self.store.get("ledger_channels", f"membership:{member_id}:{channel_key}") or {}
         channel = self.store.get("ledger_channels", channel_key) or {}
+        # Check present-day access, which can be reauthorized after a rejoin
+        # under a newer consent generation than this saved transition.
         return bool(participant and self.ledger.active(member_id)
-            and participant.get("consent_generation", 0) == transition["consent_generation"]
             and participant.get("rank", 0) >= transition["new_slot"]
             and channel_key == f"rank:{transition['new_slot']}"
             and channel.get("channel_id") == payload.get("channel")

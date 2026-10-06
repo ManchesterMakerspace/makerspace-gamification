@@ -222,7 +222,7 @@ def test_rank_transition_retry_compensates_a_committed_invite(joined, stale_caus
         assert not membership['desired']
 
 
-def test_rank_transition_preserves_invite_if_access_is_restored_before_compensation(joined):
+def test_rank_transition_preserves_invite_if_access_is_restored_under_new_consent(joined):
     l, s, _, _, _, slack = joined
     w = worker(joined)
     member_id = str(oid(1))
@@ -244,7 +244,8 @@ def test_rank_transition_preserves_invite_if_access_is_restored_before_compensat
 
     def restore_access_before_kick(transition_job, uid):
         latest = l.participant(member_id)
-        latest.update(rank=2, revision=latest['revision'] + 1, rank_hold=False)
+        latest.update(rank=2, revision=latest['revision'] + 1,
+            consent_generation=latest['consent_generation'] + 1, rank_hold=False)
         s.put('ledger_participants', latest)
         membership = s.get('ledger_channels', f'membership:{member_id}:rank:2')
         membership.update(present=True, desired=True, voluntary_leave=False)
