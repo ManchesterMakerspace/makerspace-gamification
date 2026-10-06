@@ -10,6 +10,7 @@ from PIL import Image
 from slack_sdk.errors import SlackApiError
 
 from conftest import oid
+from ledger.review_notifications import ReviewDeliveryBusy
 from ledger.storage import now
 from ledger.ticket_quests import TicketQuests, canonical_id, config, sanitize_jpeg, ticket_key, validate_config
 from ledger.worker import Worker
@@ -133,12 +134,14 @@ def test_transient_image_check_retries_before_awarding_image_xp(joined):
     ledger.join(str(oid(3)))
     later = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
         "user": "U3", "ts": "903.102", "text": "I checked the tool and confirmed the issue."}
-    assert service.response_event(later, "later-text-reply") is True
+    with pytest.raises(ReviewDeliveryBusy):
+        service.response_event(later, "later-text-reply")
     assert ledger.participant(str(oid(3)))["xp"] == "0"
 
     with patch.object(TicketQuests, "_download_jpeg", return_value=b"sanitized-jpeg"):
         assert service.response_event(event, "transient-image-event") is True
     assert ledger.participant(str(oid(2)))["xp"] == "100"
+    assert service.response_event(later, "later-text-reply") is True
     assert ledger.participant(str(oid(3)))["xp"] == "0"
 
 
@@ -163,6 +166,14 @@ def test_decompression_bomb_rejects_claim_releases_reservation_and_narrates(join
     unsafe = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
         "user": "U2", "ts": "903.250", "text": "I checked the belt and confirmed the issue.",
         "files": [{"id": "huge-jpeg", "mimetype": "image/jpeg"}]}
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=requests.ConnectionError("retry")):
+        with pytest.raises(requests.RequestException):
+            service.response_event(unsafe, "decompression-bomb")
+    ledger.join(str(oid(3)))
+    later = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U3", "ts": "903.251", "text": "I checked the motor and confirmed the issue."}
+    with pytest.raises(ReviewDeliveryBusy):
+        service.response_event(later, "after-bomb")
     with patch.object(TicketQuests, "_download_jpeg", side_effect=Image.DecompressionBombError("too many pixels")):
         assert service.response_event(unsafe, "decompression-bomb") is True
 
@@ -179,10 +190,8 @@ def test_decompression_bomb_rejects_claim_releases_reservation_and_narrates(join
 
     outbox = store.get("ledger_outbox", rejected["_id"])
     assert outbox["payload"]["winner"] is False
-    ledger.join(str(oid(3)))
-    text_claim = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
-        "user": "U3", "ts": "903.251", "text": "I checked the motor and confirmed the issue."}
-    assert service.response_event(text_claim, "after-bomb") is True
+    assert not store.select("ledger_evidence", {"kind": "broken_ticket_quest_response", "slack_id": "U3"})
+    assert service.response_event(later, "after-bomb") is True
     assert store.get("ledger_evidence", quest["_id"])["winner_member_id"] == str(oid(3))
     assert ledger.participant(str(oid(3)))["xp"] == "66"
 
@@ -197,6 +206,33 @@ def test_decompression_bomb_rejects_claim_releases_reservation_and_narrates(join
     facts = worker.persist_composition.call_args.args[3]
     assert "snarky" in facts["summary"] and "Ledger" in facts["summary"]
     assert "too large" in slack.chat_postMessage.call_args.kwargs["text"]
+
+
+def test_reserved_jpeg_retry_defers_while_paused_then_resumes(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    event = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.260", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "F1", "mimetype": "image/jpeg"}]}
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=requests.Timeout("retry")):
+        with pytest.raises(requests.RequestException):
+            service.response_event(event, "pause-jpeg-retry", attempts=1)
+    pending_before = store.get("ledger_evidence", quest["_id"])["pending_claim"]
+
+    store.put("ledger_catalog", {"_id": "control", "paused": True})
+    with patch.object(TicketQuests, "_download_jpeg") as download:
+        with pytest.raises(ReviewDeliveryBusy):
+            service.response_event(event, "pause-jpeg-retry", attempts=2)
+        download.assert_not_called()
+    assert store.get("ledger_evidence", quest["_id"])["pending_claim"] == pending_before
+    assert not store.select("ledger_evidence", {"kind": "broken_ticket_quest_response"})
+
+    store.put("ledger_catalog", {"_id": "control", "paused": False})
+    with patch.object(TicketQuests, "_download_jpeg", return_value=b"sanitized"):
+        assert service.response_event(event, "pause-jpeg-retry", attempts=2) is True
+    assert ledger.participant(str(oid(2)))["xp"] == "100"
+    assert not store.get("ledger_evidence", quest["_id"]).get("pending_claim")
 
 
 def test_deleted_or_forbidden_image_errors_are_permanent_but_ratelimits_retry():

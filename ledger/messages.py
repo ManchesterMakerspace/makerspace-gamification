@@ -205,6 +205,8 @@ class ChatAPI:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         timer = None
+        outcome, status, data = "error", "none", None
+        operation = "tokenize" if url.path.endswith("/tokenize") else "chat_completion"
         try:
             conn.connect()
             sock = conn.sock
@@ -220,6 +222,7 @@ class ChatAPI:
             conn.request("POST", url.path, body, headers)
             sock.settimeout(max(0.01, deadline - (time.monotonic() - started)))
             response = conn.getresponse()
+            status = response.status
             if response.status != 200:
                 raise ChatTransportError("Chat API did not return success")
             chunks, size = [], 0
@@ -238,6 +241,7 @@ class ChatAPI:
             data = json.loads(b"".join(chunks))
             if time.monotonic() - started >= deadline:
                 raise TimeoutError("Chat deadline exceeded")
+            outcome = "success"
             return data
         except (OSError, TimeoutError, http.client.HTTPException) as exc:
             raise ChatTransportError("Chat API transport unavailable") from exc
@@ -245,6 +249,19 @@ class ChatAPI:
             if timer:
                 timer.cancel()
             conn.close()
+            usage = data.get("usage", {}) if isinstance(data, dict) else {}
+            prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+            completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+            total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+            if operation == "tokenize" and isinstance(data, dict):
+                prompt_tokens = data.get("count")
+            def count(value):
+                return value if type(value) is int and value >= 0 else "unknown"
+            log.info("AI interaction operation=%s model=%s outcome=%s http_status=%s "
+                     "duration_ms=%.2f prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+                     operation, self.model, outcome, status,
+                     (time.monotonic() - started) * 1000, count(prompt_tokens),
+                     count(completion_tokens), count(total_tokens))
 
 
 class Composer:

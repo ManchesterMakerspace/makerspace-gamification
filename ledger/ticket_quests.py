@@ -243,14 +243,17 @@ class TicketQuests:
                 from .review_notifications import ReviewDeliveryBusy
                 raise ReviewDeliveryBusy()
             return False
-        if (self.store.get("ledger_catalog", "control") or {}).get("paused"):
-            return True
         quest = quests[0]
         response_id = "ticket-quest-response:" + sha1(f"{channel}:{event['ts']}".encode()).hexdigest()
         if self.store.get("ledger_evidence", response_id):
             return True
         pending = quest.get("pending_claim") or {}
         owns_pending = pending.get("response_id") == response_id
+        if (self.store.get("ledger_catalog", "control") or {}).get("paused"):
+            if owns_pending or pending:
+                from .review_notifications import ReviewDeliveryBusy
+                raise ReviewDeliveryBusy()
+            return True
         if quest.get("status") == "open" and not owns_pending:
             ticket = self._ticket(quest["ticket_id"])
             if not ticket:
@@ -273,6 +276,11 @@ class TicketQuests:
         eligible = (member_id != quest.get("reporter_id") and self.ledger.active(member_id)
                     and self.ledger.sources.good_standing(member_id)
                     and self._sentence(text))
+        if eligible and pending and not owns_pending and quest.get("status") == "open":
+            # Keep the inbox event pending. Once the reserved JPEG claim is
+            # accepted or released, this response can be checked for the win.
+            from .review_notifications import ReviewDeliveryBusy
+            raise ReviewDeliveryBusy()
         config_now = config(self.ledger)
         if owns_pending and not jpeg and pending.get("image_file_id"):
             jpeg = {"id": pending["image_file_id"], "mimetype": "image/jpeg"}
@@ -343,6 +351,9 @@ class TicketQuests:
             participant = current_member.participant(member_id)
             claim = (latest or {}).get("pending_claim") or {}
             owns_claim = claim.get("response_id") == response_id
+            if (eligible and latest and latest.get("status") == "open" and claim and not owns_claim):
+                from .review_notifications import ReviewDeliveryBusy
+                raise ReviewDeliveryBusy()
             deadline_ok = bool(latest and latest.get("deadline") and (
                 claim.get("claimed_at") <= latest["deadline"] if owns_claim else latest["deadline"] > now()))
             valid = (eligible and not claim_rejected and latest and latest.get("status") == "open"
