@@ -42,6 +42,25 @@ def test_home_open_ignores_other_tabs_and_preserves_generated_view(env):
     slack.views_publish.assert_not_called()
 
 
+def test_home_open_requeues_after_latest_refresh_failed(joined):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+    enqueue_home_refresh(store, member_id, "rank-correction", "U1")
+    failed = store.get("ledger_outbox", f"home:{member_id}:rank-correction")
+    failed.update(status="failed", attempts=10)
+    store.put("ledger_outbox", failed)
+    worker = Worker(ledger, composer, slack)
+
+    worker.event({"type": "app_home_opened", "tab": "home", "user": "U1",
+                  "view": home(ledger, member_id)}, "retry-home-after-failure")
+
+    slack.views_publish.assert_called_once()
+    assert slack.views_publish.call_args.kwargs["view"]["callback_id"] == "ledger_home_processing"
+    retried = store.get("ledger_outbox", f"home:{member_id}:rank-correction")
+    assert retried["status"] == "pending" and retried["attempts"] == 0
+    assert retried["payload"]["slack_id"] == "U1"
+
+
 def test_home_rebuilds_when_generated_view_belongs_to_another_member(joined):
     ledger, store, source, composer, _, slack = joined
     worker = Worker(ledger, composer, slack)

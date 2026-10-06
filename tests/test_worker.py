@@ -176,6 +176,52 @@ def test_rank_transition_rejects_a_superseded_lower_rank_job(joined):
     assert not s.get('ledger_channels', f'membership:{member_id}:rank:2')['present']
 
 
+@pytest.mark.parametrize('stale_cause', ['rank_correction', 'identity_change'])
+def test_rank_transition_retry_compensates_a_committed_invite(joined, stale_cause):
+    l, s, source, _, _, slack = joined
+    w = worker(joined)
+    member_id = str(oid(1))
+    participant = l.participant(member_id)
+    participant.update(rank=2, revision=participant['revision'] + 1)
+    s.put('ledger_participants', participant)
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:1', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:1', 'desired': True, 'present': True})
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:2', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:2', 'desired': True, 'present': False})
+    job = next(j for j in s.select('ledger_outbox', {'kind': 'invite'}) if j['payload']['member_id'] == member_id)
+    job['payload'].update(channel='CRANK2', channel_key='rank:2', revision=participant['revision'],
+        rank_transition={'old_slot': 1, 'new_slot': 2,
+                         'consent_generation': participant['consent_generation']})
+    s.put('ledger_outbox', job)
+
+    def fail_prior_kick(channel, user):
+        if channel == 'CRANK1':
+            raise RuntimeError('temporary Slack failure')
+        return {'ok': True}
+
+    slack.conversations_kick.side_effect = fail_prior_kick
+    first_attempt = claim(s, job['_id'])
+    with pytest.raises(RuntimeError, match='temporary Slack failure'):
+        w.outbox(first_attempt)
+    committed = s.get('ledger_outbox', job['_id'])['rank_transition_commit']
+    assert committed['slack_id'] == 'U1' and committed['channel'] == 'CRANK2'
+    w.finish('ledger_outbox', first_attempt, 'pending', error='RuntimeError')
+
+    if stale_cause == 'rank_correction':
+        l.correct_rank(str(oid(10)), member_id, 1, 'Correction before retry')
+    else:
+        source.data['slack_users'] = [row for row in source.data['slack_users'] if row['slack_id'] != 'U1']
+
+    with pytest.raises(Denied):
+        w.outbox(claim(s, job['_id']))
+
+    assert [call.kwargs['channel'] for call in slack.conversations_kick.call_args_list] == ['CRANK1', 'CRANK2']
+    membership = s.get('ledger_channels', f'membership:{member_id}:rank:2')
+    assert not membership['present']
+    if stale_cause == 'rank_correction':
+        assert not membership['desired']
+
+
 @pytest.mark.parametrize('change', ['rank_correction', 'voluntary_departure'])
 def test_rank_transition_revalidates_access_after_prior_channel_post(joined, change):
     l, s, _, _, _, slack = joined
