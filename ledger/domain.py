@@ -15,6 +15,11 @@ CHALLENGES = {"challenge", "first_build", "boss", "stewardship", "develop_mentor
 RESULT_XP = CHALLENGES | {"checkout_earned", "checkout_granted", "volunteer_credit", "quest", "recruitment"}
 
 
+def enqueue_home_refresh(store, member_id, trigger, slack_id=None):
+    key = f"home:{member_id}:{trigger}"
+    enqueue(store, "ledger_outbox", key, "home_publish", {"member_id": member_id, "slack_id": slack_id})
+
+
 class Denied(ValueError):
     pass
 
@@ -182,7 +187,7 @@ class Ledger:
         for job in self.store.select("ledger_outbox", {"status": {"$in": ["pending", "working"]}}):
             payload = job["payload"]
             if payload.get("member_id") == member_id and job["kind"] in ("invite", "message", "mqtt", "conversation", "welcome", "quest_draft",
-                    "summary_flush", "summary_delivery", "guidance", "rank_art") and not payload.get("peer_kudos"):
+                    "summary_flush", "summary_delivery", "guidance", "rank_art", "home_publish") and not payload.get("peer_kudos"):
                 job["status"] = "cancelled"
                 self.store.put("ledger_outbox", job)
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
@@ -191,8 +196,9 @@ class Ledger:
         # Explicit acknowledgment is allowed after consent is withdrawn.
         self.notify(member_id, "opt_out", {"summary": "You have left game participation. Channel removal is queued. Skills and XP are retained; source activity continues accruing silently. Observation is a separate choice: use /ledger preferences and uncheck Allow observation to disable it."},
                     f"optout:{member_id}:{p['revision']}", exception=True)
+        enqueue_home_refresh(self.store, member_id, f"leave:{p['revision']}", self.sources.slack_id(member_id))
 
-    def _invite(self, member_id, channel_key, explicit=False, inviter=None):
+    def _invite(self, member_id, channel_key, explicit=False, inviter=None, rank_transition=None):
         channel = self.store.get("ledger_channels", channel_key)
         if not channel or not self.active(member_id):
             return
@@ -203,8 +209,11 @@ class Ledger:
         membership.update(voluntary_leave=False, desired=True, inviter=inviter)
         self.store.put("ledger_channels", membership)
         p = self.participant(member_id)
-        enqueue(self.store, "ledger_outbox", f"invite:{member_id}:{channel_key}:{p['revision']}:{uuid4()}", "invite",
-                {"member_id": member_id, "channel": channel["channel_id"], "channel_key": channel_key, "revision": p["revision"]})
+        payload = {"member_id": member_id, "channel": channel["channel_id"],
+                   "channel_key": channel_key, "revision": p["revision"]}
+        if rank_transition:
+            payload["rank_transition"] = deepcopy(rank_transition)
+        enqueue(self.store, "ledger_outbox", f"invite:{member_id}:{channel_key}:{p['revision']}:{uuid4()}", "invite", payload)
 
     def invite(self, actor, target, channel_key):
         return self.tx("_peer_invite", actor, target, channel_key)
@@ -230,6 +239,8 @@ class Ledger:
         positive_xp = kind in RESULT_XP and amount(facts.get("xp_change", "0")) > 0
         verified_milestone = kind in CHALLENGES | {"quest"} and facts.get("verified_milestone") is True
         informational_unlock = kind == "quest" and str(key).startswith("quest-unlock:")
+        if not exception and not administrative and (verified_milestone or kind in MAJOR):
+            enqueue_home_refresh(self.store, member_id, str(action_id or key), self.sources.slack_id(member_id))
         if action_id and not exception and not administrative and (positive_xp or verified_milestone or kind in MAJOR or informational_unlock):
             from .result_summaries import collect
             return collect(self, action_id, member_id, kind, facts, str(key))
@@ -241,15 +252,18 @@ class Ledger:
             return
         facts = {**facts, "type": kind}
         summary_id = self.notify(member_id, kind, facts, key, action_id=action_id)
-        pending = [j for j in self.store.select("ledger_outbox", {"status": "pending"})
-                   if j["kind"] == "message" and j["payload"].get("coalesce") == member_id]
-        if pending:
-            job = pending[0]
-            job["payload"]["facts"]["achievements"].append(facts)
-            self.store.put("ledger_outbox", job)
-        else:
-            enqueue(self.store, "ledger_outbox", f"shared:{key}", "message", {"member_id": member_id,
-                "type": kind, "audience": "shared", "coalesce": member_id, "facts": {"achievements": [facts]}}, delay=60)
+        # Rank transitions are announced only in the prior/new private rank
+        # channels. The legacy shared renderer prepends the current rank.
+        if kind != "rank_up":
+            pending = [j for j in self.store.select("ledger_outbox", {"status": "pending"})
+                       if j["kind"] == "message" and j["payload"].get("coalesce") == member_id]
+            if pending:
+                job = pending[0]
+                job["payload"]["facts"]["achievements"].append(facts)
+                self.store.put("ledger_outbox", job)
+            else:
+                enqueue(self.store, "ledger_outbox", f"shared:{key}", "message", {"member_id": member_id,
+                    "type": kind, "audience": "shared", "coalesce": member_id, "facts": {"achievements": [facts]}}, delay=60)
         enqueue(self.store, "ledger_outbox", f"mqtt:{key}", "mqtt", {"member_id": member_id,
                 "event_id": key, "type": kind, "achievement": facts, "ruleset": self.participant(member_id)["ruleset"], "occurred_at": now().isoformat()})
         return summary_id
@@ -422,7 +436,9 @@ class Ledger:
         self.store.put("ledger_participants", p)
         from .quests import Quests
         Quests(self).unlock_notice(member_id, action_id=action_id if not historical else None)
-        self._invite(member_id, f"rank:{rank}")
+        transition = None if historical else {"old_slot": old_slot, "new_slot": rank,
+            "consent_generation": p.get("consent_generation", 0)}
+        self._invite(member_id, f"rank:{rank}", rank_transition=transition)
         summary_id = self.major(member_id, "rank_up", {"rank": self.presentation(rank)["name"], "slot": rank,
                    "old_slot": old_slot, "old_rank": self.presentation(old_slot)["name"],
                    "new_slot": rank, "new_rank": self.presentation(rank)["name"]}, f"rank:{member_id}:{rank}:{p['revision']}", historical, action_id=action_id)
@@ -443,6 +459,7 @@ class Ledger:
                        "member_id": member_id, "before": p["rank"], "after": slot, "reason": reason, "at": now()})
         p.update(rank=slot, rank_hold=True, revision=p["revision"] + 1)
         self.store.put("ledger_participants", p)
+        enqueue_home_refresh(self.store, member_id, f"rank-correction:{p['revision']}", self.sources.slack_id(member_id))
         from .quests import Quests
         Quests(self).cleanup(member_id)
         self.notify(member_id, "correction", {"summary": reason, "rank": self.presentation(slot)["name"]}, str(uuid4()))

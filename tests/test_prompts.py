@@ -45,8 +45,9 @@ def test_random_selection_selects_a_complete_paired_prompt_and_metadata(env):
     system, user = api.complete.call_args.args[0]
     assert 'practical workshop mentor' in system['content']
     assert 'Ledge Chat' in system['content']
-    assert 'Joe Maker' in user['content'] and 'Novice' in user['content'] and 'Bandsaw' in user['content']
-    assert 'Newbie' not in user['content']  # This variation deliberately omits old rank.
+    assert 'Joe Maker' in user['content']
+    assert 'Novice' not in user['content'] and 'Newbie' not in user['content'] and 'Bandsaw' not in user['content']
+    assert 'never name or hint at any rank' in user['content']
 
 
 @pytest.mark.parametrize('index', range(3))
@@ -144,7 +145,7 @@ def test_highest_skill_handles_depth_ties_revocation_and_bad_catalogs(env):
     assert highest_skill(source, member) == {}
 
 
-def test_rank_event_supplies_names_old_new_rank_skill_and_caches_variation(joined):
+def test_rank_event_keeps_facts_out_of_narration_and_appends_them_authoritatively(joined):
     ledger, store, source, composer, api, slack = joined
     member = str(oid(1))
     participant = ledger.participant(member)
@@ -167,13 +168,16 @@ def test_rank_event_supplies_names_old_new_rank_skill_and_caches_variation(joine
     with pytest.raises(TimeoutError):
         worker.outbox(claim(store, queued['_id']))
     prompt = api.complete.call_args.args[0][-1]['content']
-    assert all(value in prompt for value in ['Maker1 Test', 'U1', 'Beginner', 'Explorer', 'Tool1-2', 'Shop1'])
+    assert 'Maker1 Test' in prompt
+    assert all(value not in prompt for value in ['U1', 'Beginner', 'Explorer', 'Tool1-2', 'Shop1'])
     assert 'NEVER_SEND' not in str(api.complete.call_args)
     saved = store.get('ledger_outbox', queued['_id'])['composed']
     composer.choose = Mock(side_effect=AssertionError('Do not reroll a retry'))
     slack.chat_postMessage.side_effect = None
     worker.outbox(claim(store, queued['_id']))
     assert store.get('ledger_outbox', queued['_id'])['composed'] == saved
+    delivered = slack.chat_postMessage.call_args.kwargs['text']
+    assert 'Beginner' in delivered and 'Explorer' in delivered, delivered
     assert api.complete.call_count == chooser.call_count == 1
 
 

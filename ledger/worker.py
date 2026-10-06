@@ -11,15 +11,15 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from slack_sdk.errors import SlackApiError
 from bson import json_util
 
-from .community import Community
-from .domain import Denied, Ledger
+from .community import Community, enqueue_project_home_refresh
+from .domain import Denied, Ledger, enqueue_home_refresh
 from .messages import button, escape, section
-from .prompt_library import EXAMPLE_FACTS
+from .prompt_library import EXAMPLE_FACTS, library_template
 from .review_notifications import ReviewDeliveryBusy
 from .result_summaries import SummaryBusy, SummaryPending
 from .sources import FIELDS, sid
 from .storage import enqueue, now
-from .views import home
+from .views import home, home_private_metadata, home_processing
 
 log = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ class Worker:
             from .ticket_quests import TicketQuests
             TicketQuests(self.ledger).reconcile(job["payload"].get("ticket_id"))
         elif job["kind"] == "slack_event":
-            outcome = self.event(payload, job["_id"])
+            outcome = self.event(payload, job["_id"], attempts=job.get("attempts", 1))
             log.info("Slack event processed job=%s outcome=%s", job["_id"], outcome or "handled")
         elif job["kind"] == "command":
             try:
@@ -149,6 +149,104 @@ class Worker:
             "kind": "thread", "expires_at": now() + timedelta(days=30)}))
         return response
 
+    def _slack_file_exists(self, file_id):
+        try:
+            result = self.slack.files_info(file=file_id)
+        except SlackApiError as exc:
+            if exc.response.get("error") in ("file_not_found", "file_deleted", "not_found"):
+                return False
+            raise
+        file = result.get("file") or {}
+        return file.get("id") == file_id and not file.get("is_deleted")
+
+    def _home_rank_icon(self, participant, job):
+        from .rules import RANKS
+        slot = participant.get("rank", 0)
+        if not 1 <= slot <= len(RANKS):
+            return None
+        display = self.ledger.presentation(slot)
+        if display["name"] != RANKS[slot - 1][0]:
+            return None
+        image_path = Path(__file__).parent / "assets" / f"rank-{slot}.png"
+        image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+        asset_key = f"rank_icon:{slot}"
+        saved = self.store.get("ledger_files", asset_key)
+        if saved and saved.get("sha256") == image_hash and saved.get("file_id"):
+            if self._slack_file_exists(saved["file_id"]):
+                return saved["file_id"]
+            saved = {**saved, "file_id": None, "invalidated_at": now()}
+            self.store.put("ledger_files", saved)
+        self.assert_live_job(job)
+        uploaded = self.slack.files_upload_v2(file=str(image_path), filename=image_path.name,
+            title=display["name"])
+        files = uploaded.get("files") or []
+        file_id = files[0].get("id") if files and isinstance(files[0], dict) else None
+        if not isinstance(file_id, str) or not file_id:
+            raise RuntimeError("Slack rank image upload did not return a file ID")
+        self.store.put("ledger_files", {"_id": asset_key, "kind": "rank_icon", "slot": slot,
+            "filename": image_path.name, "title": display["name"], "sha256": image_hash,
+            "file_id": file_id, "uploaded_at": now()})
+        return file_id
+
+    def _home_skill_tree(self, member_id, job):
+        from .skills import render_tree, skill_summary
+        summary = skill_summary(self.ledger, member_id)
+        if not summary.get("nodes") or summary.get("status") == "unavailable":
+            return None
+        text_checksum = hashlib.sha256(summary["text"].encode("utf-8")).hexdigest()
+        asset_key = f"skill_tree:{member_id}"
+        saved = self.store.get("ledger_files", asset_key)
+        if (saved and saved.get("text_sha256") == text_checksum and saved.get("file_id")
+                and self._slack_file_exists(saved["file_id"])):
+            return saved["file_id"]
+        if saved and saved.get("file_id"):
+            saved = {**saved, "file_id": None, "invalidated_at": now()}
+            self.store.put("ledger_files", saved)
+        self.assert_live_job(job)
+        uploaded = self.slack.files_upload_v2(file=render_tree(summary), filename="ledger-skill-tree.png",
+            title="Your skill tree")
+        files = uploaded.get("files") or []
+        file_id = files[0].get("id") if files and isinstance(files[0], dict) else None
+        if not isinstance(file_id, str) or not file_id:
+            raise RuntimeError("Slack skill tree upload did not return a file ID")
+        self.store.put("ledger_files", {"_id": asset_key, "kind": "skill_tree", "member_id": member_id,
+            "filename": "ledger-skill-tree.png", "file_id": file_id, "text_sha256": text_checksum,
+            "cached_at": now()})
+        return file_id
+
+    def publish_home(self, job):
+        payload = job["payload"]
+        member_id = payload["member_id"]
+        slack_id = payload.get("slack_id") or self.ledger.sources.slack_id(member_id)
+        if not slack_id or self.valid_identity(member_id) != slack_id:
+            raise Denied("Home publication requires the current linked Slack identity.")
+        participant = self.ledger.participant(member_id)
+        if participant and self.ledger.active(member_id) and participant.get("import_pending"):
+            raise HistoryImportPending()
+        rank_icon_file_id = None
+        skill_tree_file_id = None
+        if participant and self.ledger.active(member_id):
+            rank_icon_file_id = self._home_rank_icon(participant, job)
+            skill_tree_file_id = self._home_skill_tree(member_id, job)
+        self.assert_live_job(job)
+        latest = self.ledger.participant(member_id)
+        if latest and self.ledger.active(member_id) and latest.get("import_pending"):
+            raise HistoryImportPending()
+        if not self.ledger.active(member_id):
+            # A concurrent opt-out must never publish the private view we just built.
+            rank_icon_file_id = skill_tree_file_id = None
+        if self.valid_identity(member_id) != slack_id:
+            raise Denied("Home publication requires the current linked Slack identity.")
+        latest = self.ledger.participant(member_id)
+        if latest and self.ledger.active(member_id) and latest.get("import_pending"):
+            raise HistoryImportPending()
+        if not self.ledger.active(member_id):
+            rank_icon_file_id = skill_tree_file_id = None
+        self.assert_live_job(job)
+        self.slack.views_publish(user_id=slack_id,
+            view=home(self.ledger, member_id, rank_icon_file_id=rank_icon_file_id,
+                      skill_tree_file_id=skill_tree_file_id))
+
     def reconcile_channels(self):
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
             present = self.channel_members(channel["channel_id"])
@@ -174,7 +272,7 @@ class Worker:
                     row.update(present=False, voluntary_leave=True, desired=False)
                     self.store.atomic(lambda s, r=row: s.put("ledger_channels", r))
 
-    def event(self, event, key):
+    def event(self, event, key, attempts=1):
         kind = event.get("type")
         if kind == "user_change":
             user = event["user"]
@@ -211,8 +309,21 @@ class Worker:
             return
         member = self.ledger.sources.identity(event.get("user"))
         if kind == "app_home_opened":
-            if member:
-                self.slack.views_publish(user_id=event["user"], view=home(self.ledger, sid(member["_id"])))
+            if event.get("tab") != "home" or not member:
+                return
+            member_id = sid(member["_id"])
+            active = self.ledger.active(member_id)
+            current = event.get("view") or {}
+            callback_id = current.get("callback_id")
+            binding_matches = current.get("private_metadata") == home_private_metadata(self.ledger, member_id)
+            if ((active and callback_id == "ledger_home_generated") or
+                    (not active and callback_id == "ledger_home_public")) and binding_matches:
+                return
+            if callback_id != "ledger_home_processing":
+                self.slack.views_publish(user_id=event["user"], view=home_processing())
+            if not self.store.exists("ledger_outbox", {"kind": "home_publish", "payload.member_id": member_id,
+                    "status": {"$in": ["pending", "working"]}}):
+                enqueue_home_refresh(self.store, member_id, f"open:{key}", event["user"])
             return
         channel = event.get("channel")
         if not channel:
@@ -244,7 +355,7 @@ class Worker:
             return "ignored_unlinked_identity"
         if kind == "message" and event.get("thread_ts"):
             from .ticket_quests import TicketQuests
-            handled = TicketQuests(self.ledger, worker=self).response_event(event, key)
+            handled = TicketQuests(self.ledger, worker=self).response_event(event, key, attempts=attempts)
             if handled:
                 return handled
         if file_share:
@@ -335,11 +446,36 @@ class Worker:
             summary = skill_summary(l, member_id, " ".join(args))
             facts = {"summary": summary["text"]}
             if summary["nodes"]:
-                image = render_tree(summary)
                 uid = l.sources.slack_id(member_id)
                 dm = self.slack.conversations_open(users=uid)["channel"]["id"]
-                self.slack.files_upload_v2(file_uploads=[{"file": image, "filename": "ledger-skill-tree.png", "title": "Your skill tree"},
-                    {"file": BytesIO(summary["text"].encode()), "filename": "ledger-skill-tree.txt", "title": "Complete skill tree text equivalent"}], channel=dm)
+                text_bytes = summary["text"].encode("utf-8")
+                text_checksum = hashlib.sha256(text_bytes).hexdigest()
+                asset_key = f"skill_tree:{member_id}"
+                saved_file = self.store.get("ledger_files", asset_key)
+                cached = bool(saved_file and saved_file.get("text_sha256") == text_checksum
+                              and saved_file.get("file_id"))
+                if cached and not self._slack_file_exists(saved_file["file_id"]):
+                    self.store.put("ledger_files", {**saved_file, "file_id": None,
+                        "invalidated_at": now()})
+                    cached = False
+                if cached:
+                    self.post_message(channel=dm, text="Your skill tree image is attached.", blocks=[{
+                        "type": "image", "title": {"type": "plain_text", "text": "Your skill tree"},
+                        "slack_file": {"id": saved_file["file_id"]},
+                        "alt_text": "Your current skill tree and clearance paths"}])
+                else:
+                    image = render_tree(summary)
+                    uploaded = self.slack.files_upload_v2(file=image, filename="ledger-skill-tree.png",
+                        title="Your skill tree", channel=dm)
+                    files = uploaded.get("files") or []
+                    file_id = files[0].get("id") if files and isinstance(files[0], dict) else None
+                    if not isinstance(file_id, str) or not file_id:
+                        raise RuntimeError("Slack skill tree upload did not return a file ID")
+                    self.store.put("ledger_files", {"_id": asset_key, "kind": "skill_tree",
+                        "member_id": member_id, "filename": "ledger-skill-tree.png", "file_id": file_id,
+                        "text_sha256": text_checksum, "cached_at": now()})
+                self.slack.files_upload_v2(file=BytesIO(text_bytes), filename="ledger-skill-tree.txt",
+                    title="Complete skill tree text equivalent", channel=dm)
         elif cmd == "/ledger-mentor":
             c = Community(l)
             if args and args[0] == "offer":
@@ -571,11 +707,14 @@ class Worker:
                     continue
         return "".join("\n" + line for line in (lines[:100] if display else lines))
 
-    def persist_composition(self, job, kind, audience, facts, conversation=None, *, profile=None):
+    def persist_composition(self, job, kind, audience, facts, conversation=None, *, profile=None, artifact=None,
+                            library_only=False, omit_rank_facts=False):
+        result_key = artifact or "composed"
+        selection_key = "prompt_selection" if artifact is None else f"{artifact}_prompt_selection"
         current = self.store.get("ledger_outbox", job["_id"])
-        if current.get("composed"):
-            return current["composed"]
-        if not current.get("prompt_selection"):
+        if current.get(result_key):
+            return current[result_key]
+        if not current.get(selection_key):
             self.composer.refresh_matrix()
         payload = job["payload"]
         # Channel conversations use the same shared history as announcements,
@@ -586,21 +725,27 @@ class Worker:
             saved = s.get("ledger_outbox", job["_id"])
             if saved.get("lease") != job["lease"] or saved["status"] != "working":
                 raise Denied("Delivery was cancelled or its lease expired.")
-            if not saved.get("prompt_selection"):
-                saved["prompt_selection"] = (self.composer.reserve(s, kind, audience, scope, profile=profile)
-                                             if profile else self.composer.reserve(s, kind, audience, scope))
+            if not saved.get(selection_key):
+                options = {"template_override": library_template(kind, audience)} if library_only else {}
+                saved[selection_key] = (self.composer.reserve(s, kind, audience, scope, profile=profile, **options)
+                                         if profile else self.composer.reserve(s, kind, audience, scope, **options))
                 s.put("ledger_outbox", saved)
-            elif "matrix" not in saved["prompt_selection"]:
+            elif "matrix" not in saved[selection_key]:
                 # Upgrade pre-matrix reservations once without rerolling their voice.
-                saved["prompt_selection"]["matrix"] = self.composer.matrix.snapshot()
+                saved[selection_key]["matrix"] = self.composer.matrix.snapshot()
                 s.put("ledger_outbox", saved)
-            return saved["prompt_selection"]
+            return saved[selection_key]
         selection = self.store.atomic(reserve)
         if profile == "guidance":
             result = self.composer.guidance(facts, selection=selection)
         else:
             if profile is None:
-                facts = self.prompt_facts(job["payload"].get("member_id"), kind, facts)
+                member_id = job["payload"].get("member_id")
+                if omit_rank_facts:
+                    facts = {**facts, **self.identity_facts(member_id)}
+                    facts.pop("member_slack_id", None)
+                else:
+                    facts = self.prompt_facts(member_id, kind, facts)
             result = self.composer.compose(kind, audience, facts, conversation, selection=selection)
         if profile:
             result["queue_age_seconds"] = max(0, (now() - current.get("created_at", current["available_at"])).total_seconds())
@@ -608,10 +753,200 @@ class Worker:
             saved = s.get("ledger_outbox", job["_id"])
             if saved.get("lease") != job["lease"] or saved["status"] != "working":
                 raise Denied("Delivery was cancelled or its lease expired.")
-            saved["composed"] = result
+            saved[result_key] = result
             s.put("ledger_outbox", saved)
         self.store.atomic(write)
         return result
+
+    def _rank_transition_access(self, job, uid, store=None):
+        store = store or self.store
+        payload = job["payload"]
+        transition = payload["rank_transition"]
+        member_id = payload["member_id"]
+        new_slot = transition["new_slot"]
+        channel_key = payload.get("channel_key")
+        ledger = Ledger(store, self.ledger.sources)
+        participant = ledger.participant(member_id)
+        channel = store.get("ledger_channels", channel_key) if channel_key else None
+        membership = store.get("ledger_channels", f"membership:{member_id}:{channel_key}") if channel_key else None
+        if (not participant or not ledger.active(member_id)
+                or participant.get("consent_generation", 0) != transition["consent_generation"]
+                or participant.get("revision", 0) < payload.get("revision", 0)
+                or participant.get("rank", 0) != new_slot
+                or self.ledger.sources.slack_id(member_id) != uid
+                or channel_key != f"rank:{new_slot}"
+                or not channel or channel.get("_id") != channel_key
+                or channel.get("kind") != "channel" or channel.get("slot") != new_slot
+                or channel.get("channel_id") != payload.get("channel")
+                or not membership or membership.get("member_id") != member_id
+                or membership.get("channel_key") != channel_key
+                or membership.get("voluntary_leave") or not membership.get("desired")):
+            raise Denied("Rank transition is no longer authorized.")
+        return participant, membership, channel
+
+    def _revalidate_committed_rank_transition(self, job, uid):
+        member_id = job["payload"]["member_id"]
+        if self.valid_identity(member_id) != uid:
+            raise Denied("Rank transition belongs to an earlier Slack identity.")
+        access = self._rank_transition_access(job, uid)
+        self.assert_live_job(job)
+        return access
+
+    def _compensate_rank_transition_invite(self, job, uid):
+        payload = job["payload"]
+        member_id = payload["member_id"]
+        channel = payload["channel"]
+        transition = payload["rank_transition"]
+        try:
+            self.slack.conversations_kick(channel=channel, user=uid)
+        except SlackApiError as exc:
+            if exc.response.get("error") not in ("not_in_channel", "user_not_found"):
+                raise
+
+        def clear_membership(store):
+            key = f"membership:{member_id}:{payload['channel_key']}"
+            membership = store.get("ledger_channels", key)
+            if not membership:
+                return
+            membership["present"] = False
+            ledger = Ledger(store, self.ledger.sources)
+            participant = ledger.participant(member_id)
+            if (not participant or not ledger.active(member_id)
+                    or participant.get("consent_generation", 0) != transition["consent_generation"]
+                    or participant.get("rank", 0) != transition["new_slot"]
+                    or membership.get("voluntary_leave")):
+                membership["desired"] = False
+            store.put("ledger_channels", membership)
+        self.store.atomic(clear_membership)
+
+    def _cancel_after_committed_transition_if_stale(self, job, uid):
+        try:
+            return self._revalidate_committed_rank_transition(job, uid)
+        except Denied:
+            self._compensate_rank_transition_invite(job, uid)
+            raise
+
+    def deliver_rank_transition(self, job):
+        payload = job["payload"]
+        transition = payload["rank_transition"]
+        member_id = payload["member_id"]
+        old_slot, new_slot = transition["old_slot"], transition["new_slot"]
+        generation = transition["consent_generation"]
+        participant = self.ledger.participant(member_id)
+        membership = self.store.get("ledger_channels", f"membership:{member_id}:{payload['channel_key']}") or {}
+        channel = self.store.get("ledger_channels", payload["channel_key"])
+        if (not channel or channel.get("channel_id") != payload["channel"] or not participant
+                or not self.ledger.active(member_id) or participant.get("consent_generation", 0) != generation
+                or participant.get("revision", 0) < payload["revision"]
+                or participant.get("rank", 0) != new_slot or membership.get("voluntary_leave")
+                or not membership.get("desired")):
+            raise Denied("Rank transition is no longer authorized.")
+        uid = self.valid_identity(member_id)
+        if not uid:
+            raise Denied("Slack identity inactive.")
+        participant, membership, channel = self._rank_transition_access(job, uid)
+
+        prior_channel = self.store.get("ledger_channels", f"rank:{old_slot}") if old_slot > 0 else None
+        if old_slot > 0 and not prior_channel:
+            from .review_notifications import ReviewDeliveryBusy
+            raise ReviewDeliveryBusy()
+        current = self.store.get("ledger_outbox", job["_id"])
+        if prior_channel and not current.get("rank_prior_delivery"):
+            source_member = self.ledger.sources.member(member_id) or {}
+            member_name = " ".join(str(source_member.get(k) or "").strip()
+                                   for k in ("firstname", "lastname")).strip() or "A member"
+            composed = self.persist_composition(job, "rank_up", "shared",
+                {"summary": "has ascended to a higher level"}, artifact="rank_prior_composed",
+                library_only=True, omit_rank_facts=True)
+            text = composed.get("text", "") if composed.get("outcome") == "generated" else ""
+            ranks = self.store.get("ledger_catalog", "rank_display")["ranks"]
+            forbidden_names = [ranks[slot - 1]["name"] for slot in range(old_slot + 1, len(ranks) + 1)]
+            reveals_rank = any(name and re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", text, re.I)
+                               for name in forbidden_names)
+            if (not text or reveals_rank or re.search(r"<[@#!](?:channel|here|everyone)|<@[UW][A-Z0-9]+>", text, re.I)):
+                text = f"{escape(member_name)} has ascended to a higher level."
+            elif member_name.casefold() not in text.casefold():
+                text = f"{escape(member_name)} — {text}"
+            self.assert_live_job(job)
+            self.post_message(channel=prior_channel["channel_id"], text=text,
+                blocks=[section(text)], client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"] + ":rank-prior")),
+                unfurl_links=False, unfurl_media=False)
+            def save_prior(store):
+                saved = store.get("ledger_outbox", job["_id"])
+                if saved.get("lease") != job["lease"] or saved["status"] != "working":
+                    raise Denied("Rank transition delivery lease changed.")
+                saved["rank_prior_delivery"] = {"channel": prior_channel["channel_id"], "at": now()}
+                store.put("ledger_outbox", saved)
+            self.store.atomic(save_prior)
+
+        uid_now = self.valid_identity(member_id)
+        if not uid_now or uid_now != uid:
+            raise Denied("Rank transition belongs to an earlier Slack identity.")
+        participant, membership, channel = self._rank_transition_access(job, uid)
+        self.assert_live_job(job)
+        invite_uid = self.valid_identity(member_id)
+        if not invite_uid or invite_uid != uid:
+            raise Denied("Rank transition belongs to an earlier Slack identity.")
+        try:
+            self.slack.conversations_invite(channel=channel["channel_id"], users=invite_uid)
+        except SlackApiError as exc:
+            if exc.response.get("error") not in ("already_in_channel", "already_in_group"):
+                raise
+        try:
+            if self.valid_identity(member_id) != invite_uid:
+                raise Denied("Rank transition belongs to an earlier Slack identity.")
+            def commit_transition(s):
+                participant, new_membership, _ = self._rank_transition_access(job, uid, s)
+                # Serialize the access check against a concurrent rank correction.
+                s.put("ledger_participants", participant)
+                new_membership.update(present=True, desired=True)
+                s.put("ledger_channels", new_membership)
+            self.store.atomic(commit_transition)
+        except Denied:
+            self._compensate_rank_transition_invite(job, invite_uid)
+            raise
+
+        if prior_channel:
+            self._cancel_after_committed_transition_if_stale(job, invite_uid)
+            try:
+                self.slack.conversations_kick(channel=prior_channel["channel_id"], user=uid)
+            except SlackApiError as exc:
+                if exc.response.get("error") not in ("not_in_channel", "user_not_found", "channel_not_found"):
+                    raise
+            old_membership = self.store.get("ledger_channels", f"membership:{member_id}:rank:{old_slot}")
+            if old_membership:
+                old_membership.update(present=False, desired=False)
+                self.store.atomic(lambda s: s.put("ledger_channels", old_membership))
+
+        self._cancel_after_committed_transition_if_stale(job, invite_uid)
+        current = self.store.get("ledger_outbox", job["_id"])
+        if not current.get("rank_welcome_delivery"):
+            welcome = self.persist_composition(job, "rank_up", "shared",
+                {"summary": "is now part of this rank channel and should be welcomed"},
+                artifact="rank_welcome_composed", library_only=True, omit_rank_facts=True)
+            text = welcome.get("text", "") if welcome.get("outcome") == "generated" else ""
+            ranks = self.store.get("ledger_catalog", "rank_display")["ranks"]
+            reveals_rank = any(rank["name"] and re.search(r"(?<!\w)" + re.escape(rank["name"]) + r"(?!\w)", text, re.I)
+                               for rank in ranks)
+            source_member = self.ledger.sources.member(member_id) or {}
+            member_name = " ".join(str(source_member.get(k) or "").strip()
+                                   for k in ("firstname", "lastname")).strip() or "our newly elevated member"
+            if (not text or reveals_rank or
+                    re.search(r"<[@#!](?:channel|here|everyone)|<@[UW][A-Z0-9]+>", text, re.I)):
+                text = f"Welcome our newly elevated brethren, {escape(member_name)}!"
+            elif member_name.casefold() not in text.casefold():
+                text = f"{escape(member_name)} — {text}"
+            self._cancel_after_committed_transition_if_stale(job, invite_uid)
+            self.post_message(channel=channel["channel_id"], text=text,
+                blocks=[section(text)], client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"] + ":rank-welcome")),
+                unfurl_links=False, unfurl_media=False)
+            def save_welcome(store):
+                saved = store.get("ledger_outbox", job["_id"])
+                if saved.get("lease") != job["lease"] or saved["status"] != "working":
+                    raise Denied("Rank transition delivery lease changed.")
+                saved["rank_welcome_delivery"] = {"channel": channel["channel_id"], "at": now()}
+                store.put("ledger_outbox", saved)
+            self.store.atomic(save_welcome)
 
     def deliver_guidance(self, job):
         """An explicit self-only request; never an unsolicited coaching notice."""
@@ -713,6 +1048,8 @@ class Worker:
             return TicketQuests(self.ledger, worker=self).deliver(job)
         if kind == "guidance":
             return self.deliver_guidance(job)
+        if kind == "home_publish":
+            return self.publish_home(job)
         if kind in ("review_notice", "quest_review_notice"):
             from .review_notifications import deliver
             return deliver(self, job)
@@ -748,6 +1085,8 @@ class Worker:
                 self.store.atomic(lambda s: s.put("ledger_channels", {"_id": f"rank:{slot}", "kind": "channel", "channel_id": channel["id"], "slot": slot}))
             return
         if kind == "invite":
+            if p.get("rank_transition"):
+                return self.deliver_rank_transition(job)
             participant = self.ledger.participant(member_id)
             channel = self.store.get("ledger_channels", p["channel_key"])
             membership = self.store.get("ledger_channels", f"membership:{member_id}:{p['channel_key']}") or {}
@@ -872,9 +1211,41 @@ class Worker:
                 if latest.get("consent_generation", 0) != generation:
                     raise Denied("Rank artwork belongs to an earlier participation.")
                 self.assert_live_job(job)
-                self.slack.files_upload_v2(file=str(Path(__file__).parent / "assets" / f"rank-{slot}.png"),
-                                          title=display["name"], channel=dm,
-                                          **({"thread_ts": parent["ts"]} if parent else {}))
+                filename = f"rank-{slot}.png"
+                image_path = Path(__file__).parent / "assets" / filename
+                image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+                asset_key = f"rank_icon:{slot}"
+                saved_file = self.store.get("ledger_files", asset_key)
+                thread = {"thread_ts": parent["ts"]} if parent else {}
+                cache_valid = bool(saved_file and saved_file.get("sha256") == image_hash
+                                   and saved_file.get("file_id"))
+                if cache_valid and not self._slack_file_exists(saved_file["file_id"]):
+                    saved_file = {**saved_file, "file_id": None, "invalidated_at": now()}
+                    self.store.put("ledger_files", saved_file)
+                    cache_valid = False
+                if cache_valid:
+                    try:
+                        self.post_message(channel=dm, text=f"Rank: {display['name']}",
+                            blocks=[{"type": "image", "title": {"type": "plain_text", "text": display["name"]},
+                                     "slack_file": {"id": saved_file["file_id"]},
+                                     "alt_text": f"Rank icon for {display['name']}"}], **thread)
+                        return
+                    except SlackApiError as exc:
+                        if exc.response.get("error") not in ("file_not_found", "file_deleted", "not_found",
+                                                              "invalid_file_id", "invalid_blocks"):
+                            raise
+                        self.store.put("ledger_files", {**saved_file, "file_id": None,
+                            "invalidated_at": now()})
+                self.assert_live_job(job)
+                uploaded = self.slack.files_upload_v2(file=str(image_path), filename=filename,
+                    title=display["name"], channel=dm, **thread)
+                files = uploaded.get("files") or []
+                file_id = files[0].get("id") if files and isinstance(files[0], dict) else None
+                if not isinstance(file_id, str) or not file_id:
+                    raise RuntimeError("Slack rank image upload did not return a file ID")
+                self.store.put("ledger_files", {"_id": asset_key, "kind": "rank_icon",
+                    "slot": slot, "filename": filename, "title": display["name"],
+                    "sha256": image_hash, "file_id": file_id, "uploaded_at": now()})
             return
         if kind == "conversation":
             self.ledger.require_member(member_id)
@@ -1093,6 +1464,7 @@ class Worker:
                     latest["permalink"] = url
                     s.put("ledger_projects", latest)
                 self.store.atomic(restore_link)
+            enqueue_project_home_refresh(self.ledger, project["_id"], p["update"] + 1, "published")
             return
         composed = self.persist_composition(job, "project", "shared", {"title": project["title"]})
         self.assert_live_job(job)
@@ -1116,6 +1488,7 @@ class Worker:
                 latest.update(thread_ts=response["ts"], permalink=url)
                 s.put("ledger_projects", latest)
             self.store.atomic(save)
+            enqueue_project_home_refresh(self.ledger, project["_id"], p["update"] + 1, "published")
 
 
 def ingest_mqtt(store, topic, payload, retained=False):
@@ -1132,6 +1505,10 @@ def ingest_mqtt(store, topic, payload, retained=False):
     doc = envelope.get("document") if isinstance(envelope, dict) else None
     if collection in ("fix_tickets", "fix_ticket_events"):
         if not isinstance(doc, dict) or doc.get("_id") is None:
+            if collection == "fix_tickets" and operation == "delete":
+                key = "ticket-quest-mqtt:" + hashlib.sha256(topic.encode() + payload).hexdigest()
+                store.atomic(lambda s: enqueue(s, "ledger_inbox", key, "ticket_quest_reconcile", {}))
+                return True
             return False
         ticket_id = doc.get("_id") if collection == "fix_tickets" else doc.get("ticket_id")
         if ticket_id is None:

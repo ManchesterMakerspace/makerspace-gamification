@@ -32,6 +32,10 @@ The manifest enables App Home and writable app messages. All seven commands have
 
 All modals, buttons, checkboxes, and external shop/tool/member dropdowns use the interaction endpoint. They are interaction payloads, not additional event subscriptions or commands.
 
+`/ledger-skills` hashes the exact accessible text equivalent and caches the generated PNG per member in `ledger_files`, along with the text checksum and cache timestamp. A later request reuses the Slack file through a Block Kit `slack_file` image when the text is unchanged and Slack still recognizes the file; changed text or a missing file triggers a new render and upload. Rank icons use the same collection and are checked before display; a permanently missing Slack file is evicted and replaced from the bundled PNG. Slack file retention or manual deletion therefore causes a fresh upload on the next request.
+
+On promotion, no rank-up announcement is sent to shared Ledge Chat. The prior-rank channel receives a short ascent message that does not name or imply the next rank. The bot invites the member to the new-rank channel, then removes them from the prior-rank channel and posts the welcome after the invite succeeds. The shipped `rank_up.json` shared-audience variations generate these private channel messages from a generic stage summary and the member's name; the next-rank label is not passed into those generations.
+
 ## Saved opt-in and chat replies
 
 The consent modal saves `ledger_participants.opted_in` synchronously and displays **Opt-in saved** after the transaction succeeds. Repeating `/ledger join` or clicking an old invitation while still opted in shows **Already opted in**, current rank/XP, and any pending history import. It does not reset consent, rules, progress, or invitations. Opting out and joining again still shows the consent form. Older images always reopened consent even for a saved participant; that alone did not mean consent was lost.
@@ -89,7 +93,7 @@ After changing `.env`, recreate the affected containers with `docker compose up 
 
 | Bot event | Handler purpose | Scope used |
 | --- | --- | --- |
-| `app_home_opened` | Publish the participant's gallery/progress Home view | No additional event scope |
+| `app_home_opened` | Publish the first-open placeholder and queue the personalized Character Sheet | No additional event scope |
 | `app_mention` | Threaded responses when The Ledger is addressed | `app_mentions:read` |
 | `message.im` | Onboarding/opt-out DMs and conversations; message edits/deletions | `im:history` |
 | `message.groups` | Joined private-channel conversations and context edits/deletions | `groups:history` |
@@ -99,6 +103,8 @@ After changing `.env`, recreate the affected containers with `docker compose up 
 | `user_change` | Refresh active human identity/deactivation state | `users:read` |
 
 Slack delivers `message.im` and `message.groups` as `type: "message"`; `message_changed` and `message_deleted` are subtypes, not separate manifest entries. Channel events require the bot to belong to the channel. The worker filters channel processing to registered Ledger private channels. See Slack's [channel membership event contract](https://docs.slack.dev/reference/events/member_joined_channel/) and [App Home event contract](https://docs.slack.dev/reference/events/app_home_opened/).
+
+The first Home-tab open publishes a brief processing placeholder and queues a personalized Character Sheet. Generated views are bound to the current member record and consent generation; an identity reassignment or rejoin causes a rebuild before the saved view is reused. Verified milestones, rank changes, and staff rank corrections queue Home refreshes. Ordinary XP ticks do not.
 
 ## Bot permissions
 
@@ -115,7 +121,7 @@ Slack delivers `message.im` and `message.groups` as `type: "message"`; `message_
 | `im:history` | `message.im`, including edits/deletions |
 | `im:write` | `conversations.open` for recipient DMs and file delivery |
 | `users:read` | `users.info` for human/active checks, `user_change`, and complete bounded `users.list` name/alias reads for quest-inspiration redaction |
-| `files:write` | Skill-tree image/text and rank art via `files.getUploadURLExternal` / `files.completeUploadExternal` (`files_upload_v2`) |
+| `files:write` | Skill-tree image/text and rank art via `files.getUploadURLExternal` / `files.completeUploadExternal` (`files_upload_v2`); reusable skill trees and rank icons are retained by Slack file ID for later Block Kit `slack_file` display |
 
 `groups:write` is needed for [private-channel removal](https://docs.slack.dev/reference/methods/conversations.kick/) as well as [invitations](https://docs.slack.dev/reference/methods/conversations.invite/); invite-only permission would not cover opt-out cleanup. [External file uploads](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) require `files:write`. `views.open`, `views.update`, `views.publish`, and `chat.getPermalink` need an authenticated bot but no extra scopes beyond this set for the supported flows.
 

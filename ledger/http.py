@@ -2,6 +2,7 @@
 import json
 import logging
 import time
+from urllib.parse import parse_qs
 from slack_bolt.request import BoltRequest
 
 LOG = logging.getLogger(__name__)
@@ -36,6 +37,14 @@ class HTTPApp:
                     headers["content-type"] = env.get("CONTENT_TYPE", "")
                     result = self.bolt.dispatch(BoltRequest(body=body, headers=headers))
                     status, text = result.status, result.body
+                    if path == "/slack/commands" and 200 <= status < 300:
+                        # Bolt dispatch verifies Slack's signature before returning.
+                        # Record only the human-readable slash-command fields, never
+                        # the full form body (which also carries IDs and response URLs).
+                        fields = parse_qs(body, keep_blank_values=True)
+                        command = fields.get("command", [""])[0][:80]
+                        human_text = fields.get("text", [""])[0][:1000]
+                        LOG.info("Slack command command=%r text=%r", command, human_text)
                     content_type = result.headers.get("content-type", ["application/json"])
                     if isinstance(content_type, list):
                         content_type = content_type[0]

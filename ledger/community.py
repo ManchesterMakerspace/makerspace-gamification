@@ -1,8 +1,24 @@
 """Collaborative projects, scoped verification, and mutually accepted mentoring relationships."""
 from uuid import uuid4
-from .domain import Denied
+from .domain import Denied, enqueue_home_refresh
+from .sources import sid
 from .storage import now, enqueue
 from .rules import amount
+
+
+def enqueue_project_home_refresh(ledger, project_id, update_number, phase):
+    """Refresh active members' global project gallery after a visible change."""
+    store = ledger.store
+    participants = store.select("ledger_participants", {"opted_in": True})
+    identities = ledger.sources.identities([p["_id"] for p in participants])
+    for participant in participants:
+        member_id = sid(participant["_id"])
+        identity = identities.get(member_id)
+        local_identity = store.get("ledger_catalog", f"identity:{member_id}") or {}
+        if (identity and identity.get("status") not in ("suspended", "revoked")
+                and not local_identity.get("deactivated") and not local_identity.get("bot")):
+            enqueue_home_refresh(store, member_id,
+                f"project:{project_id}:{update_number}:{phase}", identity["slack_id"])
 
 
 class Community:
@@ -135,6 +151,7 @@ class Community:
             doc.update(title=title, collaborators=people)
             doc["updates"].append({"description": description, "at": now()})
             s.put("ledger_projects", doc)
+            enqueue_project_home_refresh(d, doc["_id"], len(doc["updates"]), "recorded")
             enqueue(s, "ledger_outbox", f"project:{doc['_id']}:{len(doc['updates'])}", "project",
                     {"member_id": actor, "project_id": doc["_id"], "update": len(doc["updates"]) - 1})
             return doc

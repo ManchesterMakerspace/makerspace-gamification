@@ -51,6 +51,8 @@ The shared [Prompt Matrix Template](ledger/prompts/prompt_matrix.xml.md) codifie
 | `/ledger invite @member rank:2` | Restore an earned rank channel, subject to inviter membership |
 | `/ledger feedback <message>` | Record feedback for the staff pilot review |
 | `/ledger-skills [shop name or ID]` | Private skill-tree image and complete accessible text file, generated from actual prerequisites |
+
+Skill-tree PNGs are cached per member in Slack and reused when the generated text checksum is unchanged; missing Slack files or changed skill text produce a fresh image upload. Rank icons use the same cache. See [Slack setup and file caching](docs/SLACK.md).
 | `/ledger-quests` | Browse First Build, self-directed challenges, and cooperative quests |
 | `/ledger-quests submit <catalog-id>` | Submit evidence for independent verification |
 | `/ledger-quests join <quest-id> <discipline>` | Join a cooperative volunteer quest |
@@ -63,11 +65,11 @@ The shared [Prompt Matrix Template](ledger/prompts/prompt_matrix.xml.md) codifie
 | `/ledger-project new` | Start a project showcase and feedback thread |
 | `/ledger-project update <project-id>` | Share progress, revisions, and collaborator credit in its thread |
 
-The App Home shows progress, next-rank requirements, a project gallery, and channel/consent controls. DM conversations and addressed private-channel threads use The Ledger's System personality. Clear self-directed progress questions in Ledger channels receive contextual replies with private-detail controls. Other ambient messages receive no reply.
+The App Home's Character Sheet shows the member's rank, cached rank artwork and skill tree, XP, next-rank requirements, a project gallery, and channel/consent controls. On the first Home-tab open, it publishes a short `Processing...` placeholder while a durable delivery job builds and publishes the view. Later opens retain the published view; verified milestones and rank changes queue refreshes. Skill-tree files are reused while their checksum matches and are regenerated after skill paths change or Slack removes the cached file. Opt-out refreshes the view to the public, nonparticipant Home. DM conversations and addressed private-channel threads use The Ledger's System personality. Clear self-directed progress questions in Ledger channels receive contextual replies with private-detail controls. Other ambient messages receive no reply.
 
 Opt-in immediately queues Ledge Chat and the entry/current-rank channel. Verified history is imported asynchronously. Opt-out removes all registered game-channel memberships and cancels pending invitations, while retaining progress and silently accounting for eligible source activity. Returning members retain their original ruleset and receive one state summary. Peer kudos is the explicit consent exception: nonparticipants can receive thanks, but never receive XP for those kudos, including after joining later.
 
-Promotion adds the new highest-rank channel and leaves earned lower channels alone. Voluntary departures are respected. Self-service invitations restore only Ledge Chat/current rank. Rejoining an older earned channel requires an invitation by another participating member of that channel.
+Promotion announces the member's ascent in their prior-rank channel without naming the next rank, invites them to the new-rank channel, then removes them from the prior channel and welcomes them after the invitation succeeds. Other earned lower channels remain as they are. Voluntary departures are respected. Self-service invitations restore only Ledge Chat/current rank. Rejoining an older earned channel requires an invitation by another participating member of that channel.
 
 ## Progression
 

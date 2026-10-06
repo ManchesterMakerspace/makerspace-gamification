@@ -42,49 +42,63 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'MLAB members role admin' in admin and 'every rank' in admin
     assert 'sender display name replaces the admin real name' in admin
     assert 'on opt-out remove them' in admin
-    assert 'Omit /ledger-admin and related help for ineligible callers' in root.find('response').text
+    assert 'Omit /ledger-admin & related help for ineligible callers' in root.find('response').text
     generated_author = root.find("roles/role[@id='ledger_quest_author']").text
-    assert 'both channels' in generated_author and 'cooperative discipline prose' in generated_author
-    assert 'complete bounded Slack and makerspace member directories' in generated_author
-    assert 'including non-authors and inactive members' in generated_author
-    assert 'omit chat when identity reads fail, are malformed or incomplete' in generated_author
-    assert 'Names absent from both directories may remain' in root.find('privacy').text
-    assert 'Directory records themselves never enter saved context or inference' in generated_author
+    privacy = root.find('privacy').text
+    assert 'Never announce rank-ups in shared Ledge Chat' in root.find('channels').text
+    assert 'quest/discipline prose' in generated_author and 'human publication edits' in generated_author
+    assert 'anywhere in retained chat or completed-example prose at every rank' in privacy
+    assert 'cooperative discipline prose' in privacy and 'fitted saved snapshot at composition/submission' in privacy
+    assert 'Ledge Chat and the selected rank channel' in privacy
+    assert 'including nonparticipants,non-authors and inactive members' in privacy
+    assert 'complete bounded Slack/makerspace directories' in privacy
+    assert 'incomplete identity reads omit chat' in privacy
+    assert 'names absent from both directories may remain' in privacy
+    assert 'Directories never enter saved context/inference' in privacy
     assert 'configured rank names are forbidden' in generated_author
-    assert 'human publication edits and saved proposal retries' in generated_author
-    assert 'completed-example prose at every rank' in generated_author
-    assert 'fitted saved snapshot at composition and submission' in generated_author
     assert 'never completion finalization time' in root.find('economy').text
     assert 'quest_revision matches the disabled revision' in root.find('community').text
     consent = root.find('consent').text
     assert 'first 150 characters' in consent and 'literal first/last-name tokens in any order' in consent
     assert 'valid Slack ID' in consent and '500 candidates/100 choices' in consent
-    assert 'invalid/ambiguous links and known bots/deactivated identities' in consent
+    assert 'invalid/ambiguous links & known bots/deactivated identities' in consent
     assert 'Incomplete identity reads or database errors return no choices' in consent
     assert 'two-second database deadline' in consent and 'Discovery grants no consent' in consent
-    assert 'legacy done jobs without receipts' in consent and 'confirmed delivery receipts' in consent
-    assert len(matrix['text'].encode()) <= MAX_MATRIX_BYTES
+    assert 'legacy done jobs without receipts' in consent and 'confirmed same-generation receipts' in consent
+    normalized_bytes = len(matrix['text'].encode('utf-8'))
+    crlf_bytes = len(matrix['text'].replace('\n', '\r\n').encode('utf-8'))
+    assert normalized_bytes <= 30 * 1024
+    assert crlf_bytes <= 30 * 1024
+    assert crlf_bytes <= MAX_MATRIX_BYTES
     assert {r.get('id') for r in root.find('roles')} == REQUIRED_ROLES
     assert 'Repeated join requests show saved participation' in root.find('consent').text
-    assert 'Only in registered Ledger channels' in root.find('channels').text
-    assert 'old ambient jobs are blocked before inference' in root.find('channels').text
+    assert 'In registered Ledger channels only' in root.find('channels').text
+    assert 'reject stale ambient jobs before inference' in root.find('channels').text
+    channels = root.find('channels').text
+    assert 'post a generic ascent in the prior rank channel without hinting at the next' in channels
+    assert 'then remove from the prior & welcome only after invite succeeds' in channels
+    assert 'Python supplies stage-limited facts' in channels and 'rejects next-rank names' in channels
+    assert 'Bind reserved JPEG claims to the consent generation' in channels
+    assert 'saved member identity' in channels and 'terminal failure of the owning Slack event' in channels
+    assert 'workspace authentication/scope failures' in channels
     assert 'distinct specialized evidence attempt' in root.find('economy').text
     delegate = root.find("roles/role[@id='delegated_reviewer']").text
-    assert 'stable logical ID' in delegate and "every actual operation's shops" in delegate
-    assert 'authorized pending contributions and ready shared projects' in delegate
-    assert 'without private channel membership' in delegate
+    assert 'stable logical ID' in delegate and 'actual-shop scope per operation' in delegate
+    assert 'authorized pending contributions/ready shared projects' in delegate
+    assert 'private channel membership is unnecessary' in delegate
     assert 'history-import pending' in root.find('response').text
     assert 'cancels invalid observations individually before inference' in root.find("roles/role[@id='ai_observer']").text
     observer = root.find("roles/role[@id='ai_observer']").text
-    assert 'regardless of game opt-in' in observer and 'Member opt-out and deployment disable' in observer
+    assert 'regardless of game opt-in' in observer and 'Member opt-out & deployment disable' in observer
     nonparticipant = root.find("roles/role[@id='nonparticipant']").text
-    assert 'independent /ledger preferences opt-out requires no joining' in nonparticipant
-    assert 'No rules, specific ranks/quests or retained progress disclosure' in nonparticipant
-    assert 'preserve choices across upgrades/join/rejoin' in root.find('consent').text
+    assert 'May send/receive peer kudos' in nonparticipant
+    assert '/ledger preferences opts out without joining' in consent
+    assert 'No rules,specific ranks/quests or retained progress disclosure' in nonparticipant
+    assert 'persists across upgrades/join/rejoin' in root.find('consent').text
     assert 'configured private staff channel' in root.find("roles/role[@id='ledger']").text
     assert 'Save review_message_ts/review_channel_id' in root.find('community').text
-    assert 'if deleted, post a replacement and save its timestamp' in root.find('community').text
-    assert 'skip current fingerprints and settled history writes' in root.find('community').text
+    assert 'if deleted,post a replacement & save its timestamp' in root.find('community').text
+    assert 'skip current fingerprints & settled history writes' in root.find('community').text
     assert 'immutable version-specific IDs' in root.find('community').text
     for i, (name, _, floor, _) in enumerate(RANKS, 1):
         assert f'| {i} | {name} | {floor if floor is not None else "Inactive"} |' in root.find('progression').text

@@ -45,7 +45,7 @@ For example, this is **one entry** in the variations array, not a complete file:
 }
 ```
 
-The shipped rank-up archivist uses both ranks and the skill. The mentor uses the new rank and skill while omitting the old rank. The grimoire uses the new rank while omitting both the old rank and skill. A variation may use any subset of the available variables.
+Ordinary rank-up recognition may use configured rank details according to its audience and policy. Automatic rank-channel transitions use a separate constrained composition: shared variants receive only the member's name and a generic stage summary, and must not identify or hint at any rank. The prior-channel ascent and new-channel welcome reuse the selected checked-in `rank_up.json` variation set while saving separate choices/text for retry.
 
 ## Substitutions
 
@@ -103,7 +103,7 @@ For example, `/ledger-admin template-library rank_up shared` adopts the shared r
 
 Existing database versions with a single `system`/`prompt` pair remain readable as one `legacy` variation; they are not silently overwritten. Adopt the library to enable its packaged voices for those overrides. Database version IDs identify published configurations; library-adoption records also retain the source file digest. Original event/audit rank labels stay historical even when current names are used in newly composed text.
 
-The five completion files `shop_complete`, `rank_up`, `quest`, `volunteer_credit`, and `develop_mentor` are version 2 with five paired variations. New Achievement framing applies only to verified completion, never acceptance, pending evidence, or corrections. Humor is optional under matrix version 21. All member-facing model text uses The Ledger/The System; original member-authored content is preserved. New game result summaries use `status.json`; new giver receipts use `delivery.json`.
+`rank_up.json` version 3 retains its paired variations for shared-channel ascent and welcome messages. Prior-rank announcements receive stage-limited facts and must never identify the next rank; Python checks generated text and falls back to a safe sentence if it does. The other four completion files `shop_complete`, `quest`, `volunteer_credit`, and `develop_mentor` remain version 2 with five paired variations. New Achievement framing applies only to verified completion, never acceptance, pending evidence, or corrections. Humor is optional under matrix version 21. All member-facing model text uses The Ledger/The System; original member-authored content is preserved. New game result summaries use `status.json`; new giver receipts use `delivery.json`.
 
 `delivery.json` version 3 and `status.json` version 2 each provide five paired variations: four primarily plain and one restrained System flavor. For consolidated results, Python renders the factual paragraph or lines; Qwen supplies only an optional short sentence that does not repeat recipient, destinations, XP, or milestones. Pending/partial/failure kudos results bypass inference. Receipt identity and metadata exclude original authored content and recipient progress. Destination delivery does not confirm reading. Older reserved acknowledgements and receipts retain their saved policy and text.
 
