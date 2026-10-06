@@ -17,6 +17,7 @@ from .prompt_matrix import PromptMatrix
 from .slack_app import SlackUI, build_app
 from .sources import FIELDS, Sources
 from .storage import connect, connect_database, enqueue
+from .slack_client import SlackCallDebugClient
 from .worker import Worker, ingest_mqtt
 
 
@@ -55,7 +56,7 @@ def dependencies():
     store = ledger.store
     api = ChatAPI(os.environ.get("LEDGER_LLM_BASE_URL", "http://localhost:8000/v1"), os.environ.get("LEDGER_LLM_MODEL", DEFAULT_MODEL), os.environ.get("LEDGER_LLM_API_KEY", ""))
     composer = Composer(store, api, matrix=PromptMatrix.from_env())
-    client = WebClient(token=os.environ["SLACK_BOT_TOKEN"], timeout=10, retry_handlers=[])
+    client = SlackCallDebugClient(token=os.environ["SLACK_BOT_TOKEN"], timeout=10, retry_handlers=[])
     return ledger, composer, client
 
 

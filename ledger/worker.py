@@ -316,14 +316,29 @@ class Worker:
             current = event.get("view") or {}
             callback_id = current.get("callback_id")
             binding_matches = current.get("private_metadata") == home_private_metadata(self.ledger, member_id)
+            latest_home = self.store.select("ledger_outbox", {"kind": "home_publish",
+                "payload.member_id": member_id}, sort=[("created_at", -1), ("_id", -1)], limit=1)
+            latest_home_failed = bool(latest_home and latest_home[0].get("status") in ("failed", "cancelled"))
             if ((active and callback_id == "ledger_home_generated") or
-                    (not active and callback_id == "ledger_home_public")) and binding_matches:
+                    (not active and callback_id == "ledger_home_public")) and binding_matches and not latest_home_failed:
                 return
             if callback_id != "ledger_home_processing":
                 self.slack.views_publish(user_id=event["user"], view=home_processing())
-            if not self.store.exists("ledger_outbox", {"kind": "home_publish", "payload.member_id": member_id,
-                    "status": {"$in": ["pending", "working"]}}):
-                enqueue_home_refresh(self.store, member_id, f"open:{key}", event["user"])
+            def queue_home_refresh(s):
+                if s.exists("ledger_outbox", {"kind": "home_publish", "payload.member_id": member_id,
+                        "status": {"$in": ["pending", "working"]}}):
+                    return
+                latest = s.select("ledger_outbox", {"kind": "home_publish", "payload.member_id": member_id},
+                    sort=[("created_at", -1), ("_id", -1)], limit=1)
+                if latest and latest[0].get("status") in ("failed", "cancelled"):
+                    retry = latest[0]
+                    retry.update(status="pending", attempts=0, available_at=now(), last_error=None)
+                    retry["payload"]["slack_id"] = event["user"]
+                    s.put("ledger_outbox", retry)
+                else:
+                    enqueue(s, "ledger_outbox", f"home:{member_id}:open:{key}", "home_publish",
+                            {"member_id": member_id, "slack_id": event["user"]})
+            self.store.atomic(queue_home_refresh)
             return
         channel = event.get("channel")
         if not channel:
@@ -792,15 +807,23 @@ class Worker:
         self.assert_live_job(job)
         return access
 
-    def _compensate_rank_transition_invite(self, job, uid):
+    def _compensate_rank_transition_invite(self, job, uid, committed_only=False):
         payload = job["payload"]
         member_id = payload["member_id"]
         channel = payload["channel"]
         transition = payload["rank_transition"]
+        # The stale decision may race a correction/re-promotion. Preserve the
+        # saved invite if this identity currently has earned, desired access.
+        if self._rank_transition_membership_authorized_now(job, uid):
+            return False
+        # Identity resolution can take time; confirm the same commit still owns
+        # a present membership immediately before the external Slack kick.
+        if committed_only and not self._rank_transition_commit_owns_membership(job, uid):
+            return False
         try:
             self.slack.conversations_kick(channel=channel, user=uid)
         except SlackApiError as exc:
-            if exc.response.get("error") not in ("not_in_channel", "user_not_found"):
+            if exc.response.get("error") not in ("not_in_channel", "user_not_found", "channel_not_found"):
                 raise
 
         def clear_membership(store):
@@ -818,13 +841,60 @@ class Worker:
                 membership["desired"] = False
             store.put("ledger_channels", membership)
         self.store.atomic(clear_membership)
+        return True
+
+    def _rank_transition_commit_owns_membership(self, job, uid):
+        payload = job["payload"]
+        transition = payload["rank_transition"]
+        saved = self.store.get("ledger_outbox", job["_id"]) or {}
+        committed = saved.get("rank_transition_commit") or {}
+        membership = self.store.get("ledger_channels",
+            f"membership:{payload['member_id']}:{payload['channel_key']}") or {}
+        return bool(committed.get("slack_id") == uid
+            and committed.get("channel") == payload.get("channel")
+            and committed.get("new_slot") == transition.get("new_slot")
+            and committed.get("consent_generation") == transition.get("consent_generation")
+            and membership.get("present")
+            and membership.get("member_id") == payload["member_id"]
+            and membership.get("channel_key") == payload["channel_key"])
+
+    def _rank_transition_membership_authorized_now(self, job, uid):
+        payload = job["payload"]
+        member_id = payload["member_id"]
+        transition = payload["rank_transition"]
+        channel_key = payload["channel_key"]
+        if self.valid_identity(member_id) != uid:
+            return False
+        participant = self.ledger.participant(member_id)
+        membership = self.store.get("ledger_channels", f"membership:{member_id}:{channel_key}") or {}
+        channel = self.store.get("ledger_channels", channel_key) or {}
+        return bool(participant and self.ledger.active(member_id)
+            and participant.get("consent_generation", 0) == transition["consent_generation"]
+            and participant.get("rank", 0) >= transition["new_slot"]
+            and channel_key == f"rank:{transition['new_slot']}"
+            and channel.get("channel_id") == payload.get("channel")
+            and channel.get("slot") == transition["new_slot"]
+            and membership.get("member_id") == member_id
+            and membership.get("channel_key") == channel_key
+            and membership.get("desired") and not membership.get("voluntary_leave"))
 
     def _cancel_after_committed_transition_if_stale(self, job, uid):
         try:
             return self._revalidate_committed_rank_transition(job, uid)
         except Denied:
-            self._compensate_rank_transition_invite(job, uid)
+            self._compensate_rank_transition_invite(job, uid, committed_only=True)
             raise
+
+    def _deny_stale_rank_transition(self, job):
+        latest = self.store.get("ledger_outbox", job["_id"]) or {}
+        committed = latest.get("rank_transition_commit") or {}
+        transition = job["payload"].get("rank_transition") or {}
+        if (committed.get("channel") == job["payload"].get("channel")
+                and committed.get("new_slot") == transition.get("new_slot")
+                and committed.get("consent_generation") == transition.get("consent_generation")
+                and committed.get("slack_id")):
+            self._compensate_rank_transition_invite(job, committed["slack_id"], committed_only=True)
+        raise Denied("Rank transition is no longer authorized.")
 
     def deliver_rank_transition(self, job):
         payload = job["payload"]
@@ -840,11 +910,14 @@ class Worker:
                 or participant.get("revision", 0) < payload["revision"]
                 or participant.get("rank", 0) != new_slot or membership.get("voluntary_leave")
                 or not membership.get("desired")):
-            raise Denied("Rank transition is no longer authorized.")
+            self._deny_stale_rank_transition(job)
         uid = self.valid_identity(member_id)
         if not uid:
-            raise Denied("Slack identity inactive.")
-        participant, membership, channel = self._rank_transition_access(job, uid)
+            self._deny_stale_rank_transition(job)
+        try:
+            participant, membership, channel = self._rank_transition_access(job, uid)
+        except Denied:
+            self._deny_stale_rank_transition(job)
 
         prior_channel = self.store.get("ledger_channels", f"rank:{old_slot}") if old_slot > 0 else None
         if old_slot > 0 and not prior_channel:
@@ -901,6 +974,12 @@ class Worker:
                 s.put("ledger_participants", participant)
                 new_membership.update(present=True, desired=True)
                 s.put("ledger_channels", new_membership)
+                saved = s.get("ledger_outbox", job["_id"])
+                if saved.get("lease") != job["lease"] or saved["status"] != "working":
+                    raise Denied("Rank transition delivery lease changed.")
+                saved["rank_transition_commit"] = {"slack_id": uid, "channel": channel["channel_id"],
+                    "new_slot": new_slot, "consent_generation": generation, "at": now()}
+                s.put("ledger_outbox", saved)
             self.store.atomic(commit_transition)
         except Denied:
             self._compensate_rank_transition_invite(job, invite_uid)
@@ -1307,8 +1386,11 @@ class Worker:
             elements = ([button("Private progress detail", "progress", ""), button("Explore quests", "browse_quests", "")] if self.ledger.active(member_id)
                         else [button("Join The Ledger", "join", "")])
             blocks.append({"type": "actions", "elements": elements})
-            response = self.post_message(channel=p["channel"], thread_ts=p["thread"], text=composed["text"], blocks=blocks,
-                client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"])))
+            post_args = {"channel": p["channel"], "thread_ts": p["thread"], "text": composed["text"],
+                "blocks": blocks, "client_msg_id": str(uuid5(NAMESPACE_URL, job["_id"]))}
+            if request.get("thread") == request.get("at"):
+                post_args["reply_broadcast"] = True
+            response = self.post_message(**post_args)
             self.store.atomic(lambda s: s.put("ledger_context", {"_id": f"reply:{p['channel']}:{response['ts']}", "kind": "reply",
                 "member_id": member_id, "channel": p["channel"], "thread": p["thread"], "text": composed["text"],
                 "participating": self.ledger.active(member_id), "consent_generation": p.get("consent_generation", 0),
