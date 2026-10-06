@@ -265,6 +265,19 @@ class TicketQuests:
                 quest = self.store.get("ledger_evidence", quest["_id"]) or quest
         member = self.sources.identity(event["user"])
         if not member:
+            if owns_pending:
+                # Do not award a claim after its live Slack identity disappears.
+                # Release only this response's reservation, using its durable
+                # response ID instead of requiring the now-missing identity map.
+                def release_claim(s):
+                    latest = s.get("ledger_evidence", quest["_id"])
+                    claim = (latest or {}).get("pending_claim") or {}
+                    if claim.get("response_id") != response_id:
+                        return False
+                    latest.pop("pending_claim", None)
+                    s.put("ledger_evidence", latest)
+                    return True
+                self.store.atomic(release_claim)
             return True
         member_id = sid(member["_id"])
         text = event.get("text", "")
@@ -502,18 +515,19 @@ class TicketQuests:
 
     @staticmethod
     def _permanent_image_error(exc):
-        transient_http = {408, 425, 429}
+        # Private-file 401/403 responses can reflect repairable workspace auth
+        # or scope configuration, so let the claim retry before XP fallback.
+        transient_http = {401, 403, 408, 425, 429}
         status = getattr(getattr(exc, "response", None), "status_code", None)
         if isinstance(exc, requests.HTTPError) and isinstance(status, int):
             return 400 <= status < 500 and status not in transient_http
         if isinstance(exc, SlackApiError):
             error = exc.response.get("error")
-            if error in {"file_not_found", "file_deleted", "file_access_denied", "not_found", "not_shared",
-                         "channel_not_found", "not_in_channel", "missing_scope", "no_permission",
-                         "not_allowed_token_type", "invalid_auth", "not_authed", "token_revoked",
-                         "account_inactive"}:
-                return True
-            return isinstance(status, int) and 400 <= status < 500 and status not in transient_http
+            # Only errors that identify the requested file itself justify an
+            # immediate text-only award. Workspace auth, scope, membership,
+            # and unknown API errors may recover, so leave them to the retry
+            # budget even when Slack reports a client-error HTTP status.
+            return error in {"file_not_found", "file_deleted", "file_access_denied", "not_found", "not_shared"}
         return False
 
     def _upload_drive(self, image, filename):

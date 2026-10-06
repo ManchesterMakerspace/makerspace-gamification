@@ -235,7 +235,7 @@ def test_reserved_jpeg_retry_defers_while_paused_then_resumes(joined):
     assert not store.get("ledger_evidence", quest["_id"]).get("pending_claim")
 
 
-def test_deleted_or_forbidden_image_errors_are_permanent_but_ratelimits_retry():
+def test_deleted_image_errors_are_permanent_but_auth_and_ratelimits_retry():
     slack_response = MagicMock()
     slack_response.get.side_effect = lambda key: "file_not_found" if key == "error" else None
     slack_response.status_code = 200
@@ -249,7 +249,7 @@ def test_deleted_or_forbidden_image_errors_are_permanent_but_ratelimits_retry():
     forbidden_response = requests.Response()
     forbidden_response.status_code = 403
     forbidden = requests.HTTPError(response=forbidden_response)
-    assert TicketQuests._permanent_image_error(forbidden)
+    assert not TicketQuests._permanent_image_error(forbidden)
 
     retry_response = requests.Response()
     retry_response.status_code = 429
