@@ -122,6 +122,34 @@ def test_invite_opt_out_during_slack_call_is_compensated(joined):
     slack.conversations_kick.assert_called_once()
 
 
+def test_rank_transition_announces_privately_to_old_and_new_rank_in_order(joined):
+    l, s, _, _, _, slack = joined
+    w = worker(joined)
+    member_id = str(oid(1))
+    participant = l.participant(member_id)
+    participant.update(rank=2, revision=participant['revision'] + 1)
+    s.put('ledger_participants', participant)
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:1', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:1', 'desired': True, 'present': True})
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:2', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:2', 'desired': True, 'present': False})
+    job = next(j for j in s.select('ledger_outbox', {'kind': 'invite'}) if j['payload']['member_id'] == member_id)
+    job['payload'].update(channel='CRANK2', channel_key='rank:2', revision=participant['revision'],
+        rank_transition={'old_slot': 1, 'new_slot': 2,
+                         'consent_generation': participant['consent_generation']})
+
+    w.outbox(claim(s, job['_id']))
+
+    calls = [call[0] for call in slack.method_calls]
+    assert calls.index('chat_postMessage') < calls.index('conversations_invite')
+    assert calls.index('conversations_invite') < calls.index('conversations_kick')
+    assert calls.index('conversations_kick') < max(i for i, name in enumerate(calls) if name == 'chat_postMessage')
+    messages = [call.kwargs for call in slack.chat_postMessage.call_args_list]
+    assert messages[0]['channel'] == 'CRANK1'
+    assert messages[-1]['channel'] == 'CRANK2'
+    assert 'Novice' not in messages[0]['text']
+
+
 def test_voluntary_departure_and_lower_rank_reinvite(joined):
     l, s, *_ = joined
     w = worker(joined)

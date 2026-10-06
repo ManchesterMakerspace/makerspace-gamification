@@ -1,4 +1,5 @@
 from copy import deepcopy
+import hashlib
 
 import pytest
 import yaml
@@ -139,6 +140,25 @@ def test_unparented_new_art_cannot_revive_after_opt_out_rejoin(joined):
     with pytest.raises(Denied):
         Worker(ledger, composer, slack).outbox(claim(store, 'old-art'))
     slack.files_upload_v2.assert_not_called()
+
+
+def test_missing_cached_rank_icon_is_reuploaded(joined):
+    ledger, store, _, composer, _, slack = joined
+    image = Path(__file__).parents[1] / 'ledger' / 'assets' / 'rank-1.png'
+    digest = hashlib.sha256(image.read_bytes()).hexdigest()
+    store.put('ledger_files', {'_id': 'rank_icon:1', 'kind': 'rank_icon', 'slot': 1,
+        'filename': 'rank-1.png', 'sha256': digest, 'file_id': 'F_DELETED'})
+    missing = type('SlackResponse', (), {'status_code': 200,
+        'get': lambda self, key: 'file_not_found' if key == 'error' else None})()
+    slack.files_info.side_effect = SlackApiError('missing file', missing)
+    enqueue(store, 'ledger_outbox', 'missing-rank-file', 'rank_art',
+        {'member_id': member(), 'slot': 1, 'consent_generation': ledger.participant(member())['consent_generation']})
+    job = claim(store, 'missing-rank-file')
+
+    Worker(ledger, composer, slack).outbox(job)
+
+    slack.files_upload_v2.assert_called_once()
+    assert store.get('ledger_files', 'rank_icon:1')['file_id'] == 'F_RANK_ICON'
 
 
 def test_consolidated_rank_art_waits_without_attempts_then_uses_parent_thread(joined):

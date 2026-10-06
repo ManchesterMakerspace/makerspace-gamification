@@ -190,8 +190,26 @@ class TicketQuests:
         quest = self.store.get("ledger_evidence", key)
         if not quest or quest.get("status") not in ("announcing", "open") or quest.get("winner_member_id"):
             return
-        if quest.get("pending_claim"):
-            return
+        pending = quest.get("pending_claim") or {}
+        if pending:
+            owner_job = (self.store.get("ledger_inbox", pending.get("inbox_job_id"))
+                         if pending.get("inbox_job_id") else None)
+            if owner_job is None and pending.get("message_ts"):
+                # Older reservations predate inbox_job_id; recover their owner
+                # from the retained Slack event payload when possible.
+                owners = self.store.select("ledger_inbox", {"kind": "slack_event",
+                    "status": {"$in": ["failed", "cancelled"]},
+                    "payload.channel": quest.get("announcement_channel"),
+                    "payload.ts": pending["message_ts"]}, limit=1)
+                owner_job = owners[0] if owners else None
+            if (pending.get("response_id") and owner_job and
+                    owner_job.get("status") in ("failed", "cancelled")):
+                self._release_stale_claim(key, pending.get("response_id"), pending,
+                    quest.get("announcement_channel"), quest.get("announcement_ts"), "owner_job_failed")
+                quest = self.store.get("ledger_evidence", key) or quest
+                pending = quest.get("pending_claim") or {}
+            if pending:
+                return
         eligible = ticket is not None and ticket.get("status") in ACTIVE and ticket.get("category") in VALID_CATEGORIES
         outcome = ("deleted" if ticket is None else
                    "closed" if ticket.get("status") in TERMINAL else
@@ -266,20 +284,20 @@ class TicketQuests:
         member = self.sources.identity(event["user"])
         if not member:
             if owns_pending:
-                # Do not award a claim after its live Slack identity disappears.
-                # Release only this response's reservation, using its durable
-                # response ID instead of requiring the now-missing identity map.
-                def release_claim(s):
-                    latest = s.get("ledger_evidence", quest["_id"])
-                    claim = (latest or {}).get("pending_claim") or {}
-                    if claim.get("response_id") != response_id:
-                        return False
-                    latest.pop("pending_claim", None)
-                    s.put("ledger_evidence", latest)
-                    return True
-                self.store.atomic(release_claim)
+                self._release_stale_claim(quest["_id"], response_id, pending, channel, root,
+                                          "claimant_identity_unavailable")
             return True
         member_id = sid(member["_id"])
+        participant = self.ledger.participant(member_id)
+        if owns_pending and pending.get("member_id") != member_id:
+            self._release_stale_claim(quest["_id"], response_id, pending, channel, root,
+                                      "claimant_identity_changed")
+            return True
+        if owns_pending and (not participant or
+                pending.get("consent_generation") != participant.get("consent_generation", 0)):
+            self._release_stale_claim(quest["_id"], response_id, pending, channel, root,
+                                      "consent_generation_changed")
+            return True
         text = event.get("text", "")
         if len(text) > 4000:
             text = text[:4000]
@@ -311,6 +329,8 @@ class TicketQuests:
                     return False
                 latest["pending_claim"] = {"response_id": response_id, "member_id": member_id,
                     "slack_id": event["user"], "message_ts": event["ts"], "claimed_at": current_time,
+                    "consent_generation": participant.get("consent_generation", 0),
+                    "inbox_job_id": event_key,
                     "image_file_id": jpeg["id"], "text": text,
                     "xp_with_image": config_now["xp_with_image"], "xp_without_image": config_now["xp_without_image"]}
                 s.put("ledger_evidence", latest)
@@ -363,7 +383,15 @@ class TicketQuests:
             current_member = Ledger(s, self.sources)
             participant = current_member.participant(member_id)
             claim = (latest or {}).get("pending_claim") or {}
-            owns_claim = claim.get("response_id") == response_id
+            if (claim.get("response_id") == response_id and
+                    claim.get("member_id") != member_id):
+                self._release_stale_claim_in_transaction(s, quest["_id"], response_id, claim,
+                    channel, root, "claimant_identity_changed")
+                return
+            owns_claim = (claim.get("response_id") == response_id and
+                          claim.get("member_id") == member_id)
+            claim_generation_matches = (not owns_claim or claim.get("consent_generation") ==
+                                        (participant or {}).get("consent_generation", 0))
             if (eligible and latest and latest.get("status") == "open" and claim and not owns_claim):
                 from .review_notifications import ReviewDeliveryBusy
                 raise ReviewDeliveryBusy()
@@ -371,7 +399,7 @@ class TicketQuests:
                 claim.get("claimed_at") <= latest["deadline"] if owns_claim else latest["deadline"] > now()))
             valid = (eligible and not claim_rejected and latest and latest.get("status") == "open"
                      and not latest.get("winner_member_id")
-                     and (not claim or owns_claim) and deadline_ok
+                     and (not claim or owns_claim) and deadline_ok and claim_generation_matches
                      and participant and participant.get("opted_in") and current_member.active(member_id)
                      and self.sources.good_standing(member_id) and member_id != latest.get("reporter_id"))
             record["eligible"] = bool(valid)
@@ -397,6 +425,31 @@ class TicketQuests:
             enqueue(s, "ledger_outbox", response_id, "ticket_quest_response", {"response_id": response_id,
                 "winner": winner, "quest_id": quest["_id"]})
         self.store.atomic(accept)
+        return True
+
+    def _release_stale_claim(self, quest_id, response_id, pending, channel, root, reason):
+        """Release a reservation and tombstone its response so replay cannot re-claim it."""
+        return self.store.atomic(lambda s: self._release_stale_claim_in_transaction(
+            s, quest_id, response_id, pending, channel, root, reason))
+
+    @staticmethod
+    def _release_stale_claim_in_transaction(store, quest_id, response_id, pending, channel, root, reason):
+        latest = store.get("ledger_evidence", quest_id)
+        claim = (latest or {}).get("pending_claim") or {}
+        if (not latest or claim.get("response_id") != response_id or
+                claim.get("member_id") != pending.get("member_id")):
+            return False
+        latest.pop("pending_claim", None)
+        latest["responses"] = latest.get("responses", 0) + 1
+        response = {"_id": response_id, "kind": "broken_ticket_quest_response",
+            "quest_id": quest_id, "member_id": pending["member_id"],
+            "slack_id": pending.get("slack_id"), "channel": channel, "thread_ts": root,
+            "message_ts": pending.get("message_ts"), "text": pending.get("text", ""),
+            "image_file_id": None, "eligible": False, "claim_rejected": False,
+            "rejection_reason": reason, "created_at": now(), "delivery": None}
+        store.put("ledger_evidence", latest)
+        if not store.get("ledger_evidence", response_id):
+            store.put("ledger_evidence", response)
         return True
 
     @staticmethod

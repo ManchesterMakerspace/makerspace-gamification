@@ -14,7 +14,7 @@ from bson import json_util
 from .community import Community
 from .domain import Denied, Ledger
 from .messages import button, escape, section
-from .prompt_library import EXAMPLE_FACTS
+from .prompt_library import EXAMPLE_FACTS, library_template
 from .review_notifications import ReviewDeliveryBusy
 from .result_summaries import SummaryBusy, SummaryPending
 from .sources import FIELDS, sid
@@ -148,6 +148,16 @@ class Worker:
         self.store.atomic(lambda s: s.put("ledger_context", {"_id": f"thread:{kwargs['channel']}:{thread}",
             "kind": "thread", "expires_at": now() + timedelta(days=30)}))
         return response
+
+    def _slack_file_exists(self, file_id):
+        try:
+            result = self.slack.files_info(file=file_id)
+        except SlackApiError as exc:
+            if exc.response.get("error") in ("file_not_found", "file_deleted", "not_found"):
+                return False
+            raise
+        file = result.get("file") or {}
+        return file.get("id") == file_id and not file.get("is_deleted")
 
     def reconcile_channels(self):
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
@@ -335,11 +345,36 @@ class Worker:
             summary = skill_summary(l, member_id, " ".join(args))
             facts = {"summary": summary["text"]}
             if summary["nodes"]:
-                image = render_tree(summary)
                 uid = l.sources.slack_id(member_id)
                 dm = self.slack.conversations_open(users=uid)["channel"]["id"]
-                self.slack.files_upload_v2(file_uploads=[{"file": image, "filename": "ledger-skill-tree.png", "title": "Your skill tree"},
-                    {"file": BytesIO(summary["text"].encode()), "filename": "ledger-skill-tree.txt", "title": "Complete skill tree text equivalent"}], channel=dm)
+                text_bytes = summary["text"].encode("utf-8")
+                text_checksum = hashlib.sha256(text_bytes).hexdigest()
+                asset_key = f"skill_tree:{member_id}"
+                saved_file = self.store.get("ledger_files", asset_key)
+                cached = bool(saved_file and saved_file.get("text_sha256") == text_checksum
+                              and saved_file.get("file_id"))
+                if cached and not self._slack_file_exists(saved_file["file_id"]):
+                    self.store.put("ledger_files", {**saved_file, "file_id": None,
+                        "invalidated_at": now()})
+                    cached = False
+                if cached:
+                    self.post_message(channel=dm, text="Your skill tree image is attached.", blocks=[{
+                        "type": "image", "title": {"type": "plain_text", "text": "Your skill tree"},
+                        "slack_file": {"id": saved_file["file_id"]},
+                        "alt_text": "Your current skill tree and clearance paths"}])
+                else:
+                    image = render_tree(summary)
+                    uploaded = self.slack.files_upload_v2(file=image, filename="ledger-skill-tree.png",
+                        title="Your skill tree", channel=dm)
+                    files = uploaded.get("files") or []
+                    file_id = files[0].get("id") if files and isinstance(files[0], dict) else None
+                    if not isinstance(file_id, str) or not file_id:
+                        raise RuntimeError("Slack skill tree upload did not return a file ID")
+                    self.store.put("ledger_files", {"_id": asset_key, "kind": "skill_tree",
+                        "member_id": member_id, "filename": "ledger-skill-tree.png", "file_id": file_id,
+                        "text_sha256": text_checksum, "cached_at": now()})
+                self.slack.files_upload_v2(file=BytesIO(text_bytes), filename="ledger-skill-tree.txt",
+                    title="Complete skill tree text equivalent", channel=dm)
         elif cmd == "/ledger-mentor":
             c = Community(l)
             if args and args[0] == "offer":
@@ -571,11 +606,14 @@ class Worker:
                     continue
         return "".join("\n" + line for line in (lines[:100] if display else lines))
 
-    def persist_composition(self, job, kind, audience, facts, conversation=None, *, profile=None):
+    def persist_composition(self, job, kind, audience, facts, conversation=None, *, profile=None, artifact=None,
+                            library_only=False, omit_rank_facts=False):
+        result_key = artifact or "composed"
+        selection_key = "prompt_selection" if artifact is None else f"{artifact}_prompt_selection"
         current = self.store.get("ledger_outbox", job["_id"])
-        if current.get("composed"):
-            return current["composed"]
-        if not current.get("prompt_selection"):
+        if current.get(result_key):
+            return current[result_key]
+        if not current.get(selection_key):
             self.composer.refresh_matrix()
         payload = job["payload"]
         # Channel conversations use the same shared history as announcements,
@@ -586,21 +624,27 @@ class Worker:
             saved = s.get("ledger_outbox", job["_id"])
             if saved.get("lease") != job["lease"] or saved["status"] != "working":
                 raise Denied("Delivery was cancelled or its lease expired.")
-            if not saved.get("prompt_selection"):
-                saved["prompt_selection"] = (self.composer.reserve(s, kind, audience, scope, profile=profile)
-                                             if profile else self.composer.reserve(s, kind, audience, scope))
+            if not saved.get(selection_key):
+                options = {"template_override": library_template(kind, audience)} if library_only else {}
+                saved[selection_key] = (self.composer.reserve(s, kind, audience, scope, profile=profile, **options)
+                                         if profile else self.composer.reserve(s, kind, audience, scope, **options))
                 s.put("ledger_outbox", saved)
-            elif "matrix" not in saved["prompt_selection"]:
+            elif "matrix" not in saved[selection_key]:
                 # Upgrade pre-matrix reservations once without rerolling their voice.
-                saved["prompt_selection"]["matrix"] = self.composer.matrix.snapshot()
+                saved[selection_key]["matrix"] = self.composer.matrix.snapshot()
                 s.put("ledger_outbox", saved)
-            return saved["prompt_selection"]
+            return saved[selection_key]
         selection = self.store.atomic(reserve)
         if profile == "guidance":
             result = self.composer.guidance(facts, selection=selection)
         else:
             if profile is None:
-                facts = self.prompt_facts(job["payload"].get("member_id"), kind, facts)
+                member_id = job["payload"].get("member_id")
+                if omit_rank_facts:
+                    facts = {**facts, **self.identity_facts(member_id)}
+                    facts.pop("member_slack_id", None)
+                else:
+                    facts = self.prompt_facts(member_id, kind, facts)
             result = self.composer.compose(kind, audience, facts, conversation, selection=selection)
         if profile:
             result["queue_age_seconds"] = max(0, (now() - current.get("created_at", current["available_at"])).total_seconds())
@@ -608,10 +652,127 @@ class Worker:
             saved = s.get("ledger_outbox", job["_id"])
             if saved.get("lease") != job["lease"] or saved["status"] != "working":
                 raise Denied("Delivery was cancelled or its lease expired.")
-            saved["composed"] = result
+            saved[result_key] = result
             s.put("ledger_outbox", saved)
         self.store.atomic(write)
         return result
+
+    def deliver_rank_transition(self, job):
+        payload = job["payload"]
+        transition = payload["rank_transition"]
+        member_id = payload["member_id"]
+        old_slot, new_slot = transition["old_slot"], transition["new_slot"]
+        generation = transition["consent_generation"]
+        participant = self.ledger.participant(member_id)
+        membership = self.store.get("ledger_channels", f"membership:{member_id}:{payload['channel_key']}") or {}
+        channel = self.store.get("ledger_channels", payload["channel_key"])
+        if (not channel or channel.get("channel_id") != payload["channel"] or not participant
+                or not self.ledger.active(member_id) or participant.get("consent_generation", 0) != generation
+                or participant.get("revision", 0) < payload["revision"]
+                or participant.get("rank", 0) < new_slot or membership.get("voluntary_leave")
+                or not membership.get("desired")):
+            raise Denied("Rank transition is no longer authorized.")
+        uid = self.valid_identity(member_id)
+        if not uid:
+            raise Denied("Slack identity inactive.")
+
+        prior_channel = self.store.get("ledger_channels", f"rank:{old_slot}") if old_slot > 0 else None
+        if old_slot > 0 and not prior_channel:
+            from .review_notifications import ReviewDeliveryBusy
+            raise ReviewDeliveryBusy()
+        current = self.store.get("ledger_outbox", job["_id"])
+        if prior_channel and not current.get("rank_prior_delivery"):
+            source_member = self.ledger.sources.member(member_id) or {}
+            member_name = " ".join(str(source_member.get(k) or "").strip()
+                                   for k in ("firstname", "lastname")).strip() or "A member"
+            composed = self.persist_composition(job, "rank_up", "shared",
+                {"summary": "has ascended to a higher level"}, artifact="rank_prior_composed",
+                library_only=True, omit_rank_facts=True)
+            text = composed.get("text", "") if composed.get("outcome") == "generated" else ""
+            ranks = self.store.get("ledger_catalog", "rank_display")["ranks"]
+            forbidden_names = [ranks[slot - 1]["name"] for slot in range(old_slot + 1, len(ranks) + 1)]
+            reveals_rank = any(name and re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", text, re.I)
+                               for name in forbidden_names)
+            if (not text or reveals_rank or re.search(r"<[@#!](?:channel|here|everyone)|<@[UW][A-Z0-9]+>", text, re.I)):
+                text = f"{escape(member_name)} has ascended to a higher level."
+            elif member_name.casefold() not in text.casefold():
+                text = f"{escape(member_name)} — {text}"
+            self.assert_live_job(job)
+            self.post_message(channel=prior_channel["channel_id"], text=text,
+                blocks=[section(text)], client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"] + ":rank-prior")),
+                unfurl_links=False, unfurl_media=False)
+            def save_prior(store):
+                saved = store.get("ledger_outbox", job["_id"])
+                if saved.get("lease") != job["lease"] or saved["status"] != "working":
+                    raise Denied("Rank transition delivery lease changed.")
+                saved["rank_prior_delivery"] = {"channel": prior_channel["channel_id"], "at": now()}
+                store.put("ledger_outbox", saved)
+            self.store.atomic(save_prior)
+
+        participant = self.ledger.participant(member_id)
+        if (not self.ledger.active(member_id) or not participant
+                or participant.get("consent_generation", 0) != generation):
+            raise Denied("Rank transition belongs to an earlier participation.")
+        self.assert_live_job(job)
+        try:
+            self.slack.conversations_invite(channel=channel["channel_id"], users=uid)
+        except SlackApiError as exc:
+            if exc.response.get("error") not in ("already_in_channel", "already_in_group"):
+                raise
+        participant = self.ledger.participant(member_id)
+        if (not self.ledger.active(member_id) or not participant
+                or participant.get("consent_generation", 0) != generation):
+            try:
+                self.slack.conversations_kick(channel=channel["channel_id"], user=uid)
+            except SlackApiError as exc:
+                if exc.response.get("error") not in ("not_in_channel", "user_not_found"):
+                    raise
+            raise Denied("Rank transition belongs to an earlier participation.")
+        new_membership = self.store.get("ledger_channels", membership["_id"])
+        if new_membership:
+            new_membership.update(present=True, desired=True)
+            self.store.atomic(lambda s: s.put("ledger_channels", new_membership))
+
+        if prior_channel:
+            self.assert_live_job(job)
+            try:
+                self.slack.conversations_kick(channel=prior_channel["channel_id"], user=uid)
+            except SlackApiError as exc:
+                if exc.response.get("error") not in ("not_in_channel", "user_not_found", "channel_not_found"):
+                    raise
+            old_membership = self.store.get("ledger_channels", f"membership:{member_id}:rank:{old_slot}")
+            if old_membership:
+                old_membership.update(present=False, desired=False)
+                self.store.atomic(lambda s: s.put("ledger_channels", old_membership))
+
+        current = self.store.get("ledger_outbox", job["_id"])
+        if not current.get("rank_welcome_delivery"):
+            welcome = self.persist_composition(job, "rank_up", "shared",
+                {"summary": "is now part of this rank channel and should be welcomed"},
+                artifact="rank_welcome_composed", library_only=True, omit_rank_facts=True)
+            text = welcome.get("text", "") if welcome.get("outcome") == "generated" else ""
+            ranks = self.store.get("ledger_catalog", "rank_display")["ranks"]
+            reveals_rank = any(rank["name"] and re.search(r"(?<!\w)" + re.escape(rank["name"]) + r"(?!\w)", text, re.I)
+                               for rank in ranks)
+            source_member = self.ledger.sources.member(member_id) or {}
+            member_name = " ".join(str(source_member.get(k) or "").strip()
+                                   for k in ("firstname", "lastname")).strip() or "our newly elevated member"
+            if (not text or reveals_rank or
+                    re.search(r"<[@#!](?:channel|here|everyone)|<@[UW][A-Z0-9]+>", text, re.I)):
+                text = f"Welcome our newly elevated brethren, {escape(member_name)}!"
+            elif member_name.casefold() not in text.casefold():
+                text = f"{escape(member_name)} — {text}"
+            self.assert_live_job(job)
+            self.post_message(channel=channel["channel_id"], text=text,
+                blocks=[section(text)], client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"] + ":rank-welcome")),
+                unfurl_links=False, unfurl_media=False)
+            def save_welcome(store):
+                saved = store.get("ledger_outbox", job["_id"])
+                if saved.get("lease") != job["lease"] or saved["status"] != "working":
+                    raise Denied("Rank transition delivery lease changed.")
+                saved["rank_welcome_delivery"] = {"channel": channel["channel_id"], "at": now()}
+                store.put("ledger_outbox", saved)
+            self.store.atomic(save_welcome)
 
     def deliver_guidance(self, job):
         """An explicit self-only request; never an unsolicited coaching notice."""
@@ -748,6 +909,8 @@ class Worker:
                 self.store.atomic(lambda s: s.put("ledger_channels", {"_id": f"rank:{slot}", "kind": "channel", "channel_id": channel["id"], "slot": slot}))
             return
         if kind == "invite":
+            if p.get("rank_transition"):
+                return self.deliver_rank_transition(job)
             participant = self.ledger.participant(member_id)
             channel = self.store.get("ledger_channels", p["channel_key"])
             membership = self.store.get("ledger_channels", f"membership:{member_id}:{p['channel_key']}") or {}
@@ -878,21 +1041,35 @@ class Worker:
                 asset_key = f"rank_icon:{slot}"
                 saved_file = self.store.get("ledger_files", asset_key)
                 thread = {"thread_ts": parent["ts"]} if parent else {}
-                if saved_file and saved_file.get("sha256") == image_hash and saved_file.get("file_id"):
-                    self.slack.chat_postMessage(channel=dm, text=f"Rank: {display['name']}",
-                        blocks=[{"type": "image", "title": {"type": "plain_text", "text": display["name"]},
-                                 "slack_file": {"id": saved_file["file_id"]},
-                                 "alt_text": f"Rank icon for {display['name']}"}], **thread)
-                else:
-                    uploaded = self.slack.files_upload_v2(file=str(image_path), filename=filename,
-                        title=display["name"], channel=dm, **thread)
-                    files = uploaded.get("files") or []
-                    file_id = files[0].get("id") if files and isinstance(files[0], dict) else None
-                    if not isinstance(file_id, str) or not file_id:
-                        raise RuntimeError("Slack rank image upload did not return a file ID")
-                    self.store.put("ledger_files", {"_id": asset_key, "kind": "rank_icon",
-                        "slot": slot, "filename": filename, "title": display["name"],
-                        "sha256": image_hash, "file_id": file_id, "uploaded_at": now()})
+                cache_valid = bool(saved_file and saved_file.get("sha256") == image_hash
+                                   and saved_file.get("file_id"))
+                if cache_valid and not self._slack_file_exists(saved_file["file_id"]):
+                    saved_file = {**saved_file, "file_id": None, "invalidated_at": now()}
+                    self.store.put("ledger_files", saved_file)
+                    cache_valid = False
+                if cache_valid:
+                    try:
+                        self.post_message(channel=dm, text=f"Rank: {display['name']}",
+                            blocks=[{"type": "image", "title": {"type": "plain_text", "text": display["name"]},
+                                     "slack_file": {"id": saved_file["file_id"]},
+                                     "alt_text": f"Rank icon for {display['name']}"}], **thread)
+                        return
+                    except SlackApiError as exc:
+                        if exc.response.get("error") not in ("file_not_found", "file_deleted", "not_found",
+                                                              "invalid_file_id", "invalid_blocks"):
+                            raise
+                        self.store.put("ledger_files", {**saved_file, "file_id": None,
+                            "invalidated_at": now()})
+                self.assert_live_job(job)
+                uploaded = self.slack.files_upload_v2(file=str(image_path), filename=filename,
+                    title=display["name"], channel=dm, **thread)
+                files = uploaded.get("files") or []
+                file_id = files[0].get("id") if files and isinstance(files[0], dict) else None
+                if not isinstance(file_id, str) or not file_id:
+                    raise RuntimeError("Slack rank image upload did not return a file ID")
+                self.store.put("ledger_files", {"_id": asset_key, "kind": "rank_icon",
+                    "slot": slot, "filename": filename, "title": display["name"],
+                    "sha256": image_hash, "file_id": file_id, "uploaded_at": now()})
             return
         if kind == "conversation":
             self.ledger.require_member(member_id)

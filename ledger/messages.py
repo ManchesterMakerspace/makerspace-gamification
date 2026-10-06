@@ -282,9 +282,9 @@ class Composer:
         template = store.get("ledger_message_templates", head["version"]) if head else default_template(kind, audience)
         return normalize_template(template)
 
-    def reserve(self, store, kind, audience, scope, *, profile=None):
+    def reserve(self, store, kind, audience, scope, *, profile=None, template_override=None):
         """Call inside the delivery job's transaction; never perform generation here."""
-        template = self.template(kind, audience, store)
+        template = template_override or self.template(kind, audience, store)
         stamp = now()
         selection = {"template": template, "matrix": self.matrix.snapshot(), "scope": scope, "at": stamp}
         if profile is not None:

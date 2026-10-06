@@ -192,7 +192,7 @@ class Ledger:
         self.notify(member_id, "opt_out", {"summary": "You have left game participation. Channel removal is queued. Skills and XP are retained; source activity continues accruing silently. Observation is a separate choice: use /ledger preferences and uncheck Allow observation to disable it."},
                     f"optout:{member_id}:{p['revision']}", exception=True)
 
-    def _invite(self, member_id, channel_key, explicit=False, inviter=None):
+    def _invite(self, member_id, channel_key, explicit=False, inviter=None, rank_transition=None):
         channel = self.store.get("ledger_channels", channel_key)
         if not channel or not self.active(member_id):
             return
@@ -203,8 +203,11 @@ class Ledger:
         membership.update(voluntary_leave=False, desired=True, inviter=inviter)
         self.store.put("ledger_channels", membership)
         p = self.participant(member_id)
-        enqueue(self.store, "ledger_outbox", f"invite:{member_id}:{channel_key}:{p['revision']}:{uuid4()}", "invite",
-                {"member_id": member_id, "channel": channel["channel_id"], "channel_key": channel_key, "revision": p["revision"]})
+        payload = {"member_id": member_id, "channel": channel["channel_id"],
+                   "channel_key": channel_key, "revision": p["revision"]}
+        if rank_transition:
+            payload["rank_transition"] = deepcopy(rank_transition)
+        enqueue(self.store, "ledger_outbox", f"invite:{member_id}:{channel_key}:{p['revision']}:{uuid4()}", "invite", payload)
 
     def invite(self, actor, target, channel_key):
         return self.tx("_peer_invite", actor, target, channel_key)
@@ -422,7 +425,9 @@ class Ledger:
         self.store.put("ledger_participants", p)
         from .quests import Quests
         Quests(self).unlock_notice(member_id, action_id=action_id if not historical else None)
-        self._invite(member_id, f"rank:{rank}")
+        transition = None if historical else {"old_slot": old_slot, "new_slot": rank,
+            "consent_generation": p.get("consent_generation", 0)}
+        self._invite(member_id, f"rank:{rank}", rank_transition=transition)
         summary_id = self.major(member_id, "rank_up", {"rank": self.presentation(rank)["name"], "slot": rank,
                    "old_slot": old_slot, "old_rank": self.presentation(old_slot)["name"],
                    "new_slot": rank, "new_rank": self.presentation(rank)["name"]}, f"rank:{member_id}:{rank}:{p['revision']}", historical, action_id=action_id)

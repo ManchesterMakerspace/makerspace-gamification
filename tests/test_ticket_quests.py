@@ -137,12 +137,102 @@ def test_transient_image_check_retries_before_awarding_image_xp(joined):
     with pytest.raises(ReviewDeliveryBusy):
         service.response_event(later, "later-text-reply")
     assert ledger.participant(str(oid(3)))["xp"] == "0"
-
     with patch.object(TicketQuests, "_download_jpeg", return_value=b"sanitized-jpeg"):
         assert service.response_event(event, "transient-image-event") is True
     assert ledger.participant(str(oid(2)))["xp"] == "100"
     assert service.response_event(later, "later-text-reply") is True
     assert ledger.participant(str(oid(3)))["xp"] == "0"
+
+
+def test_reserved_image_claim_is_released_after_opt_out_and_rejoin(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    event = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.111", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "F1", "mimetype": "image/jpeg"}]}
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=requests.ConnectionError("temporary")):
+        with pytest.raises(requests.RequestException):
+            service.response_event(event, "generation-change")
+    old_generation = ledger.participant(str(oid(2)))["consent_generation"]
+    assert store.get("ledger_evidence", quest["_id"])["pending_claim"]["consent_generation"] == old_generation
+    ledger.leave(str(oid(2)))
+    ledger.join(str(oid(2)))
+    assert ledger.participant(str(oid(2)))["consent_generation"] != old_generation
+
+    assert service.response_event(event, "generation-change") is True
+    saved = store.get("ledger_evidence", quest["_id"])
+    response_id = "ticket-quest-response:" + sha1(f"CQUEST:{event['ts']}".encode()).hexdigest()
+    assert "pending_claim" not in saved
+    assert store.get("ledger_evidence", response_id)["rejection_reason"] == "consent_generation_changed"
+    assert ledger.participant(str(oid(2)))["xp"] == "0"
+
+
+def test_reserved_image_claim_is_released_when_slack_mapping_disappears(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    event = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.112", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "F1", "mimetype": "image/jpeg"}]}
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=requests.ConnectionError("temporary")):
+        with pytest.raises(requests.RequestException):
+            service.response_event(event, "mapping-change")
+    source.data["slack_users"] = [row for row in source.data["slack_users"] if row["slack_id"] != "U2"]
+
+    assert service.response_event(event, "mapping-change") is True
+    saved = store.get("ledger_evidence", quest["_id"])
+    response_id = "ticket-quest-response:" + sha1(f"CQUEST:{event['ts']}".encode()).hexdigest()
+    assert "pending_claim" not in saved
+    assert store.get("ledger_evidence", response_id)["rejection_reason"] == "claimant_identity_unavailable"
+    assert ledger.participant(str(oid(2)))["xp"] == "0"
+
+
+def test_reserved_image_retry_cannot_follow_reassigned_slack_identity(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    ledger.join(str(oid(3)))
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    event = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.113", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "F1", "mimetype": "image/jpeg"}]}
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=requests.ConnectionError("temporary")):
+        with pytest.raises(requests.RequestException):
+            service.response_event(event, "mapping-reassigned")
+    source.data["slack_users"] = [
+        {**row, "member_id": oid(3)} if row["slack_id"] == "U2" else row
+        for row in source.data["slack_users"]]
+
+    assert service.response_event(event, "mapping-reassigned") is True
+    response_id = "ticket-quest-response:" + sha1(f"CQUEST:{event['ts']}".encode()).hexdigest()
+    assert "pending_claim" not in store.get("ledger_evidence", quest["_id"])
+    assert store.get("ledger_evidence", response_id)["rejection_reason"] == "claimant_identity_changed"
+    assert ledger.participant(str(oid(2)))["xp"] == "0"
+    assert ledger.participant(str(oid(3)))["xp"] == "0"
+
+
+def test_reconcile_releases_claim_owned_by_terminal_slack_job(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    event = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.114", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "F1", "mimetype": "image/jpeg"}]}
+    owner_id = "slack:ticket-owner-failed"
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=requests.ConnectionError("temporary")):
+        with pytest.raises(requests.RequestException):
+            service.response_event(event, owner_id)
+    store.put("ledger_inbox", {"_id": owner_id, "kind": "slack_event", "payload": event,
+        "status": "failed", "attempts": 10})
+    source.data["fix_tickets"][0]["status"] = "resolved"
+
+    service.reconcile(ticket_id=735)
+
+    saved = store.get("ledger_evidence", quest["_id"])
+    response_id = "ticket-quest-response:" + sha1(f"CQUEST:{event['ts']}".encode()).hexdigest()
+    assert "pending_claim" not in saved
+    assert saved["status"] == "closed" and saved["outcome"] == "closed"
+    assert store.get("ledger_evidence", response_id)["rejection_reason"] == "owner_job_failed"
 
 
 def test_permanently_unavailable_jpeg_falls_back_to_no_image_xp(joined):

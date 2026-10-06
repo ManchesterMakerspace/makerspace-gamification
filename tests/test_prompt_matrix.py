@@ -68,6 +68,13 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'Repeated join requests show saved participation' in root.find('consent').text
     assert 'Only in registered Ledger channels' in root.find('channels').text
     assert 'old ambient jobs are blocked before inference' in root.find('channels').text
+    channels = root.find('channels').text
+    assert 'announce the ascent in the prior rank channel without naming or implying the next rank' in channels
+    assert 'only after Slack confirms membership, remove them from the prior rank channel and welcome them' in channels
+    assert 'Python supplies stage-limited facts and rejects next-rank names' in channels
+    assert 'Bind reserved JPEG claims to the consent generation' in channels
+    assert 'saved member identity' in channels and 'terminal failure of the owning Slack event' in channels
+    assert 'workspace authentication/scope failures' in channels
     assert 'distinct specialized evidence attempt' in root.find('economy').text
     delegate = root.find("roles/role[@id='delegated_reviewer']").text
     assert 'stable logical ID' in delegate and "every actual operation's shops" in delegate
