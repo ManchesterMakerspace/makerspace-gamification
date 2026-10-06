@@ -15,6 +15,11 @@ CHALLENGES = {"challenge", "first_build", "boss", "stewardship", "develop_mentor
 RESULT_XP = CHALLENGES | {"checkout_earned", "checkout_granted", "volunteer_credit", "quest", "recruitment"}
 
 
+def enqueue_home_refresh(store, member_id, trigger, slack_id=None):
+    key = f"home:{member_id}:{trigger}"
+    enqueue(store, "ledger_outbox", key, "home_publish", {"member_id": member_id, "slack_id": slack_id})
+
+
 class Denied(ValueError):
     pass
 
@@ -182,7 +187,7 @@ class Ledger:
         for job in self.store.select("ledger_outbox", {"status": {"$in": ["pending", "working"]}}):
             payload = job["payload"]
             if payload.get("member_id") == member_id and job["kind"] in ("invite", "message", "mqtt", "conversation", "welcome", "quest_draft",
-                    "summary_flush", "summary_delivery", "guidance", "rank_art") and not payload.get("peer_kudos"):
+                    "summary_flush", "summary_delivery", "guidance", "rank_art", "home_publish") and not payload.get("peer_kudos"):
                 job["status"] = "cancelled"
                 self.store.put("ledger_outbox", job)
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
@@ -191,6 +196,7 @@ class Ledger:
         # Explicit acknowledgment is allowed after consent is withdrawn.
         self.notify(member_id, "opt_out", {"summary": "You have left game participation. Channel removal is queued. Skills and XP are retained; source activity continues accruing silently. Observation is a separate choice: use /ledger preferences and uncheck Allow observation to disable it."},
                     f"optout:{member_id}:{p['revision']}", exception=True)
+        enqueue_home_refresh(self.store, member_id, f"leave:{p['revision']}", self.sources.slack_id(member_id))
 
     def _invite(self, member_id, channel_key, explicit=False, inviter=None, rank_transition=None):
         channel = self.store.get("ledger_channels", channel_key)
@@ -233,6 +239,8 @@ class Ledger:
         positive_xp = kind in RESULT_XP and amount(facts.get("xp_change", "0")) > 0
         verified_milestone = kind in CHALLENGES | {"quest"} and facts.get("verified_milestone") is True
         informational_unlock = kind == "quest" and str(key).startswith("quest-unlock:")
+        if not exception and not administrative and (verified_milestone or kind in MAJOR):
+            enqueue_home_refresh(self.store, member_id, str(action_id or key), self.sources.slack_id(member_id))
         if action_id and not exception and not administrative and (positive_xp or verified_milestone or kind in MAJOR or informational_unlock):
             from .result_summaries import collect
             return collect(self, action_id, member_id, kind, facts, str(key))

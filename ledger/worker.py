@@ -12,14 +12,14 @@ from slack_sdk.errors import SlackApiError
 from bson import json_util
 
 from .community import Community
-from .domain import Denied, Ledger
+from .domain import Denied, Ledger, enqueue_home_refresh
 from .messages import button, escape, section
 from .prompt_library import EXAMPLE_FACTS, library_template
 from .review_notifications import ReviewDeliveryBusy
 from .result_summaries import SummaryBusy, SummaryPending
 from .sources import FIELDS, sid
 from .storage import enqueue, now
-from .views import home
+from .views import home, home_processing
 
 log = logging.getLogger(__name__)
 
@@ -159,6 +159,94 @@ class Worker:
         file = result.get("file") or {}
         return file.get("id") == file_id and not file.get("is_deleted")
 
+    def _home_rank_icon(self, participant, job):
+        from .rules import RANKS
+        slot = participant.get("rank", 0)
+        if not 1 <= slot <= len(RANKS):
+            return None
+        display = self.ledger.presentation(slot)
+        if display["name"] != RANKS[slot - 1][0]:
+            return None
+        image_path = Path(__file__).parent / "assets" / f"rank-{slot}.png"
+        image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+        asset_key = f"rank_icon:{slot}"
+        saved = self.store.get("ledger_files", asset_key)
+        if saved and saved.get("sha256") == image_hash and saved.get("file_id"):
+            if self._slack_file_exists(saved["file_id"]):
+                return saved["file_id"]
+            saved = {**saved, "file_id": None, "invalidated_at": now()}
+            self.store.put("ledger_files", saved)
+        self.assert_live_job(job)
+        uploaded = self.slack.files_upload_v2(file=str(image_path), filename=image_path.name,
+            title=display["name"])
+        files = uploaded.get("files") or []
+        file_id = files[0].get("id") if files and isinstance(files[0], dict) else None
+        if not isinstance(file_id, str) or not file_id:
+            raise RuntimeError("Slack rank image upload did not return a file ID")
+        self.store.put("ledger_files", {"_id": asset_key, "kind": "rank_icon", "slot": slot,
+            "filename": image_path.name, "title": display["name"], "sha256": image_hash,
+            "file_id": file_id, "uploaded_at": now()})
+        return file_id
+
+    def _home_skill_tree(self, member_id, job):
+        from .skills import render_tree, skill_summary
+        summary = skill_summary(self.ledger, member_id)
+        if not summary.get("nodes") or summary.get("status") == "unavailable":
+            return None
+        text_checksum = hashlib.sha256(summary["text"].encode("utf-8")).hexdigest()
+        asset_key = f"skill_tree:{member_id}"
+        saved = self.store.get("ledger_files", asset_key)
+        if (saved and saved.get("text_sha256") == text_checksum and saved.get("file_id")
+                and self._slack_file_exists(saved["file_id"])):
+            return saved["file_id"]
+        if saved and saved.get("file_id"):
+            saved = {**saved, "file_id": None, "invalidated_at": now()}
+            self.store.put("ledger_files", saved)
+        self.assert_live_job(job)
+        uploaded = self.slack.files_upload_v2(file=render_tree(summary), filename="ledger-skill-tree.png",
+            title="Your skill tree")
+        files = uploaded.get("files") or []
+        file_id = files[0].get("id") if files and isinstance(files[0], dict) else None
+        if not isinstance(file_id, str) or not file_id:
+            raise RuntimeError("Slack skill tree upload did not return a file ID")
+        self.store.put("ledger_files", {"_id": asset_key, "kind": "skill_tree", "member_id": member_id,
+            "filename": "ledger-skill-tree.png", "file_id": file_id, "text_sha256": text_checksum,
+            "cached_at": now()})
+        return file_id
+
+    def publish_home(self, job):
+        payload = job["payload"]
+        member_id = payload["member_id"]
+        slack_id = payload.get("slack_id") or self.ledger.sources.slack_id(member_id)
+        if not slack_id or self.valid_identity(member_id) != slack_id:
+            raise Denied("Home publication requires the current linked Slack identity.")
+        participant = self.ledger.participant(member_id)
+        if participant and self.ledger.active(member_id) and participant.get("import_pending"):
+            raise HistoryImportPending()
+        rank_icon_file_id = None
+        skill_tree_file_id = None
+        if participant and self.ledger.active(member_id):
+            rank_icon_file_id = self._home_rank_icon(participant, job)
+            skill_tree_file_id = self._home_skill_tree(member_id, job)
+        self.assert_live_job(job)
+        latest = self.ledger.participant(member_id)
+        if latest and self.ledger.active(member_id) and latest.get("import_pending"):
+            raise HistoryImportPending()
+        if not self.ledger.active(member_id):
+            # A concurrent opt-out must never publish the private view we just built.
+            rank_icon_file_id = skill_tree_file_id = None
+        if self.valid_identity(member_id) != slack_id:
+            raise Denied("Home publication requires the current linked Slack identity.")
+        latest = self.ledger.participant(member_id)
+        if latest and self.ledger.active(member_id) and latest.get("import_pending"):
+            raise HistoryImportPending()
+        if not self.ledger.active(member_id):
+            rank_icon_file_id = skill_tree_file_id = None
+        self.assert_live_job(job)
+        self.slack.views_publish(user_id=slack_id,
+            view=home(self.ledger, member_id, rank_icon_file_id=rank_icon_file_id,
+                      skill_tree_file_id=skill_tree_file_id))
+
     def reconcile_channels(self):
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
             present = self.channel_members(channel["channel_id"])
@@ -221,8 +309,19 @@ class Worker:
             return
         member = self.ledger.sources.identity(event.get("user"))
         if kind == "app_home_opened":
-            if member:
-                self.slack.views_publish(user_id=event["user"], view=home(self.ledger, sid(member["_id"])))
+            if event.get("tab") != "home" or not member:
+                return
+            member_id = sid(member["_id"])
+            active = self.ledger.active(member_id)
+            current = event.get("view") or {}
+            callback_id = current.get("callback_id")
+            if (active and callback_id == "ledger_home_generated") or (not active and callback_id == "ledger_home_public"):
+                return
+            if callback_id != "ledger_home_processing":
+                self.slack.views_publish(user_id=event["user"], view=home_processing())
+            if not self.store.exists("ledger_outbox", {"kind": "home_publish", "payload.member_id": member_id,
+                    "status": {"$in": ["pending", "working"]}}):
+                enqueue_home_refresh(self.store, member_id, f"open:{key}", event["user"])
             return
         channel = event.get("channel")
         if not channel:
@@ -874,6 +973,8 @@ class Worker:
             return TicketQuests(self.ledger, worker=self).deliver(job)
         if kind == "guidance":
             return self.deliver_guidance(job)
+        if kind == "home_publish":
+            return self.publish_home(job)
         if kind in ("review_notice", "quest_review_notice"):
             from .review_notifications import deliver
             return deliver(self, job)

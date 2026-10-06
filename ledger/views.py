@@ -148,17 +148,31 @@ def ranks_preview(ranks, draft_id):
                  {"draft": draft_id}, "Publish")
 
 
-def home(ledger, member_id):
+def home_processing():
+    return {"type": "home", "callback_id": "ledger_home_processing", "blocks": [
+        {"type": "header", "text": {"type": "plain_text", "text": "Character Sheet"}},
+        section("Processing...")
+    ]}
+
+
+def home(ledger, member_id, *, rank_icon_file_id=None, skill_tree_file_id=None):
     p = ledger.participant(member_id)
     if not ledger.active(member_id):
-        return {"type": "home", "blocks": [section("*The Ledger*\nChoose your own path through learning, making, and helping."),
+        return {"type": "home", "callback_id": "ledger_home_public", "blocks": [section("*The Ledger*\nChoose your own path through learning, making, and helping."),
             {"type": "actions", "elements": [button("Opt in", "join", ""), button("Preferences", "preferences", "")]}]}
     display = ledger.presentation(p["rank"])
-    rules = ledger.store.get("ledger_rulesets", p["ruleset"])
-    blocks = [section(f"{display['emoji']} *{escape(display['name'])}* · {p['xp']} XP"),
-              navigation(),
+    blocks = [{"type": "header", "text": {"type": "plain_text", "text": "Character Sheet"}},
+              section(f"{display['emoji']} *{escape(display['name'])}* · {p['xp']} XP")]
+    if rank_icon_file_id:
+        blocks.append({"type": "image", "title": {"type": "plain_text", "text": display["name"]},
+                       "slack_file": {"id": rank_icon_file_id}, "alt_text": f"Rank icon for {display['name']}"})
+    if skill_tree_file_id:
+        blocks.append({"type": "image", "title": {"type": "plain_text", "text": "Your skill tree"},
+                       "slack_file": {"id": skill_tree_file_id},
+                       "alt_text": "Your current skill paths and clearance states"})
+    blocks.extend([navigation(),
               section("Choose your next step: `/ledger-skills`, `/ledger-quests`, `/ledger-mentor`, `/kudos`, or `/ledger-project`."),
-              section("*Your progress*\n" + "\n".join(f"{k.replace('_', ' ').title()}: {v}" for k, v in p.get("metrics", {}).items()))]
+              section("*Your progress*\n" + "\n".join(f"{k.replace('_', ' ').title()}: {v}" for k, v in p.get("metrics", {}).items()))])
     if p["rank"] <= 2:
         blocks.append(section("*A small first step*\nTry a personalized keychain or another safe First Build. Choose your own materials and pace; ask a Success Buddy for help. Submit with `/ledger-quests submit first-build`."))
     elif p["rank"] <= 4:
@@ -177,7 +191,7 @@ def home(ledger, member_id):
     administrative_help = help_text(ledger, member_id)
     if administrative_help:
         blocks.append(section(administrative_help))
-    return {"type": "home", "blocks": blocks}
+    return {"type": "home", "callback_id": "ledger_home_generated", "blocks": blocks}
 
 
 def navigation():

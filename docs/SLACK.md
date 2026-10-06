@@ -93,7 +93,7 @@ After changing `.env`, recreate the affected containers with `docker compose up 
 
 | Bot event | Handler purpose | Scope used |
 | --- | --- | --- |
-| `app_home_opened` | Publish the participant's gallery/progress Home view | No additional event scope |
+| `app_home_opened` | Publish the first-open placeholder and queue the personalized Character Sheet | No additional event scope |
 | `app_mention` | Threaded responses when The Ledger is addressed | `app_mentions:read` |
 | `message.im` | Onboarding/opt-out DMs and conversations; message edits/deletions | `im:history` |
 | `message.groups` | Joined private-channel conversations and context edits/deletions | `groups:history` |
