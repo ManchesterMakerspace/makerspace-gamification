@@ -1,8 +1,8 @@
-"""Slack WebClient proxy that records useful, privacy-aware API failures."""
-from functools import wraps
+"""Slack WebClient that records useful, privacy-aware API failures."""
 import json
 import logging
 
+from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 
@@ -40,43 +40,26 @@ def _sanitize(value, *, response=False, key=None):
     return repr(value)
 
 
-class SlackCallDebugClient:
-    """Forward WebClient attributes and log the method/request/response on API errors."""
+class SlackCallDebugClient(WebClient):
+    """A Bolt-compatible WebClient that logs API request/response details on errors."""
 
-    def __init__(self, client):
-        object.__setattr__(self, "_client", client)
-
-    def __getattr__(self, name):
-        attribute = getattr(self._client, name)
-        if not callable(attribute) or name.startswith("_"):
-            return attribute
-
-        @wraps(attribute)
-        def call(*args, **kwargs):
-            try:
-                return attribute(*args, **kwargs)
-            except SlackApiError as exc:
-                response = exc.response
-                data = getattr(response, "data", response)
-                headers = getattr(response, "headers", {}) or {}
-                diagnostic = {
-                    "http_verb": getattr(response, "http_verb", None),
-                    "api_url": getattr(response, "api_url", None),
-                    "status_code": getattr(response, "status_code", None),
-                    "headers": {key: value for key, value in headers.items()
-                                if _key_name(key) in _RESPONSE_HEADERS},
-                    "data": _sanitize(data, response=True),
-                }
-                request = {"args": _sanitize(args), "kwargs": _sanitize(kwargs)}
-                log.error("Slack API call failed method=%s request=%s response=%s",
-                    name, json.dumps(request, ensure_ascii=False, default=str),
-                    json.dumps(diagnostic, ensure_ascii=False, default=str))
-                raise
-
-        return call
-
-    def __setattr__(self, name, value):
-        if name == "_client":
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self._client, name, value)
+    def api_call(self, api_method, **kwargs):
+        try:
+            return super().api_call(api_method, **kwargs)
+        except SlackApiError as exc:
+            response = exc.response
+            data = getattr(response, "data", response)
+            headers = getattr(response, "headers", {}) or {}
+            diagnostic = {
+                "http_verb": getattr(response, "http_verb", None),
+                "api_url": getattr(response, "api_url", None),
+                "status_code": getattr(response, "status_code", None),
+                "headers": {key: value for key, value in headers.items()
+                            if _key_name(key) in _RESPONSE_HEADERS},
+                "data": _sanitize(data, response=True),
+            }
+            request = {"api_method": api_method, "kwargs": _sanitize(kwargs)}
+            log.error("Slack API call failed method=%s request=%s response=%s",
+                api_method, json.dumps(request, ensure_ascii=False, default=str),
+                json.dumps(diagnostic, ensure_ascii=False, default=str))
+            raise

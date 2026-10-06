@@ -56,7 +56,7 @@ def dependencies():
     store = ledger.store
     api = ChatAPI(os.environ.get("LEDGER_LLM_BASE_URL", "http://localhost:8000/v1"), os.environ.get("LEDGER_LLM_MODEL", DEFAULT_MODEL), os.environ.get("LEDGER_LLM_API_KEY", ""))
     composer = Composer(store, api, matrix=PromptMatrix.from_env())
-    client = SlackCallDebugClient(WebClient(token=os.environ["SLACK_BOT_TOKEN"], timeout=10, retry_handlers=[]))
+    client = SlackCallDebugClient(token=os.environ["SLACK_BOT_TOKEN"], timeout=10, retry_handlers=[])
     return ledger, composer, client
 
 
