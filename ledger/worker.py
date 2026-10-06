@@ -872,9 +872,27 @@ class Worker:
                 if latest.get("consent_generation", 0) != generation:
                     raise Denied("Rank artwork belongs to an earlier participation.")
                 self.assert_live_job(job)
-                self.slack.files_upload_v2(file=str(Path(__file__).parent / "assets" / f"rank-{slot}.png"),
-                                          title=display["name"], channel=dm,
-                                          **({"thread_ts": parent["ts"]} if parent else {}))
+                filename = f"rank-{slot}.png"
+                image_path = Path(__file__).parent / "assets" / filename
+                image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+                asset_key = f"rank_icon:{slot}"
+                saved_file = self.store.get("ledger_files", asset_key)
+                thread = {"thread_ts": parent["ts"]} if parent else {}
+                if saved_file and saved_file.get("sha256") == image_hash and saved_file.get("file_id"):
+                    self.slack.chat_postMessage(channel=dm, text=f"Rank: {display['name']}",
+                        blocks=[{"type": "image", "title": {"type": "plain_text", "text": display["name"]},
+                                 "slack_file": {"id": saved_file["file_id"]},
+                                 "alt_text": f"Rank icon for {display['name']}"}], **thread)
+                else:
+                    uploaded = self.slack.files_upload_v2(file=str(image_path), filename=filename,
+                        title=display["name"], channel=dm, **thread)
+                    files = uploaded.get("files") or []
+                    file_id = files[0].get("id") if files and isinstance(files[0], dict) else None
+                    if not isinstance(file_id, str) or not file_id:
+                        raise RuntimeError("Slack rank image upload did not return a file ID")
+                    self.store.put("ledger_files", {"_id": asset_key, "kind": "rank_icon",
+                        "slot": slot, "filename": filename, "title": display["name"],
+                        "sha256": image_hash, "file_id": file_id, "uploaded_at": now()})
             return
         if kind == "conversation":
             self.ledger.require_member(member_id)

@@ -57,6 +57,7 @@ Known successful kudos destinations are skipped on recovery, with separate DM/sh
 | `ledger_message_templates` | Immutable prompt/fallback versions and audience/type heads |
 | `ledger_inbox`, `ledger_outbox` | Durable accepted work and independent delivery leases/receipts |
 | `ledger_context` | Channel/thread-scoped messages and bounded prompt-selection histories (30-day TTL), temporary editor drafts (one-day TTL) |
+| `ledger_files` | Slack file IDs and content hashes for reusable rank icon PNGs |
 
 No synthetic safety checkouts are written for rank badges. Nonparticipant kudos creates recognition evidence, not a participant profile or XP balance. Context edits replace cached text and deletions remove it. Requests deleted before delivery are suppressed. Opted-out users' cached messages are excluded from subsequent AI context.
 

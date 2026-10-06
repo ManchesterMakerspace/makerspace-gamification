@@ -115,7 +115,7 @@ Slack delivers `message.im` and `message.groups` as `type: "message"`; `message_
 | `im:history` | `message.im`, including edits/deletions |
 | `im:write` | `conversations.open` for recipient DMs and file delivery |
 | `users:read` | `users.info` for human/active checks, `user_change`, and complete bounded `users.list` name/alias reads for quest-inspiration redaction |
-| `files:write` | Skill-tree image/text and rank art via `files.getUploadURLExternal` / `files.completeUploadExternal` (`files_upload_v2`) |
+| `files:write` | Skill-tree image/text and rank art via `files.getUploadURLExternal` / `files.completeUploadExternal` (`files_upload_v2`); reusable rank icons are retained by Slack file ID for later Block Kit `slack_file` display |
 
 `groups:write` is needed for [private-channel removal](https://docs.slack.dev/reference/methods/conversations.kick/) as well as [invitations](https://docs.slack.dev/reference/methods/conversations.invite/); invite-only permission would not cover opt-out cleanup. [External file uploads](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) require `files:write`. `views.open`, `views.update`, `views.publish`, and `chat.getPermalink` need an authenticated bot but no extra scopes beyond this set for the supported flows.
 
