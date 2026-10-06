@@ -2,6 +2,7 @@ import hashlib
 import json
 
 from conftest import oid
+from ledger.community import Community
 from ledger.domain import enqueue_home_refresh
 from ledger.views import home, home_processing
 from ledger.worker import Worker
@@ -36,9 +37,44 @@ def test_home_open_ignores_other_tabs_and_preserves_generated_view(env):
 
     worker.event({"type": "app_home_opened", "tab": "messages", "user": "U1"}, "messages")
     worker.event({"type": "app_home_opened", "tab": "home", "user": "U1",
-                  "view": {"callback_id": "ledger_home_public"}}, "generated")
+                  "view": home(ledger, str(oid(1)))}, "generated")
 
     slack.views_publish.assert_not_called()
+
+
+def test_home_rebuilds_when_generated_view_belongs_to_another_member(joined):
+    ledger, store, source, composer, _, slack = joined
+    worker = Worker(ledger, composer, slack)
+    previous_member, current_member = str(oid(1)), str(oid(2))
+    stale_view = home(ledger, previous_member)
+    # Reassign U1 to member 2 and remove member 2's former U2 link so the new
+    # identity is valid and unambiguous.
+    source.data["slack_users"] = [
+        {**row, "member_id": oid(2)} if row["slack_id"] == "U1" else row
+        for row in source.data["slack_users"] if row["slack_id"] != "U2"]
+
+    worker.event({"type": "app_home_opened", "tab": "home", "user": "U1", "view": stale_view}, "reassigned-home")
+
+    slack.views_publish.assert_called_once()
+    assert slack.views_publish.call_args.kwargs["user_id"] == "U1"
+    assert slack.views_publish.call_args.kwargs["view"]["callback_id"] == "ledger_home_processing"
+    assert store.get("ledger_outbox", f"home:{current_member}:open:reassigned-home")
+
+
+def test_home_rebuilds_when_consent_generation_changes(joined):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+    stale_view = home(ledger, member_id)
+    ledger.leave(member_id)
+    ledger.join(member_id)
+    worker = Worker(ledger, composer, slack)
+
+    worker.event({"type": "app_home_opened", "tab": "home", "user": "U1", "view": stale_view}, "rejoined-home")
+
+    slack.views_publish.assert_called_once()
+    assert slack.views_publish.call_args.kwargs["view"]["callback_id"] == "ledger_home_processing"
+    assert any(job["kind"] == "home_publish" and job["payload"]["member_id"] == member_id
+               for job in store.select("ledger_outbox"))
 
 
 def test_home_build_publishes_rank_and_reuses_skill_tree_cache(joined):
@@ -108,6 +144,42 @@ def test_verified_milestone_refreshes_home_but_xp_tick_does_not(joined):
     assert store.get("ledger_outbox", f"home:{member_id}:action-one")
     assert not store.get("ledger_outbox", f"home:{member_id}:action-two")
     assert store.get("ledger_outbox", f"home:{member_id}:action-three")
+
+
+def test_project_gallery_changes_enqueue_home_refreshes(joined):
+    ledger, store, _, composer, _, slack = joined
+    project = Community(ledger).project(str(oid(1)), "New workbench", "Built a safer work surface.")
+    project_key = f"project:{project['_id']}:1"
+    recorded_trigger = f"project:{project['_id']}:1:recorded"
+    for member_id in (str(oid(1)), str(oid(2))):
+        assert store.get("ledger_outbox", f"home:{member_id}:{recorded_trigger}")
+
+    worker = Worker(ledger, composer, slack)
+    job = working_job(store, project_key)
+    worker.outbox(job)
+
+    saved = store.get("ledger_projects", project["_id"])
+    assert saved["permalink"] == "https://example.slack.com/archives/thread"
+    published_trigger = f"project:{project['_id']}:1:published"
+    for member_id in (str(oid(1)), str(oid(2))):
+        assert store.get("ledger_outbox", f"home:{member_id}:{published_trigger}")
+
+
+def test_rank_correction_queues_home_refresh(joined):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+    participant = ledger.participant(member_id)
+    participant.update(rank=2, import_pending=False, revision=participant["revision"] + 1)
+    store.put("ledger_participants", participant)
+
+    ledger.correct_rank(str(oid(10)), member_id, 1, "Corrected after review")
+
+    corrected = ledger.participant(member_id)
+    job = store.get("ledger_outbox", f"home:{member_id}:rank-correction:{corrected['revision']}")
+    assert job and job["payload"]["member_id"] == member_id
+    Worker(ledger, composer, slack).publish_home(working_job(store, job["_id"]))
+    view = slack.views_publish.call_args.kwargs["view"]
+    assert f"*{ledger.presentation(1)['name']}*" in json.dumps(view["blocks"])
 
 
 def test_opt_out_refreshes_to_public_home(joined):

@@ -155,10 +155,17 @@ def home_processing():
     ]}
 
 
+def home_private_metadata(ledger, member_id):
+    participant = ledger.participant(member_id)
+    generation = (participant or {}).get("consent_generation", 0)
+    return f"{member_id}:{generation}"
+
+
 def home(ledger, member_id, *, rank_icon_file_id=None, skill_tree_file_id=None):
     p = ledger.participant(member_id)
     if not ledger.active(member_id):
-        return {"type": "home", "callback_id": "ledger_home_public", "blocks": [section("*The Ledger*\nChoose your own path through learning, making, and helping."),
+        return {"type": "home", "callback_id": "ledger_home_public",
+            "private_metadata": home_private_metadata(ledger, member_id), "blocks": [section("*The Ledger*\nChoose your own path through learning, making, and helping."),
             {"type": "actions", "elements": [button("Opt in", "join", ""), button("Preferences", "preferences", "")]}]}
     display = ledger.presentation(p["rank"])
     blocks = [{"type": "header", "text": {"type": "plain_text", "text": "Character Sheet"}},
@@ -191,7 +198,8 @@ def home(ledger, member_id, *, rank_icon_file_id=None, skill_tree_file_id=None):
     administrative_help = help_text(ledger, member_id)
     if administrative_help:
         blocks.append(section(administrative_help))
-    return {"type": "home", "callback_id": "ledger_home_generated", "blocks": blocks}
+    return {"type": "home", "callback_id": "ledger_home_generated",
+            "private_metadata": home_private_metadata(ledger, member_id), "blocks": blocks}
 
 
 def navigation():

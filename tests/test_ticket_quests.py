@@ -144,6 +144,61 @@ def test_transient_image_check_retries_before_awarding_image_xp(joined):
     assert ledger.participant(str(oid(3)))["xp"] == "0"
 
 
+@pytest.mark.parametrize(("change", "outcome", "reason"), [
+    ("resolved", "closed", "ticket_closed"), ("rejected", "closed", "ticket_closed"),
+    ("withdrawn", "closed", "ticket_closed"), ("deleted", "deleted", "ticket_deleted"),
+    ("recategorized", "ineligible", "ticket_ineligible")])
+def test_pending_jpeg_claim_closes_when_ticket_becomes_ineligible(joined, change, outcome, reason):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    event = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.111", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "F1", "mimetype": "image/jpeg"}]}
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=requests.ConnectionError("temporary")):
+        with pytest.raises(requests.RequestException):
+            service.response_event(event, "pending-terminal-ticket")
+    if change == "deleted":
+        source.data["fix_tickets"].clear()
+    elif change == "recategorized":
+        source.data["fix_tickets"][0]["category"] = "other"
+    else:
+        source.data["fix_tickets"][0]["status"] = change
+
+    with patch.object(TicketQuests, "_download_jpeg") as download:
+        assert service.response_event(event, "pending-terminal-ticket") is True
+
+    download.assert_not_called()
+    saved = store.get("ledger_evidence", quest["_id"])
+    assert saved["status"] == "closed" and saved["outcome"] == outcome
+    assert not saved.get("pending_claim")
+    response = store.get("ledger_evidence", "ticket-quest-response:" + sha1(
+        f"CQUEST:{event['ts']}".encode()).hexdigest())
+    assert response["rejection_reason"] == reason
+    assert ledger.participant(str(oid(2)))["xp"] == "0"
+
+
+def test_ticket_becoming_ineligible_during_image_verification_cannot_award(joined):
+    ledger, store, source, service = setup_tickets(joined)
+    quest = open_quest(service, store, source)
+    service.worker = MagicMock()
+    event = {"type": "message", "channel": "CQUEST", "thread_ts": quest["announcement_ts"],
+        "user": "U2", "ts": "903.112", "text": "I checked the belt and confirmed the issue.",
+        "files": [{"id": "F1", "mimetype": "image/jpeg"}]}
+
+    def verify_then_resolve(_):
+        source.data["fix_tickets"][0]["status"] = "resolved"
+        return b"sanitized-jpeg"
+
+    with patch.object(TicketQuests, "_download_jpeg", side_effect=verify_then_resolve):
+        assert service.response_event(event, "ticket-changed-during-image-check") is True
+
+    saved = store.get("ledger_evidence", quest["_id"])
+    assert saved["status"] == "closed" and saved["outcome"] == "closed"
+    assert not saved.get("pending_claim")
+    assert ledger.participant(str(oid(2)))["xp"] == "0"
+
+
 def test_reserved_image_claim_is_released_after_opt_out_and_rejoin(joined):
     ledger, store, source, service = setup_tickets(joined)
     quest = open_quest(service, store, source)
@@ -201,13 +256,12 @@ def test_reserved_image_retry_cannot_follow_reassigned_slack_identity(joined):
             service.response_event(event, "mapping-reassigned")
     source.data["slack_users"] = [
         {**row, "member_id": oid(3)} if row["slack_id"] == "U2" else row
-        for row in source.data["slack_users"]]
+        for row in source.data["slack_users"] if row["slack_id"] != "U3"]
 
     assert service.response_event(event, "mapping-reassigned") is True
     response_id = "ticket-quest-response:" + sha1(f"CQUEST:{event['ts']}".encode()).hexdigest()
     assert "pending_claim" not in store.get("ledger_evidence", quest["_id"])
-    assert store.get("ledger_evidence", response_id)["rejection_reason"] in (
-        "claimant_identity_changed", "claimant_identity_unavailable")
+    assert store.get("ledger_evidence", response_id)["rejection_reason"] == "claimant_identity_changed"
     assert ledger.participant(str(oid(2)))["xp"] == "0"
     assert ledger.participant(str(oid(3)))["xp"] == "0"
 

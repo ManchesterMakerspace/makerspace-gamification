@@ -151,6 +151,31 @@ def test_rank_transition_announces_privately_to_old_and_new_rank_in_order(joined
     assert 'Novice' not in messages[0]['text']
 
 
+def test_rank_transition_rejects_a_superseded_lower_rank_job(joined):
+    l, s, _, _, _, slack = joined
+    w = worker(joined)
+    member_id = str(oid(1))
+    participant = l.participant(member_id)
+    participant.update(rank=3, revision=participant['revision'] + 2)
+    s.put('ledger_participants', participant)
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:1', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:1', 'desired': True, 'present': True})
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:2', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:2', 'desired': True, 'present': False})
+    job = next(j for j in s.select('ledger_outbox', {'kind': 'invite'}) if j['payload']['member_id'] == member_id)
+    job['payload'].update(channel='CRANK2', channel_key='rank:2', revision=participant['revision'] - 2,
+        rank_transition={'old_slot': 1, 'new_slot': 2,
+                         'consent_generation': participant['consent_generation']})
+    s.put('ledger_outbox', job)
+
+    with pytest.raises(Denied):
+        w.outbox(claim(s, job['_id']))
+
+    slack.chat_postMessage.assert_not_called()
+    slack.conversations_invite.assert_not_called()
+    assert not s.get('ledger_channels', f'membership:{member_id}:rank:2')['present']
+
+
 @pytest.mark.parametrize('change', ['rank_correction', 'voluntary_departure'])
 def test_rank_transition_revalidates_access_after_prior_channel_post(joined, change):
     l, s, _, _, _, slack = joined
@@ -251,6 +276,46 @@ def test_rank_transition_compensates_if_identity_changes_during_invite(joined):
     slack.conversations_invite.assert_called_once_with(channel='CRANK2', users='U1')
     slack.conversations_kick.assert_called_once_with(channel='CRANK2', user='U1')
     assert not s.get('ledger_channels', f'membership:{member_id}:rank:2')['present']
+
+
+@pytest.mark.parametrize('change_at', ['before_prior_kick', 'before_welcome'])
+def test_rank_transition_rechecks_after_invite_commit(joined, change_at):
+    l, s, _, _, _, slack = joined
+    w = worker(joined)
+    member_id = str(oid(1))
+    participant = l.participant(member_id)
+    participant.update(rank=2, revision=participant['revision'] + 1)
+    s.put('ledger_participants', participant)
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:1', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:1', 'desired': True, 'present': True})
+    s.put('ledger_channels', {'_id': f'membership:{member_id}:rank:2', 'kind': 'membership',
+        'member_id': member_id, 'channel_key': 'rank:2', 'desired': True, 'present': False})
+    job = next(j for j in s.select('ledger_outbox', {'kind': 'invite'}) if j['payload']['member_id'] == member_id)
+    job['payload'].update(channel='CRANK2', channel_key='rank:2', revision=participant['revision'],
+        rank_transition={'old_slot': 1, 'new_slot': 2,
+                         'consent_generation': participant['consent_generation']})
+    s.put('ledger_outbox', job)
+    original_revalidate = w._revalidate_committed_rank_transition
+    checks = 0
+
+    def correct_rank_at_boundary(transition_job, uid):
+        nonlocal checks
+        checks += 1
+        target_check = 1 if change_at == 'before_prior_kick' else 2
+        if checks == target_check:
+            l.correct_rank(str(oid(10)), member_id, 1, 'Correction after invite commit')
+        return original_revalidate(transition_job, uid)
+
+    w._revalidate_committed_rank_transition = correct_rank_at_boundary
+    with pytest.raises(Denied):
+        w.outbox(claim(s, job['_id']))
+
+    kicked_channels = [call.kwargs['channel'] for call in slack.conversations_kick.call_args_list]
+    expected = ['CRANK2'] if change_at == 'before_prior_kick' else ['CRANK1', 'CRANK2']
+    assert kicked_channels == expected
+    assert [call.kwargs['channel'] for call in slack.chat_postMessage.call_args_list] == ['CRANK1']
+    membership = s.get('ledger_channels', f'membership:{member_id}:rank:2')
+    assert not membership['present'] and not membership['desired']
 
 
 def test_rank_transition_re_resolves_identity_immediately_before_invite(joined):

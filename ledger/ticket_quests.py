@@ -119,6 +119,27 @@ class TicketQuests:
             rows = self.sources.rows("fix_tickets", {"_id": int(ident)})
         return rows[0] if rows else None
 
+    @staticmethod
+    def _ticket_ineligible_reason(ticket):
+        if ticket is None:
+            return "deleted"
+        if ticket.get("status") in TERMINAL:
+            return "closed"
+        if ticket.get("status") not in ACTIVE or ticket.get("category") not in VALID_CATEGORIES:
+            return "ineligible"
+        return None
+
+    def _close_claim_for_ineligible_ticket(self, quest, ticket, channel, root):
+        reason = self._ticket_ineligible_reason(ticket)
+        if not reason:
+            return False
+        pending = quest.get("pending_claim") or {}
+        if pending.get("response_id"):
+            self._release_stale_claim(quest["_id"], pending["response_id"], pending,
+                channel, root, "ticket_" + reason)
+        self._refresh_quest(ticket, config(self.ledger), now(), ticket_id=quest["ticket_id"])
+        return True
+
     def reconcile(self, ticket_id=None):
         settings = config(self.ledger)
         current = now()
@@ -272,15 +293,10 @@ class TicketQuests:
                 from .review_notifications import ReviewDeliveryBusy
                 raise ReviewDeliveryBusy()
             return True
-        if quest.get("status") == "open" and not owns_pending:
+        if quest.get("status") == "open":
             ticket = self._ticket(quest["ticket_id"])
-            if not ticket:
-                self._refresh_quest(None, config(self.ledger), now(), ticket_id=quest["ticket_id"])
+            if self._close_claim_for_ineligible_ticket(quest, ticket, channel, root):
                 return True
-            if (ticket.get("status") in TERMINAL or ticket.get("status") not in ACTIVE
-                    or ticket.get("category") not in VALID_CATEGORIES):
-                self._refresh_quest(ticket, config(self.ledger), now())
-                quest = self.store.get("ledger_evidence", quest["_id"]) or quest
         member = self.sources.identity(event["user"])
         if not member:
             if owns_pending:
@@ -366,6 +382,15 @@ class TicketQuests:
 
         if jpeg and owns_pending and self.worker and not image_valid:
             jpeg = None
+
+        # Image verification can take long enough for the source ticket to
+        # change after the initial retry check. Re-read it at the acceptance
+        # boundary, and release any reserved claim before closing the quest.
+        latest_quest = self.store.get("ledger_evidence", quest["_id"]) or quest
+        if latest_quest.get("status") == "open":
+            ticket = self._ticket(latest_quest["ticket_id"])
+            if self._close_claim_for_ineligible_ticket(latest_quest, ticket, channel, root):
+                return True
 
         record = {"_id": response_id, "kind": "broken_ticket_quest_response", "quest_id": quest["_id"],
                   "member_id": member_id, "slack_id": event["user"], "channel": channel, "thread_ts": root,

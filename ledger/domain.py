@@ -459,6 +459,7 @@ class Ledger:
                        "member_id": member_id, "before": p["rank"], "after": slot, "reason": reason, "at": now()})
         p.update(rank=slot, rank_hold=True, revision=p["revision"] + 1)
         self.store.put("ledger_participants", p)
+        enqueue_home_refresh(self.store, member_id, f"rank-correction:{p['revision']}", self.sources.slack_id(member_id))
         from .quests import Quests
         Quests(self).cleanup(member_id)
         self.notify(member_id, "correction", {"summary": reason, "rank": self.presentation(slot)["name"]}, str(uuid4()))

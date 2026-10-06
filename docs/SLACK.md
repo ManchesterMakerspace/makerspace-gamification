@@ -104,6 +104,8 @@ After changing `.env`, recreate the affected containers with `docker compose up 
 
 Slack delivers `message.im` and `message.groups` as `type: "message"`; `message_changed` and `message_deleted` are subtypes, not separate manifest entries. Channel events require the bot to belong to the channel. The worker filters channel processing to registered Ledger private channels. See Slack's [channel membership event contract](https://docs.slack.dev/reference/events/member_joined_channel/) and [App Home event contract](https://docs.slack.dev/reference/events/app_home_opened/).
 
+The first Home-tab open publishes a brief processing placeholder and queues a personalized Character Sheet. Generated views are bound to the current member record and consent generation; an identity reassignment or rejoin causes a rebuild before the saved view is reused. Verified milestones, rank changes, and staff rank corrections queue Home refreshes. Ordinary XP ticks do not.
+
 ## Bot permissions
 
 | Scope | Calls or events that need it |

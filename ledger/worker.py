@@ -11,7 +11,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from slack_sdk.errors import SlackApiError
 from bson import json_util
 
-from .community import Community
+from .community import Community, enqueue_project_home_refresh
 from .domain import Denied, Ledger, enqueue_home_refresh
 from .messages import button, escape, section
 from .prompt_library import EXAMPLE_FACTS, library_template
@@ -19,7 +19,7 @@ from .review_notifications import ReviewDeliveryBusy
 from .result_summaries import SummaryBusy, SummaryPending
 from .sources import FIELDS, sid
 from .storage import enqueue, now
-from .views import home, home_processing
+from .views import home, home_private_metadata, home_processing
 
 log = logging.getLogger(__name__)
 
@@ -315,7 +315,9 @@ class Worker:
             active = self.ledger.active(member_id)
             current = event.get("view") or {}
             callback_id = current.get("callback_id")
-            if (active and callback_id == "ledger_home_generated") or (not active and callback_id == "ledger_home_public"):
+            binding_matches = current.get("private_metadata") == home_private_metadata(self.ledger, member_id)
+            if ((active and callback_id == "ledger_home_generated") or
+                    (not active and callback_id == "ledger_home_public")) and binding_matches:
                 return
             if callback_id != "ledger_home_processing":
                 self.slack.views_publish(user_id=event["user"], view=home_processing())
@@ -770,7 +772,7 @@ class Worker:
         if (not participant or not ledger.active(member_id)
                 or participant.get("consent_generation", 0) != transition["consent_generation"]
                 or participant.get("revision", 0) < payload.get("revision", 0)
-                or participant.get("rank", 0) < new_slot
+                or participant.get("rank", 0) != new_slot
                 or self.ledger.sources.slack_id(member_id) != uid
                 or channel_key != f"rank:{new_slot}"
                 or not channel or channel.get("_id") != channel_key
@@ -781,6 +783,48 @@ class Worker:
                 or membership.get("voluntary_leave") or not membership.get("desired")):
             raise Denied("Rank transition is no longer authorized.")
         return participant, membership, channel
+
+    def _revalidate_committed_rank_transition(self, job, uid):
+        member_id = job["payload"]["member_id"]
+        if self.valid_identity(member_id) != uid:
+            raise Denied("Rank transition belongs to an earlier Slack identity.")
+        access = self._rank_transition_access(job, uid)
+        self.assert_live_job(job)
+        return access
+
+    def _compensate_rank_transition_invite(self, job, uid):
+        payload = job["payload"]
+        member_id = payload["member_id"]
+        channel = payload["channel"]
+        transition = payload["rank_transition"]
+        try:
+            self.slack.conversations_kick(channel=channel, user=uid)
+        except SlackApiError as exc:
+            if exc.response.get("error") not in ("not_in_channel", "user_not_found"):
+                raise
+
+        def clear_membership(store):
+            key = f"membership:{member_id}:{payload['channel_key']}"
+            membership = store.get("ledger_channels", key)
+            if not membership:
+                return
+            membership["present"] = False
+            ledger = Ledger(store, self.ledger.sources)
+            participant = ledger.participant(member_id)
+            if (not participant or not ledger.active(member_id)
+                    or participant.get("consent_generation", 0) != transition["consent_generation"]
+                    or participant.get("rank", 0) != transition["new_slot"]
+                    or membership.get("voluntary_leave")):
+                membership["desired"] = False
+            store.put("ledger_channels", membership)
+        self.store.atomic(clear_membership)
+
+    def _cancel_after_committed_transition_if_stale(self, job, uid):
+        try:
+            return self._revalidate_committed_rank_transition(job, uid)
+        except Denied:
+            self._compensate_rank_transition_invite(job, uid)
+            raise
 
     def deliver_rank_transition(self, job):
         payload = job["payload"]
@@ -794,7 +838,7 @@ class Worker:
         if (not channel or channel.get("channel_id") != payload["channel"] or not participant
                 or not self.ledger.active(member_id) or participant.get("consent_generation", 0) != generation
                 or participant.get("revision", 0) < payload["revision"]
-                or participant.get("rank", 0) < new_slot or membership.get("voluntary_leave")
+                or participant.get("rank", 0) != new_slot or membership.get("voluntary_leave")
                 or not membership.get("desired")):
             raise Denied("Rank transition is no longer authorized.")
         uid = self.valid_identity(member_id)
@@ -859,15 +903,11 @@ class Worker:
                 s.put("ledger_channels", new_membership)
             self.store.atomic(commit_transition)
         except Denied:
-            try:
-                self.slack.conversations_kick(channel=channel["channel_id"], user=invite_uid)
-            except SlackApiError as exc:
-                if exc.response.get("error") not in ("not_in_channel", "user_not_found"):
-                    raise
+            self._compensate_rank_transition_invite(job, invite_uid)
             raise
 
         if prior_channel:
-            self.assert_live_job(job)
+            self._cancel_after_committed_transition_if_stale(job, invite_uid)
             try:
                 self.slack.conversations_kick(channel=prior_channel["channel_id"], user=uid)
             except SlackApiError as exc:
@@ -878,6 +918,7 @@ class Worker:
                 old_membership.update(present=False, desired=False)
                 self.store.atomic(lambda s: s.put("ledger_channels", old_membership))
 
+        self._cancel_after_committed_transition_if_stale(job, invite_uid)
         current = self.store.get("ledger_outbox", job["_id"])
         if not current.get("rank_welcome_delivery"):
             welcome = self.persist_composition(job, "rank_up", "shared",
@@ -895,7 +936,7 @@ class Worker:
                 text = f"Welcome our newly elevated brethren, {escape(member_name)}!"
             elif member_name.casefold() not in text.casefold():
                 text = f"{escape(member_name)} — {text}"
-            self.assert_live_job(job)
+            self._cancel_after_committed_transition_if_stale(job, invite_uid)
             self.post_message(channel=channel["channel_id"], text=text,
                 blocks=[section(text)], client_msg_id=str(uuid5(NAMESPACE_URL, job["_id"] + ":rank-welcome")),
                 unfurl_links=False, unfurl_media=False)
@@ -1423,6 +1464,7 @@ class Worker:
                     latest["permalink"] = url
                     s.put("ledger_projects", latest)
                 self.store.atomic(restore_link)
+            enqueue_project_home_refresh(self.ledger, project["_id"], p["update"] + 1, "published")
             return
         composed = self.persist_composition(job, "project", "shared", {"title": project["title"]})
         self.assert_live_job(job)
@@ -1446,6 +1488,7 @@ class Worker:
                 latest.update(thread_ts=response["ts"], permalink=url)
                 s.put("ledger_projects", latest)
             self.store.atomic(save)
+            enqueue_project_home_refresh(self.ledger, project["_id"], p["update"] + 1, "published")
 
 
 def ingest_mqtt(store, topic, payload, retained=False):
