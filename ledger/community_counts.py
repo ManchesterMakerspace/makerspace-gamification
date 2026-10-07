@@ -78,9 +78,11 @@ def clarification(text):
     if space:
         periods = "the last two hours, today, yesterday, this week, or this month so far"
     if space and members:
-        return ("I can count check-in UIDs for the last two hours or a calendar period, and new members for "
+        return ("I can count members who used the space in the last two hours or a calendar period, and new members for "
                 "today, yesterday, this week, or this month so far. Which period would you like?")
-    return f"I can count {('check-in UIDs' if space else 'new members')} for {periods}. Which period would you like?"
+    if space:
+        return f"I can count members who used the space in {periods}. Which period would you like?"
+    return f"I can count new members for {periods}. Which period would you like?"
 
 
 def bounds(period, instant=None):
@@ -141,19 +143,47 @@ def count(sources, subject, period, instant=None):
     return {"subject": subject, "period": period, "count": int(rows[0]["count"]) if rows else 0}
 
 
+def timeframe(period):
+    """Return the only public timeframe wording supplied to narration."""
+    return {"right_now": "in the last two hours", "today": "today", "yesterday": "yesterday",
+            "this_week": "this week so far", "this_month": "this month so far"}[period]
+
+
 def format_answer(result):
+    """Render the authoritative fallback without exposing storage terminology."""
     number = result["count"]
     period = result["period"]
     if result["subject"] == "space":
+        answer = f"A total of {number:,} members used the space {timeframe(period)}."
         if period == "right_now":
-            return (f"In the last two hours, {number:,} unique check-in UIDs were recorded. "
-                    "This is a recent-visitor estimate, not a live occupancy count.")
-        label = {"today": "today", "yesterday": "yesterday", "this_week": "this week so far",
-                 "this_month": "this month so far"}[period]
-        return f"There were {number:,} unique check-in UIDs recorded {label}."
-    label = {"today": "today", "yesterday": "yesterday", "this_week": "this week so far",
-             "this_month": "this month so far"}[period]
-    return f"{number:,} new member records have a start date {label}. Merged duplicate records are excluded."
+            answer += " This is a recent-use estimate, not a live occupancy count."
+        return answer
+    return f"{number:,} new member records have a start date {timeframe(period)}. Merged duplicate records are excluded."
+
+
+def valid_space_answer(text, result):
+    """Accept varied wording only when every authoritative public fact survives."""
+    if (not isinstance(text, str) or not text.strip() or len(text) > 400 or result.get("subject") != "space"
+            or type(result.get("count")) is not int or result["count"] < 0):
+        return False
+    lowered = text.lower()
+    if (re.search(r"\b(?:uids?|identifiers?|records?|databases?|queries|check-?ins?)\b", lowered)
+            or "<@" in lowered or "<!" in lowered):
+        return False
+    label = timeframe(result.get("period"))
+    if (label not in lowered or not re.search(r"\bmembers?\b", lowered)
+            or not re.search(r"\b(?:space|makerspace)\b", lowered)):
+        return False
+    numeric_values = [int(value.replace(",", "")) for value in re.findall(r"(?<!\w)\d[\d,]*(?!\w)", text)]
+    if numeric_values != [result["count"]]:
+        return False
+    without_label = lowered.replace(label, "")
+    if re.search(r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|hundred|thousand|million)\b",
+                 without_label):
+        return False
+    if result["period"] == "right_now" and not all(value in lowered for value in ("estimate", "not a live occupancy")):
+        return False
+    return True
 
 
 def safe_count(sources, subject, period, instant=None):

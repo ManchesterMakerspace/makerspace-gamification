@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from ledger.community_counts import bounds, clarification, count, format_answer, is_count_question, recognize, safe_count
+from ledger.community_counts import bounds, clarification, count, format_answer, is_count_question, recognize, safe_count, valid_space_answer
 from ledger.worker import Worker
 
 
@@ -41,6 +41,8 @@ def test_recognizes_only_supported_unambiguous_public_count_requests():
     assert recognize("How many check-ins were recorded today?") == ("space", "today")
     assert is_count_question("How many new members joined last week?")
     assert "Which period" in clarification("How many new members joined last week?")
+    space_clarification = clarification("How busy is the space?")
+    assert "members who used the space" in space_clarification and "UID" not in space_clarification
 
 
 def test_period_bounds_are_new_york_local_and_half_open():
@@ -73,7 +75,11 @@ def test_fixed_aggregations_return_count_only_and_format_estimate():
     assert pipeline[0]["$match"]["$or"][1]["timeOf"]["$gte"] == int(instant.timestamp() - 7200)
     assert pipeline[1] == {"$project": {"_id": 0, "uid": 1}}
     assert pipeline[2] == {"$group": {"_id": "$uid"}}
-    assert "recent-visitor estimate" in format_answer(result)
+    assert format_answer(result) == ("A total of 3 members used the space in the last two hours. "
+                                      "This is a recent-use estimate, not a live occupancy count.")
+    assert valid_space_answer(format_answer(result), result)
+    assert not valid_space_answer("3 unique check-in UIDs were recorded in the last two hours.", result)
+    assert not valid_space_answer("A total of 4 members used the space in the last two hours. This is a recent-use estimate, not a live occupancy count.", result)
 
     member_result = count(source, "members", "today", instant)
     assert member_result["count"] == 3
@@ -91,8 +97,8 @@ def test_failed_source_query_returns_unavailable_without_error_details():
 
 
 def test_unlinked_user_gets_public_count_in_any_joined_channel(env, monkeypatch):
-    ledger, store, source, _, _, slack = env
-    worker = Worker(ledger, None, slack, bot_id="UBOT")
+    ledger, store, source, composer, api, slack = env
+    worker = Worker(ledger, composer, slack, bot_id="UBOT")
     calls = []
 
     def aggregate(collection, pipeline, timeout_ms=2000):
@@ -103,13 +109,31 @@ def test_unlinked_user_gets_public_count_in_any_joined_channel(env, monkeypatch)
     monkeypatch.setattr(source, "identity", lambda _slack_id: (_ for _ in ()).throw(AssertionError("identity lookup")))
     result = worker.event({"type": "message", "user": "U_UNLINKED", "channel": "C_OTHER",
                            "ts": "123.456", "text": "How busy has the space been today?"}, "evt")
-    assert result == "community_count_answered"
+    assert result == "community_count_queued"
     assert calls[0][0] == "checkins"
     assert slack.conversations_info.call_count == 2
+    slack.chat_postMessage.assert_not_called()
+    api.complete.return_value = "The space welcomed a total of 4 members today."
+    job = store.claim("ledger_outbox", kinds=["community_count_reply"])
+    worker.outbox(job)
     reply = slack.chat_postMessage.call_args.kwargs
     assert reply["channel"] == "C_OTHER" and reply["thread_ts"] == "123.456"
-    assert "4 unique check-in UIDs" in reply["text"]
+    assert reply["reply_broadcast"] is True
+    assert reply["text"] == "The space welcomed a total of 4 members today."
+    rendered = "\n".join(message["content"] for message in api.complete.call_args.args[0])
+    assert "How busy has the space been today?" not in rendered and "U_UNLINKED" not in rendered
     assert not store.select("ledger_context", {"kind": "message"})
+
+
+def test_space_count_uses_authoritative_fallback_when_qwen_changes_facts(env, monkeypatch):
+    ledger, store, source, composer, api, slack = env
+    worker = Worker(ledger, composer, slack, bot_id="UBOT")
+    monkeypatch.setattr(source, "_aggregate", lambda *_args, **_kwargs: [{"count": 12}], raising=False)
+    api.complete.return_value = "13 unique check-in UIDs were recorded today."
+    assert worker.event({"type": "message", "user": "U_OTHER", "channel": "DU_OTHER",
+                         "channel_type": "im", "ts": "2", "text": "How busy is the space today?"}, "evt") == "community_count_queued"
+    worker.outbox(store.claim("ledger_outbox", kinds=["community_count_reply"]))
+    assert slack.chat_postMessage.call_args.kwargs["text"] == "A total of 12 members used the space today."
 
 
 def test_count_path_ignores_unjoined_channels_and_non_count_ambient_questions(env, monkeypatch):

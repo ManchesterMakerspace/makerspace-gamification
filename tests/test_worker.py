@@ -92,7 +92,8 @@ def test_channel_reconcile_excludes_actual_bots_but_not_authorized_app_users(env
     assert sum(call.args == ('UOTHERBOT',) for call in source.identity.call_args_list) == 1
     cached_bot = store.get('ledger_catalog', 'slack-user:UOTHERBOT')
     assert cached_bot['bot'] is True and cached_bot['bot_identity_source'] == 'is_bot'
-    assert store.get('ledger_catalog', 'slack-user:UUNLINKED') is None
+    corrected = store.get('ledger_catalog', 'slack-user:UUNLINKED')
+    assert corrected['bot'] is False and corrected['bot_identity_source'] == 'is_bot'
 
 
 def test_welcome_waits_for_accounting_without_exhausting_delivery_retries(joined, caplog):

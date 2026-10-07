@@ -11,7 +11,8 @@ from ledger.prompt_matrix import MAX_MATRIX_BYTES, REQUIRED_ROLES, bundled_matri
 
 
 def reservation(store, composer, profile="receipt"):
-    kind = "conversation" if profile == "guidance" else "delivery" if profile == "receipt" else "status"
+    kind = ("conversation" if profile == "guidance" else "delivery" if profile == "receipt" else
+            "community_count" if profile == "community_count" else "status")
     return store.atomic(lambda tx: composer.reserve(tx, kind, "member", "dm:caller", profile=profile))
 
 
@@ -21,6 +22,7 @@ def test_short_profiles_snapshot_exact_projection_and_keep_full_policy(env):
         ("receipt", ["identity", "authority", "kudos", "privacy", "response"], 128),
         ("summary", ["identity", "authority", "privacy", "response"], 128),
         ("guidance", ["identity", "authority", "privacy", "response"], 256),
+        ("community_count", ["identity", "authority", "channels", "privacy", "response"], 96),
     ):
         saved = reservation(store, composer, name)
         profile = saved["generation_profile"]
@@ -218,7 +220,12 @@ def test_guidance_falls_back_to_blocker_before_optional_suggestion(env, failure)
 
 
 def test_packaged_result_styles_and_policy_preserve_schema():
-    assert len(TYPES) == 23
+    assert len(TYPES) == 24
+    for audience in AUDIENCES:
+        count_template = library_template("community_count", audience)
+        assert len(count_template["variations"]) == 5
+        assert all("{count}" in variant["user"] and "{timeframe}" in variant["user"]
+                   for variant in count_template["variations"])
     for kind in ("delivery", "status"):
         for audience in AUDIENCES:
             variants = library_template(kind, audience)["variations"]
@@ -227,7 +234,7 @@ def test_packaged_result_styles_and_policy_preserve_schema():
             assert "optional" in variants[-1]["system"]
             assert len({v["user"] for v in variants}) == 5
     matrix = bundled_matrix()
-    assert matrix["version"] == "39" and len(matrix["text"].encode()) <= MAX_MATRIX_BYTES
+    assert matrix["version"] == "40" and len(matrix["text"].encode()) <= MAX_MATRIX_BYTES
     root = ElementTree.fromstring(matrix["text"])
     assert {role.get("id") for role in root.find("roles")} == REQUIRED_ROLES
     assert "sixty seconds" in root.find("kudos").text

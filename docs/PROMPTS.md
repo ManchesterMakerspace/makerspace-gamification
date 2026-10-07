@@ -1,6 +1,6 @@
 # The Ledger prompt library
 
-The bot ships with **23 JSON files and 79 prompt variations** in [`ledger/prompts`](../ledger/prompts). Each file owns one message type. Each variation pairs a `system` prompt with a `user` prompt and identifies its personality and attitude. The default voices are a measured archivist, a practical mentor, and a dry-witted grimoire. Sensitive messages such as opt-out confirmations and corrections stay sober in all three voices.
+The bot ships with **24 JSON files and 88 prompt variations** in [`ledger/prompts`](../ledger/prompts). Each file owns one message type. Each variation pairs a `system` prompt with a `user` prompt and identifies its personality and attitude. The default voices are a measured archivist, a practical mentor, and a dry-witted grimoire. Sensitive messages such as opt-out confirmations and corrections stay sober in all three voices.
 
 Every generation also receives the shared [XML/Markdown Prompt Matrix Template](PROMPT_MATRIX.md). It defines game rules, role limits, personality, privacy, and DM/channel conduct. `LEDGER_PROMPT_MATRIX_DOC_URL` optionally supplies its contents from a Google Doc on startup or admin reload. The matrix and its content hash are saved with each new prompt reservation; changing it does not reroll voices or rewrite reserved deliveries.
 
@@ -22,7 +22,7 @@ This library changes narration, not delivery policy. Automatic shared announceme
 | Learning and service | `checkout_earned.json`, `checkout_granted.json`, `volunteer_credit.json`, `challenge.json`, `first_build.json`, `mentoring.json`, `develop_mentor.json` |
 | Major achievements | `rank_up.json`, `shop_complete.json`, `boss.json`, `stewardship.json` |
 | Community recognition | `kudos.json`, `recruitment.json` |
-| Conversation and collaboration | `conversation.json`, `status.json`, `delivery.json`, `project.json`, `quest.json`, `correction.json` |
+| Conversation and collaboration | `conversation.json`, `community_count.json`, `status.json`, `delivery.json`, `project.json`, `quest.json`, `correction.json` |
 
 ## Editing a file
 
@@ -70,6 +70,7 @@ Placeholders work in **both** `system` and `user`. String values are inserted as
 | `dm_status`, `public_status` | Recorded destination status; public status is `not requested` when sharing is off |
 | `xp_result` | Once-only kudos XP result: `17 XP awarded` or `0 XP`; a receipt never awards XP again |
 | `sponsor_full_name`, `sponsor_slack_id` | Invitation sponsor's projected name and validated Slack mapping |
+| `count`, `timeframe`, `estimate_note` | Authoritative aggregate space-use total, approved period wording, and required rolling-window caveat for `community_count` only |
 | `summary` | Application-authored summary, when supplied by the originating message |
 | `message_type`, `audience` | Current routing type and audience |
 | `audience_instruction` | Trusted audience instructions from the template, inserted as instructions rather than quoted member data |

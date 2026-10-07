@@ -162,9 +162,12 @@ class Worker:
                 "_id": cache_key, "kind": "slack_user", "slack_id": slack_id,
                 "bot": True, "bot_identity_source": "is_bot", "at": now()}))
         elif self.store.get("ledger_catalog", cache_key):
-            # Recheck and remove legacy rows that may have treated
-            # is_app_user as bot identity.
-            self.store.atomic(lambda s: s.delete("ledger_catalog", cache_key))
+            # Correct legacy rows that may have treated is_app_user as bot
+            # identity. Overwrite the cache instead of expanding the runtime
+            # role's explicit-delete privilege beyond ledger_context.
+            self.store.atomic(lambda s: s.put("ledger_catalog", {
+                "_id": cache_key, "kind": "slack_user", "slack_id": slack_id,
+                "bot": False, "bot_identity_source": "is_bot", "at": now()}))
         return is_bot
 
     @staticmethod
@@ -570,9 +573,17 @@ class Worker:
                 # before replying and do not retain the ambient message body.
                 if not is_dm and self.slack.conversations_info(channel=channel)["channel"].get("is_member") is not True:
                     return "ignored_community_count_unjoined_channel"
+                thread = event.get("thread_ts") or event.get("ts")
+                if count_request and result["subject"] == "space":
+                    payload = {"channel": channel, "thread": thread, "result": result,
+                               "audience": "nonparticipant" if is_dm else "shared",
+                               "prompt_scope": f"member:community-count:{channel}" if is_dm else "shared",
+                               "reply_broadcast": bool(thread and not event.get("thread_ts"))}
+                    self.store.atomic(lambda s: enqueue(s, "ledger_outbox",
+                        f"community-count:{channel}:{event.get('ts', key)}", "community_count_reply", payload))
+                    return "community_count_queued"
                 reply = {"channel": channel, "text": response_text,
                          "client_msg_id": str(uuid5(NAMESPACE_URL, f"community-count:{channel}:{event.get('ts', key)}"))}
-                thread = event.get("thread_ts") or event.get("ts")
                 if thread:
                     reply["thread_ts"] = thread
                     if not event.get("thread_ts"):
@@ -1048,7 +1059,7 @@ class Worker:
         # Channel conversations use the same shared history as announcements,
         # even though their conversational prompt uses the member audience.
         shared = audience == "shared" or (job["kind"] == "conversation" and not payload["channel"].startswith("D"))
-        scope = "shared" if shared else "member:" + payload["member_id"]
+        scope = payload.get("prompt_scope") or ("shared" if shared else "member:" + payload["member_id"])
         def reserve(s):
             saved = s.get("ledger_outbox", job["_id"])
             if saved.get("lease") != job["lease"] or saved["status"] != "working":
@@ -1460,6 +1471,36 @@ class Worker:
             return TicketQuests(self.ledger, worker=self).deliver(job)
         if kind == "guidance":
             return self.deliver_guidance(job)
+        if kind == "community_count_reply":
+            from .community_counts import format_answer, timeframe, valid_space_answer
+            result, channel = p.get("result"), p.get("channel")
+            if (not isinstance(result, dict) or result.get("subject") != "space"
+                    or result.get("period") not in ("right_now", "today", "yesterday", "this_week", "this_month")
+                    or type(result.get("count")) is not int or result["count"] < 0
+                    or not isinstance(channel, str) or not channel):
+                raise Denied("Community count delivery is invalid.")
+            is_dm = channel.startswith("D")
+            if not is_dm and self.slack.conversations_info(channel=channel)["channel"].get("is_member") is not True:
+                raise Denied("The Ledger is no longer in this channel.")
+            facts = {"count": f"{result['count']:,}", "timeframe": timeframe(result["period"]),
+                     "estimate_note": ("This is a recent-use estimate, not a live occupancy count."
+                                       if result["period"] == "right_now" else "")}
+            composed = self.persist_composition(job, "community_count", p.get("audience", "shared"), facts,
+                                                profile="community_count")
+            response_text = composed.get("text") if composed.get("outcome") == "generated" else ""
+            if not valid_space_answer(response_text, result):
+                response_text = format_answer(result)
+            self.assert_live_job(job)
+            if not is_dm and self.slack.conversations_info(channel=channel)["channel"].get("is_member") is not True:
+                raise Denied("The Ledger is no longer in this channel.")
+            reply = {"channel": channel, "text": response_text,
+                     "client_msg_id": str(uuid5(NAMESPACE_URL, job["_id"]))}
+            if p.get("thread"):
+                reply["thread_ts"] = p["thread"]
+            if p.get("reply_broadcast"):
+                reply["reply_broadcast"] = True
+            self.slack.chat_postMessage(**reply)
+            return
         if kind == "home_publish":
             return self.publish_home(job)
         if kind == "home_profile_photo":
