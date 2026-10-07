@@ -115,6 +115,7 @@ The first Home-tab open publishes a brief processing placeholder and queues a pe
 | `chat:write` | `chat.postMessage` for DMs, notifications, kudos, project threads, and replies |
 | `channels:read` | `conversations.info` verifies the bot is a member of a public channel before chat delivery |
 | `channels:history` | Receives `message.channels` in public channels the bot has joined |
+| `channels:manage` | `conversations.kick` for public-channel cleanup |
 | `groups:read` | `conversations.info`, `conversations.members`, private-channel membership events |
 | `groups:history` | `message.groups`, including edits/deletions; private project thread visibility |
 | `groups:write` | `conversations.create` with `is_private`, `conversations.invite`, `conversations.kick` |
@@ -123,9 +124,9 @@ The first Home-tab open publishes a brief processing placeholder and queues a pe
 | `users:read` | `users.info` for human/active checks, `user_change`, and complete bounded `users.list` name/alias reads for quest-inspiration redaction |
 | `files:write` | Skill-tree image/text and rank art via `files.getUploadURLExternal` / `files.completeUploadExternal` (`files_upload_v2`); reusable skill trees and rank icons are retained by Slack file ID for later Block Kit `slack_file` display |
 
-`groups:write` is needed for [private-channel removal](https://docs.slack.dev/reference/methods/conversations.kick/) as well as [invitations](https://docs.slack.dev/reference/methods/conversations.invite/); invite-only permission would not cover opt-out cleanup. [External file uploads](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) require `files:write`. `views.open`, `views.update`, `views.publish`, and `chat.getPermalink` need an authenticated bot but no extra scopes beyond this set for the supported flows.
+`groups:write` is needed for [private-channel removal](https://docs.slack.dev/reference/methods/conversations.kick/) as well as [invitations](https://docs.slack.dev/reference/methods/conversations.invite/); `channels:manage` covers public-channel removal. Removal never targets The Ledger's own bot ID. A failed `conversations.kick` is logged as a best-effort cleanup failure and is not retried. Slack 429 responses establish a client-wide cooldown from `Retry-After`; later Slack API calls wait until that interval expires. [External file uploads](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) require `files:write`. `views.open`, `views.update`, `views.publish`, and `chat.getPermalink` need an authenticated bot but no extra scopes beyond this set for the supported flows.
 
-No user-token scopes, public-channel history/management, workspace administration, email lookup, reaction write, incoming webhooks, or app-level Socket Mode token are needed. Custom emoji shortcodes render in Slack without calling `emoji.list`. Ordinary app tokens do not bypass workspace policy on creating private channels or removing members; verify those permissions with workspace administrators during the pilot.
+No user-token scopes, workspace administration, email lookup, reaction write, incoming webhooks, or app-level Socket Mode token are needed. Custom emoji shortcodes render in Slack without calling `emoji.list`. Ordinary app tokens do not bypass workspace policy on creating private channels or removing members; verify those permissions with workspace administrators during the pilot.
 
 The bot must be invited to existing private game channels before `ledger bootstrap`. Bootstrap creates new private channels if none are supplied. Test join/leave reconciliation with real members: native manual invitations can briefly expose a private channel before removal, as documented in the accepted design.
 

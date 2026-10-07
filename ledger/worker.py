@@ -17,6 +17,7 @@ from .messages import button, escape, section
 from .prompt_library import EXAMPLE_FACTS, library_template
 from .review_notifications import ReviewDeliveryBusy
 from .result_summaries import SummaryBusy, SummaryPending
+from .slack_client import retry_after_seconds
 from .sources import FIELDS, sid
 from .storage import enqueue, now
 from .views import home, home_private_metadata, home_processing
@@ -65,7 +66,7 @@ class Worker:
                         code if isinstance(code, int) else "none", slack_error if isinstance(slack_error, str) and slack_error in safe_slack_errors else "none")
             retry = min(300, 2 ** min(job["attempts"], 8))
             if isinstance(exc, SlackApiError) and exc.response.status_code == 429:
-                retry = max(retry, int(exc.response.headers.get("Retry-After", "60")))
+                retry = max(retry, retry_after_seconds(exc.response))
             status = "pending" if job["attempts"] < 10 or job["kind"] == "remove" else "failed"
             self.finish(collection, job, status, retry, type(exc).__name__)
         return True
@@ -924,6 +925,21 @@ class Worker:
         self.store.atomic(write)
         return result
 
+    def kick(self, channel, uid):
+        if not uid or uid == self.bot_id:
+            if uid == self.bot_id:
+                log.warning("Slack channel removal skipped for The Ledger bot channel=%s", channel)
+            return False
+        try:
+            self.slack.conversations_kick(channel=channel, user=uid)
+            return True
+        except SlackApiError as exc:
+            response = exc.response
+            slack_error = response.get("error") if hasattr(response, "get") else None
+            log.warning("Slack channel removal failed channel=%s user=%s status=%s slack_error=%s; not retrying",
+                channel, uid, getattr(response, "status_code", None), slack_error or "unknown")
+            return False
+
     def _rank_transition_access(self, job, uid, store=None):
         store = store or self.store
         payload = job["payload"]
@@ -971,11 +987,7 @@ class Worker:
         # a present membership immediately before the external Slack kick.
         if committed_only and not self._rank_transition_commit_owns_membership(job, uid):
             return False
-        try:
-            self.slack.conversations_kick(channel=channel, user=uid)
-        except SlackApiError as exc:
-            if exc.response.get("error") not in ("not_in_channel", "user_not_found", "channel_not_found"):
-                raise
+        self.kick(channel, uid)
 
         def clear_membership(store):
             key = f"membership:{member_id}:{payload['channel_key']}"
@@ -1143,11 +1155,7 @@ class Worker:
 
         if prior_channel:
             self._cancel_after_committed_transition_if_stale(job, invite_uid)
-            try:
-                self.slack.conversations_kick(channel=prior_channel["channel_id"], user=uid)
-            except SlackApiError as exc:
-                if exc.response.get("error") not in ("not_in_channel", "user_not_found", "channel_not_found"):
-                    raise
+            self.kick(prior_channel["channel_id"], uid)
             old_membership = self.store.get("ledger_channels", f"membership:{member_id}:rank:{old_slot}")
             if old_membership:
                 old_membership.update(present=False, desired=False)
@@ -1296,11 +1304,7 @@ class Worker:
                     return  # A rejoin supersedes a delayed opt-out removal.
             uid = p.get("slack_id") or self.ledger.sources.slack_id(member_id)
             if uid:
-                try:
-                    self.slack.conversations_kick(channel=p["channel"], user=uid)
-                except SlackApiError as e:
-                    if e.response.get("error") not in ("not_in_channel", "user_not_found"):
-                        raise
+                self.kick(p["channel"], uid)
             return
         if kind == "review_channel_invite":
             from .admin_access import deliver_review_invite
@@ -1341,7 +1345,7 @@ class Worker:
             # Compensate an opt-out that happened while Slack processed the invitation.
             latest_membership = self.store.get("ledger_channels", membership["_id"]) or {}
             if not self.ledger.active(member_id) or latest_membership.get("voluntary_leave") or not latest_membership.get("desired"):
-                self.slack.conversations_kick(channel=p["channel"], user=uid)
+                self.kick(p["channel"], uid)
             return
         if kind == "mqtt":
             if not self.ledger.active(member_id):

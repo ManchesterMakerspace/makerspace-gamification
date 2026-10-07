@@ -71,6 +71,7 @@
         "chat:write",
         "channels:read",
         "channels:history",
+        "channels:manage",
         "commands",
         "groups:history",
         "groups:read",

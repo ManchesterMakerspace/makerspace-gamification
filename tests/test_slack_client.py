@@ -48,3 +48,24 @@ def test_debug_client_is_accepted_by_bolt():
     app = build_app(None, "xoxb-test", "test-signing-secret", "T1", "UBOT", slack)
 
     assert app.client is slack
+
+
+def test_rate_limit_holds_later_slack_calls_for_retry_after():
+    response = SimpleNamespace(http_verb="POST", api_url="https://slack.test/api/api.test",
+        status_code=429, headers={"Retry-After": "7"}, data={"ok": False, "error": "ratelimited"})
+    slack = SlackCallDebugClient(token="xoxb-test")
+    clock = [100.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    with patch.object(WebClient, "api_call", side_effect=[SlackApiError("ratelimited", response), {"ok": True}]), \
+         patch("ledger.slack_client.time.monotonic", side_effect=lambda: clock[0]), \
+         patch("ledger.slack_client.time.sleep", side_effect=sleep):
+        with pytest.raises(SlackApiError):
+            slack.api_test()
+        assert slack.api_test() == {"ok": True}
+
+    assert sleeps == [7]

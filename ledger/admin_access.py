@@ -205,11 +205,7 @@ def deliver_review_invite(worker, job):
             raise
     # Compensate withdrawal or role loss while Slack processed the invite.
     if not eligible():
-        try:
-            worker.slack.conversations_kick(channel=destination, user=uid)
-        except SlackApiError as exc:
-            if exc.response.get("error") not in ("not_in_channel", "user_not_found"):
-                raise
+        worker.kick(destination, uid)
         return
     def save(s):
         row = s.get("ledger_channels", "review-membership:" + member)
