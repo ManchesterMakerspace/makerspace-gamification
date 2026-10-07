@@ -22,6 +22,14 @@ def test_recognizes_only_supported_unambiguous_public_count_requests():
     assert recognize("How many people checked in here this month?") == ("space", "this_month")
     assert recognize("How many people have come to the space today?") == ("space", "today")
     assert recognize("How many people have checked in at the makerspace today?") == ("space", "today")
+    assert recognize("How many people came here today?") == ("space", "today")
+    assert recognize("How many people have come here today?") == ("space", "today")
+    assert recognize("How many people came to here today?") is None
+    assert recognize("How many people visited the makerspace website today?") is None
+    assert not is_count_question("How many people visited the makerspace website today?")
+    assert recognize("How many people came to the space station today?") is None
+    assert not is_count_question("How many people came to the space station today?")
+    assert recognize("How many people were at the space station today?") is None
     assert is_count_question("How many new members joined last week?")
     assert "Which period" in clarification("How many new members joined last week?")
 

@@ -940,11 +940,13 @@ class Worker:
         return result
 
     def kick(self, channel, uid):
-        if not uid or uid == self.bot_id:
-            if uid == self.bot_id:
-                log.warning("Slack channel removal skipped for The Ledger bot channel=%s", channel)
+        if not uid or uid in (self.bot_id, "USLACKBOT"):
             return False
         try:
+            response = self.slack.users_info(user=uid)
+            user = response.get("user") if callable(getattr(response, "get", None)) else None
+            if isinstance(user, dict) and user.get("is_bot"):
+                return False
             self.slack.conversations_kick(channel=channel, user=uid)
             return True
         except SlackApiError as exc:

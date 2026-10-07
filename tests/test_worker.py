@@ -23,12 +23,17 @@ def worker(env):
     return Worker(l, composer, slack, bot_id='UBOT')
 
 
-def test_channel_kick_never_targets_bot_and_slack_failures_are_not_raised(joined, caplog):
+def test_channel_kick_silently_skips_all_bots_and_slack_failures_are_not_raised(joined, caplog):
     _, _, _, _, _, slack = joined
     w = worker(joined)
+    slack.users_info.side_effect = lambda user: {"user": {"id": user, "is_bot": user == "UOTHERBOT"}}
 
     assert not w.kick('CRANK1', 'UBOT')
+    assert not w.kick('CRANK1', 'USLACKBOT')
+    assert not w.kick('CRANK1', 'UOTHERBOT')
     slack.conversations_kick.assert_not_called()
+    assert 'Slack channel removal skipped' not in caplog.text
+    assert [call.kwargs['user'] for call in slack.users_info.call_args_list] == ['UOTHERBOT']
 
     response = SimpleNamespace(status_code=500, get=lambda key, default=None: 'fatal_error' if key == 'error' else default)
     slack.conversations_kick.side_effect = SlackApiError('failed', response)
