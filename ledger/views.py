@@ -437,7 +437,10 @@ def member_quest_review(ledger, quest, approve=True):
         tools.append(option(f"{tool.get('name', identifier)} — {shop.get('name', 'Shop')}", identifier))
     explicit_shops = service.explicit_shops(quest)
     duration = quest.get("duration") or {"value": 1, "unit": "hours"}
-    disciplines = quest.get("disciplines") or []
+    raw_disciplines = quest.get("disciplines") or []
+    disciplines = [row if isinstance(row, dict) else {"name": row, "expectation": ""}
+                   for row in (raw_disciplines if isinstance(raw_disciplines, list) else [])
+                   if isinstance(row, (dict, str))]
     blocks = [section("*Original participant proposal*"),
         select_input("quest_type", "Quest type", types,
                      selected=next(c for c in types if c["value"] == quest.get("quest_type", "individual"))),

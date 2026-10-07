@@ -101,6 +101,47 @@ def test_cooperative_share_rounds_once_and_excludes_proposer(joined):
     assert len(royalty) == 1 and royalty[0]["credited_xp"] == "250" and royalty[0]["xp"] == "13"
 
 
+def test_member_cooperative_quest_may_use_a_configured_rank_name(joined):
+    ledger, store, source, *_ = joined
+    rank(ledger, store, 1, 1)
+    rank(ledger, store, 2, 1)
+    rank(ledger, store, 3, 1)
+    quest = Quests(ledger).draft(member(1), "Newbie workshop project", "Build a useful shared project.",
+        "Demonstrate the completed project.", 1, quest_type="cooperative",
+        duration={"value": 2, "unit": "hours"}, disciplines=[
+            {"name": "Design", "expectation": "Document the design."},
+            {"name": "Fabrication", "expectation": "Build and inspect the result."}])
+    Quests(ledger).submit_draft(member(1), quest["_id"])
+    quest = Quests(ledger).publish(member(10), quest["_id"], 100)
+
+    service = LedgerQuests(ledger)
+    assert service.available(member(2), quest) == quest
+    for person, discipline in ((2, "Design"), (3, "Fabrication")):
+        service.contribute(member(person), quest["_id"], "join", role=discipline)
+        service.contribute(member(person), quest["_id"], "submit", description="Observable contribution")
+        service.contribute(member(10), quest["_id"], "verify", member=member(person))
+    assert service.finalize(member(10), quest["_id"], "Observed shared outcome")["status"] == "completed"
+
+
+def test_cooperative_finalization_rechecks_member_minimum_rank(joined):
+    ledger, store, source, *_ = joined
+    quest = proposal(ledger, store, source, quest_type="cooperative", reward=100)
+    service = LedgerQuests(ledger)
+    for person, discipline, checkout_key in ((2, "Design", 1922), (3, "Fabrication", 1923)):
+        rank(ledger, store, person, 2)
+        checkout(source, person, 311, checkout_key)
+        service.contribute(member(person), quest["_id"], "join", role=discipline)
+        service.contribute(member(person), quest["_id"], "submit", description="Observable contribution")
+        service.contribute(member(10), quest["_id"], "verify", member=member(person))
+
+    rank(ledger, store, 2, 0)
+    state = service.project(quest)
+    assert set(service.verified_contributors(quest, state)) == {member(3)}
+    with pytest.raises(ValueError, match="at least two"):
+        service.finalize(member(10), quest["_id"], "Independently observed shared outcome")
+    assert ledger.participant(member(2))["xp"] == "0"
+
+
 def test_proposal_modal_uses_external_tools_and_file_input(joined):
     ledger, store, source, composer, _, slack = joined
     checkout(source, 1, 311, 931)
@@ -113,6 +154,22 @@ def test_proposal_modal_uses_external_tools_and_file_input(joined):
         "value": "tool1", "view": {"private_metadata": view["private_metadata"]}})
     assert result["options"] == [views.option("Tool1-1 — Shop1", member(311))]
     assert "shop_ids" not in json.dumps(view)
+
+
+def test_review_modal_normalizes_legacy_string_disciplines(joined):
+    ledger, store, source, *_ = joined
+    quest = Quests(ledger).draft(member(1), "Legacy cooperative quest", "Build it together.",
+        "Show the shared result.", 1, quest_type="cooperative", duration={"value": 1, "unit": "hours"},
+        disciplines=[{"name": "Design", "expectation": "Document the design."},
+                     {"name": "Build", "expectation": "Inspect the result."}])
+    quest["disciplines"] = ["Design", "Build"]
+    store.put("ledger_quests", quest)
+
+    view = views.member_quest_review(ledger, quest)
+    fields = {block.get("block_id"): block.get("element", {}) for block in view["blocks"]}
+    assert fields["discipline_name_0"]["initial_value"] == "Design"
+    assert fields["discipline_name_1"]["initial_value"] == "Build"
+    assert fields["discipline_expectation_0"].get("initial_value", "") == ""
 
 
 def test_modal_verifies_and_stores_bounded_slack_photo_metadata(joined):
