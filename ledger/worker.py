@@ -953,6 +953,12 @@ class Worker:
             log.warning("Slack channel removal failed channel=%s user=%s status=%s slack_error=%s; not retrying",
                 channel, uid, getattr(response, "status_code", None), slack_error or "unknown")
             return False
+        except Exception as exc:
+            # Removal is best effort even when Slack returns no response. Retrying
+            # an old cleanup can remove access that was legitimately restored.
+            log.warning("Slack channel removal failed channel=%s user=%s transport_error=%s; not retrying",
+                channel, uid, type(exc).__name__)
+            return False
 
     def _rank_transition_access(self, job, uid, store=None):
         store = store or self.store
