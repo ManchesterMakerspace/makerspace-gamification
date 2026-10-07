@@ -218,6 +218,16 @@ class Worker:
             "cached_at": now()})
         return file_id
 
+    @staticmethod
+    def _home_publish_confirmed(result, submitted):
+        """Confirm Slack returned the intended Home without comparing normalized blocks."""
+        if not callable(getattr(result, "get", None)) or result.get("ok") is not True:
+            return False
+        published = result.get("view")
+        return (isinstance(published, dict) and published.get("type") == "home"
+                and published.get("callback_id") == submitted.get("callback_id")
+                and published.get("private_metadata") == submitted.get("private_metadata"))
+
     def publish_home(self, job):
         payload = job["payload"]
         member_id = payload["member_id"]
@@ -252,11 +262,7 @@ class Worker:
         view = home(self.ledger, member_id, rank_icon_file_id=rank_icon_file_id,
                     skill_tree_file_id=skill_tree_file_id)
         result = self.slack.views_publish(user_id=slack_id, view=view)
-        published = result.get("view") if callable(getattr(result, "get", None)) else None
-        if (not callable(getattr(result, "get", None)) or result.get("ok") is not True or not isinstance(published, dict)
-                or published.get("type") != "home" or published.get("callback_id") != view.get("callback_id")
-                or published.get("private_metadata") != view.get("private_metadata")
-                or published.get("blocks") != view.get("blocks")):
+        if not self._home_publish_confirmed(result, view):
             raise RuntimeError("Slack did not confirm the published Home view")
 
         # Persist placeholder intent immediately after Slack confirms the placeholder.
@@ -298,7 +304,7 @@ class Worker:
             enqueue(self.store, "ledger_outbox", f"home:{member_id}:reconcile:{job['_id']}", "home_publish",
                     {"member_id": member_id, "slack_id": slack_id, "reconcile_job": job["_id"]}, delay=300)
 
-    def _describe_home_profile_photo(self, member_id, slack_id):
+    def _describe_home_profile_photo(self, member_id, slack_id, refresh_key=None):
         """Refresh an opted-in member's photo description when the largest image changes."""
         try:
             response = self.slack.users_profile_get(user=slack_id)
@@ -318,6 +324,8 @@ class Worker:
                 return
             checksum = hashlib.sha256(image_bytes).hexdigest()
             saved = self.store.get("ledger_homes", member_id) or {}
+            if refresh_key is not None and saved.get("profile_photo_refresh_key") != refresh_key:
+                return
             if saved.get("profile_photo_cksum") == checksum and saved.get("profile_photo_description"):
                 return
             from .image_captioning import describe_image
@@ -327,8 +335,12 @@ class Worker:
                 return
             def save(s):
                 row = s.get("ledger_homes", member_id) or {"_id": member_id}
+                if refresh_key is not None and row.get("profile_photo_refresh_key") != refresh_key:
+                    return
                 row.update(profile_photo_cksum=checksum, profile_photo_description=description.strip(),
                            profile_photo_described_at=now())
+                if refresh_key is not None:
+                    row["profile_photo_refresh_completed_key"] = refresh_key
                 s.put("ledger_homes", row)
             self.store.atomic(save)
             log.info("home profile photo description saved member=%s", member_id)
@@ -382,7 +394,13 @@ class Worker:
                 self.store.atomic(lambda s: s.put("ledger_catalog", {"_id": f"identity:{member_id}", "deactivated": bool(user.get("deleted")), "bot": bool(user.get("is_bot")), "at": now()}))
                 self.ledger.reconcile(member_id)
                 if not user.get("deleted") and not user.get("is_bot") and self.ledger.active(member_id):
-                    self._describe_home_profile_photo(member_id, user["id"])
+                    def queue_photo_refresh(s):
+                        row = s.get("ledger_homes", member_id) or {"_id": member_id, "kind": "home"}
+                        row["profile_photo_refresh_key"] = key
+                        s.put("ledger_homes", row)
+                        enqueue(s, "ledger_outbox", f"home-photo:{member_id}:{key}", "home_profile_photo",
+                                {"member_id": member_id, "slack_id": user["id"], "refresh_key": key})
+                    self.store.atomic(queue_photo_refresh)
                 if user.get("deleted"):
                     self.reconcile_channels()
             return
@@ -465,11 +483,7 @@ class Worker:
             if callback_id != "ledger_home_processing":
                 placeholder = {**home_processing(), "private_metadata": home_private_metadata(self.ledger, member_id)}
                 response = self.slack.views_publish(user_id=event["user"], view=placeholder)
-                published = response.get("view") if callable(getattr(response, "get", None)) else None
-                if (not callable(getattr(response, "get", None)) or response.get("ok") is not True or not isinstance(published, dict)
-                        or published.get("type") != "home" or published.get("callback_id") != placeholder["callback_id"]
-                        or published.get("private_metadata") != placeholder["private_metadata"]
-                        or published.get("blocks") != placeholder.get("blocks")):
+                if not self._home_publish_confirmed(response, placeholder):
                     raise RuntimeError("Slack did not confirm the published Home placeholder")
                 def mark_placeholder(s):
                     row = s.get("ledger_homes", member_id) or {"_id": member_id}
@@ -1293,6 +1307,14 @@ class Worker:
             return self.deliver_guidance(job)
         if kind == "home_publish":
             return self.publish_home(job)
+        if kind == "home_profile_photo":
+            refresh_key = p.get("refresh_key")
+            saved = self.store.get("ledger_homes", member_id) or {}
+            slack_id = p.get("slack_id")
+            if (not isinstance(refresh_key, str) or saved.get("profile_photo_refresh_key") != refresh_key
+                    or not self.ledger.active(member_id) or self.valid_identity(member_id) != slack_id):
+                raise Denied("Profile photo refresh is no longer current.")
+            return self._describe_home_profile_photo(member_id, slack_id, refresh_key)
         if kind in ("review_notice", "quest_review_notice"):
             from .review_notifications import deliver
             return deliver(self, job)

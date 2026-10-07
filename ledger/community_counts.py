@@ -15,7 +15,8 @@ PERIOD_PATTERNS = {
     "this_month": re.compile(r"\b(?:this\s+month|month\s+to\s+date|month\s+so\s+far)\b", re.I),
 }
 SPACE_QUESTION = re.compile(
-    r"\b(?:how\s+busy|how\s+many\s+(?:people|visitors?|check-?ins?)|"
+    r"\b(?:how\s+busy|how\s+many\s+(?:visitors?|check-?ins?)|"
+    r"how\s+many\s+people(?:\s+(?:are|were|have\s+been))?\s+(?:here|(?:at|in)\s+(?:the\s+)?(?:space|makerspace))|"
     r"(?:space|makerspace)\s+(?:busy|attendance|visitors?)|"
     r"(?:busy|crowded)\s+(?:is|was|has)|attendance\s+(?:today|yesterday|this))\b", re.I)
 MEMBER_QUESTION = re.compile(
