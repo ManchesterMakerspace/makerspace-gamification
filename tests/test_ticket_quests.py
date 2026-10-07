@@ -581,6 +581,47 @@ def test_response_thanks_uses_persisted_composition(joined):
     assert slack.chat_postMessage.call_args.kwargs["text"] == "Thanks for the repair report."
 
 
+def test_caption_failure_does_not_block_ticket_image_delivery(joined, monkeypatch):
+    ledger, store, _, service = setup_tickets(joined)
+    quest = open_quest(service, store, service.sources.data)
+    _, _, _, composer, _, slack = joined
+    worker = Worker(ledger, composer, slack, bot_id="UBOT")
+    worker.persist_composition = MagicMock(return_value={"text": "Thanks for the report."})
+    response_id = "ticket-quest-response:caption-outage"
+    quest_id = quest["_id"]
+    store.put("ledger_evidence", {"_id": response_id, "kind": "broken_ticket_quest_response", "quest_id": quest_id,
+        "slack_id": "U2", "member_id": str(oid(2)), "channel": "CQUEST", "thread_ts": "900.001",
+        "text": "I checked the switch.", "image_file_id": "F1", "delivery": {},
+        "rails_note_written": True})
+    slack.conversations_replies.return_value = {"messages": []}
+    slack.files_upload_v2.return_value = {"files": [{"permalink": "https://files.example/image"}]}
+    monkeypatch.setattr(TicketQuests, "_download_jpeg", lambda self, response: b"jpeg")
+    monkeypatch.setattr(TicketQuests, "_upload_drive", lambda self, image, filename: None)
+    monkeypatch.setattr("ledger.image_captioning.describe_image", lambda *args: (_ for _ in ()).throw(TimeoutError()))
+
+    TicketQuests(ledger, worker)._deliver_response({"_id": response_id,
+        "payload": {"response_id": response_id, "winner": False}})
+
+    assert slack.chat_postMessage.call_count == 2  # Fix Tickets repost and participant acknowledgment
+    upload = slack.files_upload_v2.call_args.kwargs["file_uploads"][0]
+    assert "alt_txt" not in upload
+
+
+def test_caption_event_is_separate_from_member_note():
+    response = {"_id": "response-1", "text": "I inspected the switch.",
+        "image_description": "A red switch."}
+    quest = {"_id": "quest-1"}
+    notes = TicketQuests._build_event_notes(735, quest, response, "https://files.example/image", 4,
+        oid(2), oid(900), "UBOT")
+
+    assert len(notes) == 2
+    assert notes[0]["note"] == response["text"]
+    assert notes[0]["actor_id"] == oid(2)
+    assert notes[1]["note"] == "Image description (automatically generated): A red switch."
+    assert notes[1]["actor_id"] is None and notes[1]["actor_slack_id"] == "UBOT"
+    assert notes[1]["note_role"] == "ledger" and notes[1]["revision"] == notes[0]["revision"] + 1
+
+
 @pytest.mark.parametrize("terminal", ["resolved", "rejected", "withdrawn"])
 def test_terminal_ticket_closes_unanswered_quest_and_reopen_does_not_revive(joined, terminal):
     _, store, source, service = setup_tickets(joined)

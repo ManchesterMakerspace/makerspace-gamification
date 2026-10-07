@@ -251,8 +251,8 @@ class Worker:
         view = home(self.ledger, member_id, rank_icon_file_id=rank_icon_file_id,
                     skill_tree_file_id=skill_tree_file_id)
         result = self.slack.views_publish(user_id=slack_id, view=view)
-        published = result.get("view") if isinstance(result, dict) else None
-        if (not isinstance(result, dict) or result.get("ok") is not True or not isinstance(published, dict)
+        published = result.get("view") if callable(getattr(result, "get", None)) else None
+        if (not callable(getattr(result, "get", None)) or result.get("ok") is not True or not isinstance(published, dict)
                 or published.get("type") != "home" or published.get("callback_id") != view.get("callback_id")
                 or published.get("private_metadata") != view.get("private_metadata")
                 or published.get("blocks") != view.get("blocks")):
@@ -301,7 +301,7 @@ class Worker:
         """Refresh an opted-in member's photo description when the largest image changes."""
         try:
             response = self.slack.users_profile_get(user=slack_id)
-            profile = response.get("profile") if isinstance(response, dict) else None
+            profile = response.get("profile") if callable(getattr(response, "get", None)) else None
             if not isinstance(profile, dict):
                 return
             choices = [(key, profile.get(key)) for key in
@@ -330,7 +330,7 @@ class Worker:
                            profile_photo_described_at=now())
                 s.put("ledger_homes", row)
             self.store.atomic(save)
-            log.info("home profile photo description saved member=%s description=%s", member_id, description.strip())
+            log.info("home profile photo description saved member=%s", member_id)
         except Exception as exc:
             # Photo metadata is best-effort and must not repeat a confirmed Home publish.
             log.info("home profile photo description unavailable member=%s reason=%s", member_id, type(exc).__name__)
@@ -367,8 +367,21 @@ class Worker:
             member = self.ledger.sources.identity(user["id"])
             if member:
                 member_id = sid(member["_id"])
+                # A profile event can change or remove the photo without changing
+                # the member's rank. Clear the old description before best-effort
+                # refresh so stale appearance data is never served.
+                def clear_photo_description(s):
+                    row = s.get("ledger_homes", member_id)
+                    if row:
+                        row.pop("profile_photo_cksum", None)
+                        row.pop("profile_photo_description", None)
+                        row.pop("profile_photo_described_at", None)
+                        s.put("ledger_homes", row)
+                self.store.atomic(clear_photo_description)
                 self.store.atomic(lambda s: s.put("ledger_catalog", {"_id": f"identity:{member_id}", "deactivated": bool(user.get("deleted")), "bot": bool(user.get("is_bot")), "at": now()}))
                 self.ledger.reconcile(member_id)
+                if not user.get("deleted") and not user.get("is_bot") and self.ledger.active(member_id):
+                    self._describe_home_profile_photo(member_id, user["id"])
                 if user.get("deleted"):
                     self.reconcile_channels()
             return
@@ -451,8 +464,8 @@ class Worker:
             if callback_id != "ledger_home_processing":
                 placeholder = {**home_processing(), "private_metadata": home_private_metadata(self.ledger, member_id)}
                 response = self.slack.views_publish(user_id=event["user"], view=placeholder)
-                published = response.get("view") if isinstance(response, dict) else None
-                if (not isinstance(response, dict) or response.get("ok") is not True or not isinstance(published, dict)
+                published = response.get("view") if callable(getattr(response, "get", None)) else None
+                if (not callable(getattr(response, "get", None)) or response.get("ok") is not True or not isinstance(published, dict)
                         or published.get("type") != "home" or published.get("callback_id") != placeholder["callback_id"]
                         or published.get("private_metadata") != placeholder["private_metadata"]
                         or published.get("blocks") != placeholder.get("blocks")):
