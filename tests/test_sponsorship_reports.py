@@ -3,7 +3,7 @@ import json
 import pytest
 
 from conftest import oid
-from ledger.conversations import converse
+from ledger.conversations import converse, sponsorship_request
 from ledger.domain import Denied
 from ledger.query_tools import QueryTools
 from ledger.sponsorships import (build_report, caller_invitation, invitation_key, render_report)
@@ -92,11 +92,13 @@ def test_report_fallback_escapes_slack_markup_but_table_keeps_raw_name():
     assert page["blocks"][1]["rows"][1][0]["text"] == name
 
 
-def test_sponsor_opener_rejects_names_dates_counts_and_status_claims():
+def test_sponsor_opener_uses_affirmative_fact_free_allowlist():
     report = {"rows": [{"name": "Alex Maker"}]}
-    assert valid_opener("The Ledger opens the private register.", report)
+    assert valid_opener("The Ledger opens your private sponsorship register.", report)
     for text in ("Alex Maker appears in the register.", "Three invitations await.",
-                 "Someone opted in today.", "The current status is ready."):
+                 "Someone opted in today.", "The current status is ready.",
+                 "Your invitations have been successful.", "Every invitation was ignored.",
+                 "Your invitees are still waiting to respond.", "A custom but vague introduction."):
         assert not valid_opener(text, report)
 
 
@@ -152,7 +154,7 @@ def test_private_sponsorship_tool_is_caller_scoped_and_qwen_only_opens(env):
     assert any(item["function"]["name"] == "my_sponsorships" for item in tools)
 
 
-@pytest.mark.parametrize("prompt", ["Who have I sponsored?", "Did Maker3 opt in?"])
+@pytest.mark.parametrize("prompt", ["Who have I sponsored?", "Did someone I invited opt in?"])
 def test_sponsorship_question_rejects_answer_without_tool_result(env, prompt):
     ledger, _, _, composer, api, _ = env
     ledger.join(mid(1))
@@ -161,6 +163,18 @@ def test_sponsorship_question_rejects_answer_without_tool_result(env, prompt):
     response = converse(ledger, composer, mid(1), prompt, private=True)
     assert response["outcome"] == "fallback"
     assert response["text"] == "Use /ledger sponsor to review your private sponsorship register."
+    assert "sponsorship_report" not in response
+
+
+@pytest.mark.parametrize("prompt", ["When did I opt in?", "Was I opted out yesterday?"])
+def test_self_consent_questions_are_not_sponsorship_requests(env, prompt):
+    ledger, _, _, composer, api, _ = env
+    ledger.join(mid(1))
+    assert not sponsorship_request(prompt)
+    api.tool_response.return_value = {"role": "assistant", "content": "That question concerns your own participation history."}
+    response = converse(ledger, composer, mid(1), prompt, private=True)
+    assert response["outcome"] == "generated"
+    assert response["text"] == "That question concerns your own participation history."
     assert "sponsorship_report" not in response
 
 

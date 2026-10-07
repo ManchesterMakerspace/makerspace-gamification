@@ -20,6 +20,11 @@ SPONSORSHIPS_TOOL = {"type": "function", "function": {
 DISPLAY_ZONE = ZoneInfo("America/New_York")
 TABLE_ROW_LIMIT = 100
 TABLE_CHAR_LIMIT = 9500
+SPONSORSHIP_OPENERS = frozenset({
+    "The Ledger opens your private sponsorship register.",
+    "Here is your private sponsorship register.",
+    "Your private sponsorship register is ready.",
+})
 
 
 def invitation_key(giver, recipient):
@@ -165,17 +170,8 @@ def tool_result(report):
 
 
 def valid_opener(text, report=None):
-    if not isinstance(text, str) or not text.strip() or len(text) > 240:
-        return False
-    if re.search(r"<|>|[\r\n]|\b\d|\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
-                 r"all|both|none|several|many|few|today|yesterday|current(?:ly)?|never|joined|left|accepted|declined|"
-                 r"pending|failed|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-                 r"aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|"
-                 r"opt(?:ed)?[ -]?(?:in|out)|participat\w*|status|member\s+record|invited?\s+on)\b", text, re.I):
-        return False
-    lowered = text.casefold()
-    return not any(isinstance(row.get("name"), str) and row["name"].casefold() in lowered
-                   for row in (report or {}).get("rows", []))
+    """Accept only reviewed, fact-free phrases; generated prose cannot claim outcomes."""
+    return isinstance(text, str) and text.strip() in SPONSORSHIP_OPENERS
 
 
 def _cell(text):

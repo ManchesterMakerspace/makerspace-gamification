@@ -85,9 +85,7 @@ def sponsorship_request(text):
     personal = re.search(r"\b(?:i|me|my|mine|who|whom|everyone|people|person)\b", text, re.I)
     invitation = re.search(
         r"\b(?:sponsor(?:ed|s|ing|ships?)?|invit(?:e(?:d|s|es?)?|ing|ations?))\b", text, re.I)
-    participation = re.search(
-        r"\b(?:did|has|have|is|was|when|whether)\b.{0,100}\bopt(?:ed)?[ -]?(?:in|out)\b", text, re.I)
-    return bool((personal and invitation) or participation)
+    return bool(personal and invitation)
 
 
 def appearance_request(ledger, requester, text):
