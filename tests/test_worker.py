@@ -570,6 +570,22 @@ def test_voluntary_departure_and_lower_rank_reinvite(joined):
     assert not s.get('ledger_channels', f'membership:{m}:rank:1')['voluntary_leave']
     w.event({'type': 'member_joined_channel', 'channel': 'CCHAT', 'user': 'U3'}, 'unauthorized')
     assert s.get('ledger_outbox', 'unauthorized:remove')
+    reconciliation = s.get('ledger_inbox', 'channel-reconcile:unauthorized')
+    assert reconciliation['kind'] == 'channel_reconcile'
+    assert reconciliation['payload'] == {'channel': 'CCHAT', 'source': 'member_joined_channel'}
+    w.reconcile_channels = MagicMock()
+    w.inbox(reconciliation)
+    w.reconcile_channels.assert_called_once_with()
+
+
+def test_bot_join_enqueues_channel_reconciliation_without_membership_removal(joined):
+    _, store, *_ = joined
+    w = worker(joined)
+    w.event({'type': 'member_joined_channel', 'channel': 'CRANK1', 'user': 'UBOT'}, 'bot-join')
+    job = store.get('ledger_inbox', 'channel-reconcile:bot-join')
+    assert job['kind'] == 'channel_reconcile'
+    assert job['payload'] == {'channel': 'CRANK1', 'source': 'member_joined_channel'}
+    assert not store.get('ledger_outbox', 'bot-join:remove')
 
 
 def test_only_major_automatic_posts_coalesce_and_historical_posts_suppressed(joined):

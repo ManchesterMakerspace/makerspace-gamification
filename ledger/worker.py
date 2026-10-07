@@ -108,6 +108,8 @@ class Worker:
                 self.valid_identity(profile["member_id"])
                 Engagement(self.ledger).notice(profile["member_id"])
             self.reconcile_channels()
+        elif job["kind"] == "channel_reconcile":
+            self.reconcile_channels()
         elif job["kind"] == "home_reconcile":
             self.reconcile_homes(job)
         elif job["kind"] in ("ticket_quest_change", "ticket_quest_reconcile"):
@@ -447,6 +449,9 @@ class Worker:
                 self.slack.chat_postMessage(**reply)
                 return "community_count_answered"
         if kind in ("member_joined_channel", "member_left_channel"):
+            if kind == "member_joined_channel":
+                self.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"channel-reconcile:{key}",
+                    "channel_reconcile", {"channel": event.get("channel"), "source": kind}))
             channels = [c for c in self.store.select("ledger_channels", {"kind": "channel"}) if c["channel_id"] == event["channel"]]
             if not channels or event["user"] == self.bot_id:
                 return

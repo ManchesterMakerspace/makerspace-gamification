@@ -20,6 +20,12 @@ ATTENDANCE_DESTINATION_SUFFIX = (
 )
 HERE_DESTINATION = r"here" + ATTENDANCE_DESTINATION_SUFFIX
 SPACE_DESTINATION = r"(?:the\s+)?(?:space|makerspace)" + ATTENDANCE_DESTINATION_SUFFIX
+NONPHYSICAL_ATTENDANCE_CONTEXT = re.compile(
+    r"\b(?:space|makerspace)\s+(?:website|web\s*site|web\s*page|site|page|station)\b|"
+    r"\b(?:website|web\s*site|web\s*page|site|page|station|class(?:room)?|course|workshop)\b[^?!.]{0,80}\b"
+    r"(?:busy|attendance|visitors?|visits?|check-?ins?)\b|"
+    r"\b(?:busy|attendance|visitors?|visits?|check-?ins?)\b[^?!.]{0,80}\b"
+    r"(?:website|web\s*site|web\s*page|site|page|station|class(?:room)?|course|workshop)\b", re.I)
 SPACE_QUESTION = re.compile(
     r"\b(?:how\s+busy|how\s+many\s+(?:visitors?|check-?ins?)|"
     r"how\s+many\s+people(?:\s+(?:are|were|have\s+been))?\s+(?:" + HERE_DESTINATION +
@@ -35,11 +41,16 @@ MEMBER_QUESTION = re.compile(
     r"\bnew\s+members?\b.{0,80}\b(?:join(?:ed)?|sign\s*ups?|added)\b", re.I)
 
 
+def _is_space_question(text):
+    """Recognize attendance wording only when it has no nonphysical target."""
+    return bool(SPACE_QUESTION.search(text) and not NONPHYSICAL_ATTENDANCE_CONTEXT.search(text))
+
+
 def recognize(text):
     """Return a fixed (subject, period) request; ambiguous requests are ignored."""
     if not isinstance(text, str) or len(text) > 6000:
         return None
-    space = bool(SPACE_QUESTION.search(text))
+    space = _is_space_question(text)
     members = bool(MEMBER_QUESTION.search(text))
     if space == members:
         return None
@@ -57,11 +68,11 @@ def is_count_question(text):
     """Identify count topics even when the requested period needs clarification."""
     if not isinstance(text, str) or len(text) > 6000:
         return False
-    return bool(SPACE_QUESTION.search(text) or MEMBER_QUESTION.search(text))
+    return bool(_is_space_question(text) or MEMBER_QUESTION.search(text))
 
 
 def clarification(text):
-    space = bool(SPACE_QUESTION.search(text))
+    space = _is_space_question(text)
     members = bool(MEMBER_QUESTION.search(text))
     periods = "today, yesterday, this week, or this month so far"
     if space:

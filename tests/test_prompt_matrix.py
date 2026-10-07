@@ -75,8 +75,8 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'In registered Ledger channels only' in root.find('channels').text
     assert 'reject stale ambient jobs before inference' in root.find('channels').text
     channels = root.find('channels').text
-    assert 'People counts need attendance terms + complete space/here destination' in channels
-    assert 'reject class/website/station nouns' in channels
+    assert 'Attendance wording rejects class/web/station contexts' in channels
+    assert 'people wording needs complete space/here destination' in channels
     assert 'Python filters out seed/global quest examples' in channels
     assert 'post a generic ascent in the prior rank channel without hinting at the next' in channels
     assert 'then remove from the prior & welcome only after invite succeeds' in channels
