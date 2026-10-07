@@ -5,7 +5,8 @@ from uuid import uuid4
 from .authority import Authority
 from .domain import Denied, Ledger
 from .quest_policy import (DEFINITION_FIELDS, LEDGER_AUTHOR, contains_rank_name, cooperative, enabled_rank,
-                           generated, validate_definition)
+                           generated, minimum_rank, validate_definition)
+from .rules import amount
 from .storage import now
 
 
@@ -18,13 +19,16 @@ class LedgerQuests:
 
     def available(self, member, q):
         from .quests import Quests
-        self.l.require(member)
+        participant = self.l.require(member)
         state = self.project(q) if cooperative(q) else None
         if (not cooperative(q) or q["status"] != "published" or not enabled_rank(self.l, q["target_rank"])
                 or contains_rank_name(self.l, q)
                 or not state or state["quest_revision"] != q["_id"] or state["status"] != "open"
                 or not Quests(self.l).prerequisites(q, member)):
             raise Denied("This cooperative quest is unavailable or its prerequisites are not met.")
+        if not generated(q) and (not minimum_rank(q) or participant["rank"] < q["target_rank"]
+                                 or not Quests(self.l).author_available(q)):
+            raise Denied("This cooperative quest's minimum rank or proposer eligibility is not met.")
         return q
 
     def review(self, actor, key, reward, approve=True, reason="", edits=None):
@@ -98,7 +102,7 @@ class LedgerQuests:
                     raise Denied("Contributors cannot verify their own shared project.")
                 service.available(member, q)
                 audit = Authority(d).authorize(actor, member, "quest_complete", q["shop_ids"],
-                                               q["logical_id"], excluded=contributions, commit=True)
+                                               q["logical_id"], excluded=set(contributions) | {q["creator"]}, commit=True)
                 contribution = contributions.get(member)
                 if not contribution or contribution["status"] != "pending":
                     raise ValueError("No submitted contribution to verify.")
@@ -146,8 +150,8 @@ class LedgerQuests:
             if not state:
                 raise ValueError("The shared project is unavailable.")
             excluded = list(state["contributions"])
-            authority = Authority(d).authorize(actor, LEDGER_AUTHOR, "quest_complete", q["shop_ids"],
-                                                q["logical_id"], excluded=excluded, commit=True)
+            authority = Authority(d).authorize(actor, q["creator"], "quest_complete", q["shop_ids"],
+                                                q["logical_id"], excluded=set(excluded) | {q["creator"]}, commit=True)
             if state["status"] == "completed":
                 return state
             if (state["status"] != "open" or q["status"] != "published" or not enabled_rank(d, q["target_rank"])
@@ -158,16 +162,21 @@ class LedgerQuests:
             eligible = LedgerQuests(d).verified_contributors(q, state)
             if len(eligible) < 2 or not {r["name"] for r in q["disciplines"]}.issubset({c["role"] for c in eligible.values()}):
                 raise ValueError("Completion requires at least two eligible verified contributors covering every discipline.")
+            proposer_total = amount("0")
             for member, contribution in eligible.items():
                 audit = Authority(d).authorize(actor, member, "quest_complete", q["shop_ids"],
-                                               q["logical_id"], excluded=excluded, commit=True)
+                                               q["logical_id"], excluded=set(excluded) | {q["creator"]}, commit=True)
                 completion = f"quest-complete:{member}:{q['logical_id']}"
                 if not s.get("ledger_evidence", completion):
                     s.put("ledger_evidence", {"_id": completion, "kind": "quest_completion", "member_id": member,
                         "quest_revision": key, "logical_id": q["logical_id"], "description": contribution["description"],
                         "reviewer": actor, "review_authority": audit, "activity_at": contribution.get("submitted_at"), "at": now()})
+                    before_xp = amount(d.participant(member)["xp"])
                     d.award(member, completion, str(contribution["reward"]), "quest", facts={
                         "quest_title": q["title"], "summary": "Independently verified shared quest completion."}, action_id=action_id)
+                    credited = amount(d.participant(member)["xp"]) - before_xp
+                    if member != q["creator"]:
+                        proposer_total += credited
                     d.notify(member, "quest", {"quest_title": q["title"], "summary": "Independently verified shared quest completion.",
                              "verified_milestone": True, "milestone_id": completion, "xp_outcome_known": True}, "verified:" + completion, action_id=action_id)
                     d._advance(member, action_id=action_id)
@@ -184,6 +193,10 @@ class LedgerQuests:
             s.put("ledger_evidence", {"_id": "group-complete:" + q["logical_id"], "kind": "quest_group_completion",
                 "quest_revision": key, "logical_id": q["logical_id"], "description": description,
                 "actor": actor, **authority, "members": sorted(eligible), "at": now()})
+            if not generated(q):
+                from .quests import Quests
+                Quests(d).award_proposer_royalty(q, "group-complete:" + q["logical_id"], proposer_total,
+                                                 excluded=[])
             from .result_summaries import finish_action
             finish_action(d, action_id)
             return state

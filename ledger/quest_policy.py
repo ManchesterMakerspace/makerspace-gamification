@@ -9,6 +9,8 @@ from .sources import sid
 LEDGER_AUTHOR = "system:ledger"
 REVIEWED_KINDS = ("member_quest", "ledger_quest")
 DEFINITION_FIELDS = ("title", "description", "criteria", "shop_ids", "tool_ids", "disciplines")
+MEMBER_REVIEW_FIELDS = DEFINITION_FIELDS + ("quest_type", "target_rank", "duration")
+DURATION_UNITS = ("minutes", "hours", "days", "weeks")
 SENSITIVE = re.compile(
     r"\b(password|passcode|credentials?|api[ _-]?key|access[ _-]?token|secret|"
     r"(?:door|access|alarm|lock|entry)[ _-]?code|billing|credit[ -]?card|bank[ -]?account|"
@@ -25,11 +27,39 @@ def generated(q):
 
 
 def individual(q):
-    return q.get("kind") == "member_quest" or (generated(q) and q.get("quest_type") == "individual")
+    return q.get("kind") in REVIEWED_KINDS and q.get("quest_type", "individual") == "individual"
 
 
 def cooperative(q):
-    return generated(q) and q.get("quest_type") == "cooperative"
+    return q.get("kind") in REVIEWED_KINDS and q.get("quest_type") == "cooperative"
+
+
+def minimum_rank(q):
+    return q.get("rank_mode") == "minimum"
+
+
+def validate_duration(value):
+    if (not isinstance(value, dict) or set(value) != {"value", "unit"}
+            or type(value.get("value")) is not int or not 1 <= value["value"] <= 999
+            or value.get("unit") not in DURATION_UNITS):
+        raise ValueError("Estimated duration must be 1–999 minutes, hours, days, or weeks.")
+    return {"value": value["value"], "unit": value["unit"]}
+
+
+def validate_photo(value):
+    if value is None:
+        return None
+    allowed = {"id", "name", "mimetype", "filetype", "size", "available"}
+    if (not isinstance(value, dict) or set(value) - allowed or not isinstance(value.get("id"), str)
+            or not value["id"] or len(value["id"]) > 100 or not isinstance(value.get("name"), str)
+            or len(value["name"]) > 255 or value.get("mimetype") not in ("image/jpeg", "image/png", "image/gif")
+            or value.get("filetype") not in ("jpg", "jpeg", "png", "gif")
+            or type(value.get("size")) is not int or not 0 < value["size"] <= 10 * 1024 * 1024):
+        raise ValueError("Example photo must be one JPEG, PNG, or GIF no larger than 10 MiB.")
+    result = {key: value[key] for key in ("id", "name", "mimetype", "filetype", "size")}
+    if value.get("available") is False:
+        result["available"] = False
+    return result
 
 
 def enabled_rank(ledger, slot):

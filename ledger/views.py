@@ -30,6 +30,23 @@ def select_input(key, label, choices=None, selected=None, optional=False, dispat
             "label": {"type": "plain_text", "text": label}, "element": element}
 
 
+def multi_external_input(key, label, selected=(), optional=True, max_selected_items=20):
+    element = {"type": "multi_external_select", "action_id": key, "min_query_length": 0,
+               "max_selected_items": max_selected_items,
+               "placeholder": {"type": "plain_text", "text": label[:150]}}
+    if selected:
+        element["initial_options"] = list(selected)[:max_selected_items]
+    return {"type": "input", "block_id": key, "optional": optional,
+            "label": {"type": "plain_text", "text": label}, "element": element}
+
+
+def file_input(key, label, optional=True):
+    return {"type": "input", "block_id": key, "optional": optional,
+            "label": {"type": "plain_text", "text": label},
+            "element": {"type": "file_input", "action_id": key,
+                        "filetypes": ["jpg", "jpeg", "png", "gif"], "max_files": 1}}
+
+
 def checkbox(key, label, checked=False, hint=None):
     item = option(label, "yes")
     element = {"type": "checkboxes", "action_id": key, "options": [item]}
@@ -55,6 +72,10 @@ def values(body):
         for action, value in block.items():
             if value.get("type") in ("static_select", "external_select", "radio_buttons"):
                 out[action] = (value.get("selected_option") or {}).get("value")
+            elif value.get("type") in ("multi_static_select", "multi_external_select"):
+                out[action] = [item.get("value") for item in value.get("selected_options", []) if item.get("value")]
+            elif value.get("type") == "file_input":
+                out[action] = list(value.get("selected_files") or [])
             elif value.get("type") == "checkboxes":
                 out[action] = bool(value.get("selected_options"))
             elif value.get("type") == "users_select":
@@ -282,11 +303,21 @@ def quest_browser(ledger, member, selected=None):
         blocks[0]["element"]["initial_option"] = option(item["title"], selected)
         blocks.extend([section(f"*{escape(item['title'])}*\n{escape(item.get('description') or item.get('criteria', ''))}"),
                        section("*Acceptance criteria*\n" + escape(item.get("criteria", "")))])
+        duration = item.get("duration")
+        if isinstance(duration, dict):
+            blocks.append(section(f"*Estimated time:* {duration.get('value')} {escape(duration.get('unit', ''))}"))
+        photo = item.get("photo")
+        if isinstance(photo, dict) and photo.get("id") and photo.get("available", True):
+            blocks.append({"type": "image", "slack_file": {"id": photo["id"]},
+                           "alt_text": "Example photo for " + item["title"][:150]})
+        elif isinstance(photo, dict) and photo.get("id"):
+            blocks.append(section("*Example photo:* unavailable."))
         from .quest_policy import cooperative, generated, individual
         if individual(item):
             author_uid = None if generated(item) else ledger.sources.slack_id(item["creator"])
             author = "The Ledger" if generated(item) else (f"<@{author_uid}>" if author_uid and ledger.active(item["creator"]) else escape(author_uid or "Unavailable Slack identity"))
-            blocks.extend([section(f"*Creator:* {author}\n*Exact target rank:* {escape(ledger.presentation(item['target_rank'])['name'])}\n*Approved reward:* {item['reward']} XP\n*Verification:* independent authorized reviewer"),
+            rank_label = "Minimum rank" if item.get("rank_mode") == "minimum" else "Exact target rank"
+            blocks.extend([section(f"*Creator:* {author}\n*{rank_label}:* {escape(ledger.presentation(item['target_rank'])['name'])}\n*Approved reward:* {item['reward']} XP\n*Verification:* independent authorized reviewer"),
                 section("*Prerequisites*\nShops: " + escape(", ".join((ledger.sources.shop(i) or {}).get("name", i) for i in item["shop_ids"]) or "None") +
                         "\nTools: " + escape(", ".join((ledger.sources.tool(i) or {}).get("name", i) for i in item["tool_ids"]) or "None"))])
             accepted = service.acceptance(member, item["logical_id"])
@@ -295,7 +326,13 @@ def quest_browser(ledger, member, selected=None):
             blocks.append(section("*Verification:* existing milestone evidence requirements and independent review.\nUse /ledger-quests submit " + escape(item["_id"])))
         else:
             if cooperative(item):
-                blocks.append(section(f"*Creator:* The Ledger\n*Intended rank slot:* {item['target_rank']} (any participant may join)\n*Approved reward:* {item['reward']} XP per verified contributor"))
+                if generated(item):
+                    author, eligibility = "The Ledger", f"Intended rank slot: {item['target_rank']} (any participant may join)"
+                else:
+                    uid = ledger.sources.slack_id(item["creator"])
+                    author = f"<@{uid}>" if uid and ledger.active(item["creator"]) else "Unavailable Slack identity"
+                    eligibility = "Minimum rank: " + ledger.presentation(item["target_rank"])["name"]
+                blocks.append(section(f"*Creator:* {author}\n*{escape(eligibility)}*\n*Approved reward:* {item['reward']} XP per verified contributor"))
                 disciplines = "\n".join(f"{d['name']}: {d['expectation']}" for d in item["disciplines"])
             else:
                 disciplines = ", ".join(item["roles"])
@@ -328,27 +365,108 @@ def ledger_quest_review(quest, approve=True):
 
 def quest_author(ledger, member, draft=None, suggestion=False):
     from .quests import Quests
-    targets = Quests(ledger).targets(member)
+    service = Quests(ledger)
+    targets = service.targets(member)
     draft = draft or {}
     choices = [option(ledger.presentation(i)["name"], i) for i in targets]
+    type_choices = [option("Individual", "individual"), option("Cooperative", "cooperative")]
+    duration_choices = [option(unit.title(), unit) for unit in ("minutes", "hours", "days", "weeks")]
+    eligible = {row["value"]: row for row in service.eligible_tools(member, limit=1000)}
+    selected_tools = [option(eligible[value]["label"], value) for value in draft.get("tool_ids", draft.get("quest_tools", []))
+                      if value in eligible]
+    disciplines = draft.get("disciplines") if isinstance(draft.get("disciplines"), list) else []
+    if not disciplines:
+        disciplines = [{"name": draft.get(f"discipline_name_{index}", ""),
+                        "expectation": draft.get(f"discipline_expectation_{index}", "")}
+                       for index in range(4)
+                       if draft.get(f"discipline_name_{index}") or draft.get(f"discipline_expectation_{index}")]
+    if disciplines and not isinstance(disciplines[0], dict):
+        disciplines = [{"name": value, "expectation": ""} for value in disciplines]
+    duration = draft.get("duration") if isinstance(draft.get("duration"), dict) else {}
     result = modal("member_quest_submit", "Author a quest", [
+        select_input("quest_type", "Quest type", type_choices,
+                     selected=next((c for c in type_choices if c["value"] == draft.get("quest_type", "individual")), None)),
         text_input("title", "Title", draft.get("title", ""), max_length=100),
         text_input("description", "Description", draft.get("description", ""), multiline=True),
         text_input("criteria", "Observable acceptance criteria", draft.get("criteria", ""), multiline=True),
-        select_input("target_rank", "Exact target rank", choices, selected=next((c for c in choices if c["value"] == str(draft.get("target_rank"))), None)),
-        text_input("shops", "Shop prerequisite IDs (comma separated)", draft.get("shops", ", ".join(draft.get("shop_ids", []))), optional=True),
-        text_input("tools", "Tool prerequisite IDs (comma separated)", draft.get("tools", ", ".join(draft.get("tool_ids", []))), optional=True),
-        text_input("disciplines", "Collaboration disciplines (optional)", ", ".join(draft["disciplines"]) if isinstance(draft.get("disciplines"), list) else draft.get("disciplines", ""), optional=True),
-        {"type": "actions", "elements": [button("Help draft with The Ledger", "quest_draft_help", "")]},
-        section("The Ledger's draft suggestions are editable. You explicitly submit your draft; an independent reviewer sets the reward from 0–500 XP. Publication grants no XP.")],
+        select_input("target_rank", "Suggested minimum rank", choices, selected=next((c for c in choices if c["value"] == str(draft.get("target_rank"))), None)),
+        multi_external_input("quest_tools", "Tools you are checked out on", selected_tools),
+        text_input("duration_value", "Estimated duration", duration.get("value", draft.get("duration_value", "1")), max_length=3),
+        select_input("duration_unit", "Duration unit", duration_choices,
+                     selected=next((c for c in duration_choices if c["value"] == duration.get("unit", draft.get("duration_unit", "hours"))), None)),
+        file_input("example_photo", "Optional example photo (JPEG, PNG, or GIF; 10 MiB max)"),
+        *[field for index in range(4) for field in (
+            text_input(f"discipline_name_{index}", f"Discipline {index + 1} name",
+                       disciplines[index].get("name", "") if index < len(disciplines) else "", optional=True, max_length=40),
+            text_input(f"discipline_expectation_{index}", f"Discipline {index + 1} observable expectation",
+                       disciplines[index].get("expectation", "") if index < len(disciplines) else "", optional=True, multiline=True, max_length=400))],
+        {"type": "actions", "elements": [button("Help me draft", "quest_draft_help", "draft"),
+                                             button("Rewrite for clarity", "quest_draft_rewrite", "rewrite")]},
+        section("Suggestions change only editable prose. You explicitly submit the proposal; an independent reviewer sets completion XP and a proposer bonus.")],
         {"revision_of": draft.get("revision_of"), "submission_key": draft.get("submission_key") or str(uuid4())}, "Submit for review")
     if suggestion:
         # Matching block/action IDs preserve Slack state. New block IDs apply
         # generated initial values while leaving the other fields intact.
         marker = str(uuid4())
-        for block in result["blocks"][:3]:
-            block["block_id"] += ":suggestion:" + marker
+        for block in result["blocks"]:
+            if block.get("block_id") in ("title", "description", "criteria") or block.get("block_id", "").startswith(("discipline_name_", "discipline_expectation_")):
+                block["block_id"] += ":suggestion:" + marker
     return result
+
+
+def member_quest_review(ledger, quest, approve=True):
+    from .quests import Quests
+    from .domain import Denied
+    service = Quests(ledger)
+    try:
+        targets = service.targets(quest["creator"])
+    except Denied:
+        participant = ledger.participant(quest["creator"]) or {}
+        rules = ledger.store.get("ledger_rulesets", participant.get("ruleset")) or {}
+        targets = [row["slot"] for row in rules.get("ranks", [])
+                   if row.get("enabled") and row["slot"] <= participant.get("rank", 0)]
+        if quest.get("target_rank") not in targets:
+            targets.append(quest["target_rank"])
+    ranks = [option(ledger.presentation(slot)["name"], slot) for slot in targets]
+    types = [option("Individual", "individual"), option("Cooperative", "cooperative")]
+    units = [option(unit.title(), unit) for unit in ("minutes", "hours", "days", "weeks")]
+    tools = []
+    for identifier in quest.get("tool_ids", []):
+        tool = ledger.sources.tool(identifier) or {}
+        shop = ledger.sources.shop(tool.get("shop_id")) or {}
+        tools.append(option(f"{tool.get('name', identifier)} — {shop.get('name', 'Shop')}", identifier))
+    duration = quest.get("duration") or {"value": 1, "unit": "hours"}
+    disciplines = quest.get("disciplines") or []
+    blocks = [section("*Original participant proposal*"),
+        select_input("quest_type", "Quest type", types,
+                     selected=next(c for c in types if c["value"] == quest.get("quest_type", "individual"))),
+        text_input("title", "Title", quest["title"], max_length=100),
+        text_input("description", "Description", quest["description"], multiline=True),
+        text_input("criteria", "Observable completion criteria", quest["criteria"], multiline=True),
+        select_input("target_rank", "Minimum rank", ranks,
+                     selected=next((c for c in ranks if c["value"] == str(quest["target_rank"])), None)),
+        multi_external_input("quest_tools", "Required tools", tools),
+        text_input("duration_value", "Estimated duration", duration["value"], max_length=3),
+        select_input("duration_unit", "Duration unit", units,
+                     selected=next(c for c in units if c["value"] == duration["unit"])),
+        *[field for index in range(4) for field in (
+            text_input(f"discipline_name_{index}", f"Discipline {index + 1} name",
+                       disciplines[index].get("name", "") if index < len(disciplines) else "", optional=True, max_length=40),
+            text_input(f"discipline_expectation_{index}", f"Discipline {index + 1} observable expectation",
+                       disciplines[index].get("expectation", "") if index < len(disciplines) else "", optional=True, multiline=True, max_length=400))],
+        text_input("reward", "Completion reward (0–500 XP)", "100", max_length=3),
+        text_input("proposer_bonus", "Proposer approval bonus (0–500 XP)", "100", max_length=3),
+        select_input("classification", "Milestone classification", [option(c.replace("_", " ").title(), c)
+                     for c in ("challenge", "first_build", "boss", "stewardship", "develop_mentor", "mentoring")]),
+        text_input("catalog", "Existing catalog ID (specialized milestones)", optional=True),
+        text_input("reason", "Review reason", optional=approve, multiline=True)]
+    if (quest.get("photo") or {}).get("id"):
+        blocks.insert(1, {"type": "image", "slack_file": {"id": quest["photo"]["id"]},
+                          "alt_text": "Participant-provided example photo"})
+    blocks.append(section("Edits create an immutable reviewed child revision. Tool additions remain limited to the proposer's current eligible checkouts."))
+    return modal("member_quest_review", "Review quest", blocks,
+                 {"quest": quest["_id"], "approve": approve, "proposer": quest["creator"]},
+                 "Approve quest" if approve else "Reject quest")
 
 
 def delegates(ledger, actor):

@@ -243,6 +243,8 @@ class Ledger:
     def notify(self, member_id, kind, facts, key, exception=False, administrative=False, *, action_id=None):
         if not exception and not self.active(member_id):
             return
+        facts = dict(facts or {})
+        deterministic_text = facts.pop("_deterministic_text", None)
         positive_xp = kind in RESULT_XP and amount(facts.get("xp_change", "0")) > 0
         verified_milestone = kind in CHALLENGES | {"quest"} and facts.get("verified_milestone") is True
         informational_unlock = kind == "quest" and str(key).startswith("quest-unlock:")
@@ -251,8 +253,11 @@ class Ledger:
         if action_id and not exception and not administrative and (positive_xp or verified_milestone or kind in MAJOR or informational_unlock):
             from .result_summaries import collect
             return collect(self, action_id, member_id, kind, facts, str(key))
-        enqueue(self.store, "ledger_outbox", f"dm:{key}", "message", {"member_id": member_id,
-                "type": kind, "audience": "member", "facts": facts, "exception": exception, "administrative": administrative})
+        payload = {"member_id": member_id, "type": kind, "audience": "member", "facts": facts,
+                   "exception": exception, "administrative": administrative}
+        if deterministic_text:
+            payload["deterministic_text"] = deterministic_text
+        enqueue(self.store, "ledger_outbox", f"dm:{key}", "message", payload)
 
     def major(self, member_id, kind, facts, key, historical=False, *, action_id=None):
         if historical or not self.active(member_id) or kind not in MAJOR:

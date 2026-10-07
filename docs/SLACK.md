@@ -132,7 +132,7 @@ The bot must be invited to existing private game channels before `ledger bootstr
 
 ## Progress and quest interactions
 
-`/ledger stats`, `/ledger progress`, `/ledger preferences`, and `/ledger achievements` open deterministic private views. `/ledger-quests list` uses external-select title options, with hash-protected updates and revalidated selections/actions. `/ledger-quests create` provides editable asynchronous Help draft with The Ledger suggestions; interaction acknowledgments never wait for inference. All authored member-facing copy uses The Ledger/The System, preserving original member text. See [member routes and deployment checks](ENGAGEMENT_QUESTS.md).
+`/ledger stats`, `/ledger progress`, `/ledger preferences`, and `/ledger achievements` open deterministic private views. `/ledger-quests list` uses external-select title options, with hash-protected updates and revalidated selections/actions. `/ledger-quests create` is available to every active participant and supports individual/cooperative proposals, minimum rank, duration, up to 20 currently cleared available tools across shops, two to four cooperative disciplines, and one JPEG/PNG/GIF up to 10 MiB. Tool and photo choices are revalidated at submission and approval. Help and rewrite actions queue prose-only Qwen assistance; interaction acknowledgments never wait for inference and the participant must submit explicitly. Human review sets completion XP and the one-time proposer bonus. See [quest generation and participant proposals](QUEST_GENERATION.md).
 
 ## Kudos emoji and consent
 

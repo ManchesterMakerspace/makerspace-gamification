@@ -69,7 +69,8 @@ class Community:
         l = self.ledger
         action_id = action_id or "community-quest:" + str(uuid4())
         q = l.store.get("ledger_quests", quest_id)
-        if q and q.get("kind") == "ledger_quest":
+        from .quest_policy import cooperative
+        if q and cooperative(q):
             from .ledger_quests import LedgerQuests
             return LedgerQuests(l).contribute(actor, quest_id, action, role, description, member)
         def run(s):

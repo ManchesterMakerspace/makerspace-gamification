@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
   "type": "quest",
-  "version": 2,
+  "version": 3,
   "temperature": 0.7,
   "max_tokens": 384,
   "audiences": {
     "member": {
-      "audience_instruction": "This is a private message to the member concerned. Address them directly. Use only the supplied details and omit any value marked not recorded. The application appends authoritative facts and controls.",
+      "audience_instruction": "This is a private message to the member concerned. Address them directly. Use only supplied details. Approval, first proposer achievement, ordinary royalty, and completer facts are authoritative application data; never alter titles or XP. The application appends controls.",
       "fallback": "The Ledger has recorded an update."
     },
     "shared": {

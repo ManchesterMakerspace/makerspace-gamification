@@ -51,6 +51,7 @@ def activities(store, collection, doc):
         yield None, doc, {"type": "Quest publication", "title": doc.get("title", "Quest"),
             "generated_quest": generated(doc), "target_rank": doc.get("target_rank"), "quest_type": doc.get("quest_type"),
             "disciplines": doc.get("disciplines", []), "shop_ids": doc.get("shop_ids", []), "tool_ids": doc.get("tool_ids", []),
+            "photo": doc.get("photo"),
             "status": doc.get("status"), "pending": doc.get("status") == "pending_review",
             "description": doc.get("description", ""), "criteria": doc.get("criteria", ""),
             "member": doc.get("creator"), "reviewer": doc.get("reviewer"),
@@ -208,10 +209,16 @@ def render(payload, facts):
         lines.append("Quest type: " + escape(facts["quest_type"]))
         lines.extend(escape(d["name"] + ": " + d["expectation"]) for d in facts["disciplines"])
         lines.append("Shop/tool prerequisites: " + escape(", ".join(facts["shop_ids"] + facts["tool_ids"]) or "None"))
+    photo = facts.get("photo")
+    if isinstance(photo, dict) and photo.get("id") and photo.get("available") is False:
+        lines.append("Example photo: unavailable")
     if facts["pending"] and facts["type"] == "Shared project completion":
         lines.append("Review shared outcome: `/ledger-admin complete-quest " + escape(str(facts['quest_revision'])) + "`")
     # Split into valid Slack sections rather than truncating the review evidence.
     blocks = [section(line[i:i + 2900]) for line in lines for i in range(0, len(line), 2900)]
+    if isinstance(photo, dict) and photo.get("id") and photo.get("available", True):
+        blocks.append({"type": "image", "slack_file": {"id": photo["id"]},
+                       "alt_text": "Participant-provided quest example photo"})
     if facts["pending"] and facts.get("generated_quest"):
         blocks.append({"type": "actions", "elements": [button("Review quest", "review_ledger_quest", payload["activity_id"])]})
     return "\n".join(lines), blocks
@@ -258,19 +265,49 @@ def deliver(worker, job):
             raise ValueError("Use a private, non-external review channel containing The Ledger.")
         worker.assert_live_job(job)
         text, blocks = render(payload, facts)
+        def invalid_photo(error):
+            response = getattr(error, "response", None)
+            data = getattr(response, "data", None)
+            if data is None and callable(getattr(response, "get", None)):
+                data = response
+            messages = ((data or {}).get("response_metadata") or {}).get("messages") or []
+            photo = facts.get("photo")
+            return bool(isinstance(photo, dict) and photo.get("id")
+                        and any("invalid slack file" in str(message).lower() for message in messages))
+        def discard_photo():
+            def update(s):
+                doc = s.get(payload["collection"], payload["activity_id"])
+                if not doc or not isinstance(doc.get("photo"), dict):
+                    return
+                doc["photo"] = {**doc["photo"], "available": False}
+                s.put(payload["collection"], doc)
+            worker.store.atomic(update)
+            facts["photo"] = {**facts["photo"], "available": False}
+            return render(payload, facts)
         ts = owner.get("review_message_ts") if owner.get("review_channel_id") == destination else None
         if ts:
             try:
                 response = worker.slack.chat_update(channel=destination, ts=ts, text=text, blocks=blocks)
             except SlackApiError as error:
-                if error.response.get("error") != "message_not_found":
+                if invalid_photo(error):
+                    text, blocks = discard_photo()
+                    response = worker.slack.chat_update(channel=destination, ts=ts, text=text, blocks=blocks)
+                elif error.response.get("error") == "message_not_found":
+                    ts = None
+                else:
                     raise
-                ts = None
         if not ts:
             # Stable across uncertain retries; a deleted original gets a distinct key.
             client_id = str(uuid5(NAMESPACE_URL, destination + ":" + payload["activity_id"] + ":" + str(payload.get("contributor"))
                                  + ":" + owner.get("review_message_ts", "") + ":" + owner["review_post_token"]))
-            response = worker.slack.chat_postMessage(channel=destination, text=text, blocks=blocks, client_msg_id=client_id)
+            try:
+                response = worker.slack.chat_postMessage(channel=destination, text=text, blocks=blocks, client_msg_id=client_id)
+            except SlackApiError as error:
+                if not invalid_photo(error):
+                    raise
+                text, blocks = discard_photo()
+                response = worker.slack.chat_postMessage(channel=destination, text=text, blocks=blocks, client_msg_id=client_id)
+        current = fingerprint(facts, destination)
         posted_ts = response.get("ts")
         if not isinstance(posted_ts, str) or not posted_ts:
             raise ValueError("Slack did not confirm a review message timestamp.")
