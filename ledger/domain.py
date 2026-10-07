@@ -163,6 +163,13 @@ class Ledger:
             if attributed and rel["status"] == "pending":
                 rel.update(status="accepted", accepted_at=now())
                 self.store.put("ledger_relationships", rel)
+                inviter = rel.get("giver")
+                inviter_participant = self.participant(inviter) if isinstance(inviter, str) else None
+                from .sponsorship_reminder import has_recent_reminder
+                if inviter_participant and self.active(inviter) and has_recent_reminder(inviter_participant):
+                    enqueue(self.store, "ledger_outbox", f"sponsorship-reminder-accepted:{member_id}",
+                        "sponsorship_reminder_followup", {"member_id": inviter,
+                            "event": "invitation_accepted", "accepted_member_id": member_id})
         from .admin_access import sync_review_membership
         sync_review_membership(self, member_id)
         self._invite(member_id, "chat", explicit=True)

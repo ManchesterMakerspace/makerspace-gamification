@@ -21,7 +21,7 @@ ledger = "ledger.cli:main"
 include = ["ledger*"]
 
 [tool.setuptools.package-data]
-ledger = ["assets/*.png", "assets/*.json", "prompts/*.json", "prompts/*.xml.md"]
+ledger = ["assets/*.png", "assets/*.json", "prompts/*.json", "prompts/*.xml.md", "sponsorship_reminder_variants.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

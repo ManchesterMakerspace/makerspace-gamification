@@ -19,6 +19,7 @@ VARIABLES = {
     "delivery_status", "dm_status", "public_status", "xp_result",
     "sponsor_full_name", "sponsor_slack_id", "count", "timeframe", "estimate_note",
     "message_type", "audience", "audience_instruction", "facts",
+    "accepter_full_name", "ledger_chat_mention",
 }
 # Only these event fields can enter the model, including the legacy {facts} placeholder.
 FACT_KEYS = VARIABLES - {"facts", "audience_instruction"} | {
