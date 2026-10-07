@@ -351,7 +351,11 @@ class Worker:
     def reconcile_channels(self):
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
             present = self.channel_members(channel["channel_id"])
-            for slack_id in present - {self.bot_id}:
+            for slack_id in present:
+                # SLACK_BOT_USER_ID is passed into this worker at startup. Keep
+                # our own required channel membership out of removal queues.
+                if slack_id == self.bot_id:
+                    continue
                 member = self.ledger.sources.identity(slack_id)
                 member_id = sid(member["_id"]) if member else None
                 p = self.ledger.participant(member_id) if member_id else None

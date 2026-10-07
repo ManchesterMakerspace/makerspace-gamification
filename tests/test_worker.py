@@ -66,6 +66,21 @@ def test_remove_job_transport_failure_is_logged_once_without_retry(joined, caplo
     slack.conversations_kick.assert_called_once()
 
 
+def test_channel_reconcile_excludes_configured_bot_before_queueing_removal(env):
+    _, store, _, _, _, slack = env
+    for channel in store.select('ledger_channels', {'kind': 'channel'}):
+        if channel['_id'] != 'chat':
+            store.delete('ledger_channels', channel['_id'])
+    slack.conversations_members.return_value = {
+        'members': ['UBOT', 'UUNLINKED'], 'response_metadata': {}}
+
+    worker(env).reconcile_channels()
+
+    removals = store.select('ledger_outbox', {'kind': 'remove'})
+    assert len(removals) == 1
+    assert removals[0]['payload'] == {'slack_id': 'UUNLINKED', 'channel': 'CCHAT'}
+
+
 def test_welcome_waits_for_accounting_without_exhausting_delivery_retries(joined, caplog):
     ledger, store, _, _, _, slack = joined
     w = worker(joined)

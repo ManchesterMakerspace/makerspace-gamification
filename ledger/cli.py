@@ -28,6 +28,11 @@ CHANNEL_KINDS = ["remove", "invite", "provision_slot", "review_channel_invite"]
 RESULT_KINDS = ["summary_flush", "summary_delivery"]
 INTERACTIVE_KINDS = ["conversation", "guidance"]
 HOME_KINDS = ["home_publish", "home_profile_photo"]
+RECONCILE_INTERVAL_SECONDS = 13 * 60
+
+
+def periodic_reconcile_key(timestamp):
+    return f"periodic:{int(timestamp // RECONCILE_INTERVAL_SECONDS)}"
 
 
 def outbox_filters(queue):
@@ -202,8 +207,8 @@ def main():
                         from .read_metrics import log_metrics
                         log_metrics()
                         last_metrics = time.monotonic()
-                    if queue == "inbox" and time.monotonic() - last >= 300:
-                        ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"periodic:{int(time.time() // 300)}", "reconcile", {}))
+                    if queue == "inbox" and time.monotonic() - last >= RECONCILE_INTERVAL_SECONDS:
+                        ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", periodic_reconcile_key(time.time()), "reconcile", {}))
                         if time.monotonic() - last_ticket_scan >= 3600:
                             ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"ticket-quest-reconcile:{int(time.time() // 3600)}", "ticket_quest_reconcile", {}))
                             last_ticket_scan = time.monotonic()

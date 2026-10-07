@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ledger.cli import broker
+from ledger.cli import RECONCILE_INTERVAL_SECONDS, broker, periodic_reconcile_key
 from ledger.sources import FIELDS
 from ledger.storage import MemoryStore
 
@@ -52,3 +52,9 @@ def test_broker_preserves_configured_client_id():
         broker(MemoryStore())
 
     assert constructor.call_args.kwargs['client_id'] == 'configured-ledger'
+
+
+def test_periodic_reconciliation_uses_thirteen_minute_buckets():
+    assert RECONCILE_INTERVAL_SECONDS == 13 * 60
+    assert periodic_reconcile_key(0) == periodic_reconcile_key(779)
+    assert periodic_reconcile_key(780) != periodic_reconcile_key(779)

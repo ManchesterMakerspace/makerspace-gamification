@@ -85,7 +85,7 @@ The [optimized read path](QUERY_OPTIMIZATION.md) uses fixed read-only aggregatio
 
 The only new action/resource is `CREATE_INDEX` on `ledger_catalog`. It supports generation/source-ID and generation/shop compound indexes, challenge/quest display indexes and the `expires_at` TTL index. Quest heads order by `title_key`, `revision`, `_id`; acceptances order by `title_key`, `quest_revision`, `_id`. Other new context/quest/acceptance compound indexes use already granted owned collections. Review/provision the updated role before `ledger prepare-reads --verify`; the application never provisions Atlas roles itself. It backfills owned display/order metadata, including challenge/open-quest title keys, and expiring cache generations without deleting business records or changing consent/accounting. Server TTL requires no extra application `remove` action; explicit application deletion remains limited to `ledger_context`.
 
-No new collection, wildcard privilege or direct change-stream grant is required. The existing bridge's events and five-minute reconciliation schedule display refreshes; source safety/identity/consent checks remain current. The sample environment keeps optimized reads off until preparation and shadow comparison complete. Reverting the read flag does not require removing indexes or metadata.
+No new collection, wildcard privilege or direct change-stream grant is required. The existing bridge's events and thirteen-minute reconciliation schedule display refreshes; source safety/identity/consent checks remain current. The sample environment keeps optimized reads off until preparation and shadow comparison complete. Reverting the read flag does not require removing indexes or metadata.
 
 ## Self-managed `db.createRole()` equivalent
 
