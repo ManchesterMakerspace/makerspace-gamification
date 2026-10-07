@@ -28,7 +28,11 @@ def working_job(store, key):
 
 def test_first_home_open_publishes_processing_and_queues_one_build(env):
     ledger, store, _, composer, _, slack = env
-    slack.views_publish.side_effect = lambda user_id, view: SlackResponseLike({"ok": True, "view": view})
+    def normalized_response(user_id, view):
+        normalized = json.loads(json.dumps(view))
+        normalized["blocks"][0]["block_id"] = "generated-by-slack"
+        return SlackResponseLike({"ok": True, "view": normalized})
+    slack.views_publish.side_effect = normalized_response
     worker = Worker(ledger, composer, slack)
     event = {"type": "app_home_opened", "tab": "home", "user": "U1"}
 
@@ -134,6 +138,28 @@ def test_home_build_publishes_rank_and_reuses_skill_tree_cache(joined):
     assert slack.files_upload_v2.call_count == first_upload_count
 
 
+def test_home_publish_accepts_slack_normalized_blocks(joined):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+    participant = ledger.participant(member_id)
+    participant["import_pending"] = False
+    store.put("ledger_participants", participant)
+    enqueue_home_refresh(store, member_id, "normalized", "U1")
+    job = working_job(store, f"home:{member_id}:normalized")
+    def normalized_response(user_id, view):
+        normalized = json.loads(json.dumps(view))
+        normalized["blocks"][0]["block_id"] = "generated-by-slack"
+        normalized["blocks"][0]["text"]["verbatim"] = False
+        return SlackResponseLike({"ok": True, "view": normalized})
+    slack.views_publish.side_effect = normalized_response
+
+    Worker(ledger, composer, slack).publish_home(job)
+
+    saved = store.get("ledger_homes", member_id)
+    assert saved["published_rank"] == participant["rank"]
+    assert saved["needs_replacement"] is False
+
+
 def test_user_change_clears_and_refreshes_profile_photo_caption(joined):
     ledger, store, _, composer, _, slack = joined
     member_id = str(oid(1))
@@ -141,13 +167,19 @@ def test_user_change_clears_and_refreshes_profile_photo_caption(joined):
         "profile_photo_description": "A previous photo", "profile_photo_described_at": "old-date"})
     worker = Worker(ledger, composer, slack, bot_id="UBOT")
     observed = []
-    worker._describe_home_profile_photo = lambda mid, uid: observed.append(
-        (mid, uid, store.get("ledger_homes", mid)))
-
+    worker._describe_home_profile_photo = lambda mid, uid, refresh_key=None: observed.append((mid, uid, refresh_key))
     worker.event({"type": "user_change", "user": {"id": "U1", "deleted": False, "is_bot": False}}, "profile-change")
 
-    assert observed[0][:2] == (member_id, "U1")
-    assert not {"profile_photo_cksum", "profile_photo_description", "profile_photo_described_at"} & set(observed[0][2])
+    assert observed == []
+    queued = store.get("ledger_outbox", f"home-photo:{member_id}:profile-change")
+    assert queued["kind"] == "home_profile_photo"
+    assert queued["payload"] == {"member_id": member_id, "slack_id": "U1", "refresh_key": "profile-change"}
+    saved = store.get("ledger_homes", member_id)
+    assert saved["profile_photo_refresh_key"] == "profile-change"
+    assert not {"profile_photo_cksum", "profile_photo_description", "profile_photo_described_at"} & set(saved)
+
+    worker.outbox(working_job(store, queued["_id"]))
+    assert observed == [(member_id, "U1", "profile-change")]
 
 
 def test_profile_lookup_accepts_slack_response_mapping(joined):

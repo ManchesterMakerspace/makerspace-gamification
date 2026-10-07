@@ -1,7 +1,9 @@
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from slack_sdk.errors import SlackApiError
 
 from conftest import oid
 from ledger.domain import Denied
@@ -19,6 +21,20 @@ def claim(store, key):
 def worker(env):
     l, s, src, composer, api, slack = env
     return Worker(l, composer, slack, bot_id='UBOT')
+
+
+def test_channel_kick_never_targets_bot_and_slack_failures_are_not_raised(joined, caplog):
+    _, _, _, _, _, slack = joined
+    w = worker(joined)
+
+    assert not w.kick('CRANK1', 'UBOT')
+    slack.conversations_kick.assert_not_called()
+
+    response = SimpleNamespace(status_code=500, get=lambda key, default=None: 'fatal_error' if key == 'error' else default)
+    slack.conversations_kick.side_effect = SlackApiError('failed', response)
+    assert not w.kick('CRANK1', 'U1')
+    slack.conversations_kick.assert_called_once_with(channel='CRANK1', user='U1')
+    assert 'Slack channel removal failed' in caplog.text and 'not retrying' in caplog.text
 
 
 def test_welcome_waits_for_accounting_without_exhausting_delivery_retries(joined, caplog):

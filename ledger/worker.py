@@ -17,6 +17,7 @@ from .messages import button, escape, section
 from .prompt_library import EXAMPLE_FACTS, library_template
 from .review_notifications import ReviewDeliveryBusy
 from .result_summaries import SummaryBusy, SummaryPending
+from .slack_client import retry_after_seconds
 from .sources import FIELDS, sid
 from .storage import enqueue, now
 from .views import home, home_private_metadata, home_processing
@@ -65,7 +66,7 @@ class Worker:
                         code if isinstance(code, int) else "none", slack_error if isinstance(slack_error, str) and slack_error in safe_slack_errors else "none")
             retry = min(300, 2 ** min(job["attempts"], 8))
             if isinstance(exc, SlackApiError) and exc.response.status_code == 429:
-                retry = max(retry, int(exc.response.headers.get("Retry-After", "60")))
+                retry = max(retry, retry_after_seconds(exc.response))
             status = "pending" if job["attempts"] < 10 or job["kind"] == "remove" else "failed"
             self.finish(collection, job, status, retry, type(exc).__name__)
         return True
@@ -217,6 +218,16 @@ class Worker:
             "cached_at": now()})
         return file_id
 
+    @staticmethod
+    def _home_publish_confirmed(result, submitted):
+        """Confirm Slack returned the intended Home without comparing normalized blocks."""
+        if not callable(getattr(result, "get", None)) or result.get("ok") is not True:
+            return False
+        published = result.get("view")
+        return (isinstance(published, dict) and published.get("type") == "home"
+                and published.get("callback_id") == submitted.get("callback_id")
+                and published.get("private_metadata") == submitted.get("private_metadata"))
+
     def publish_home(self, job):
         payload = job["payload"]
         member_id = payload["member_id"]
@@ -251,11 +262,7 @@ class Worker:
         view = home(self.ledger, member_id, rank_icon_file_id=rank_icon_file_id,
                     skill_tree_file_id=skill_tree_file_id)
         result = self.slack.views_publish(user_id=slack_id, view=view)
-        published = result.get("view") if callable(getattr(result, "get", None)) else None
-        if (not callable(getattr(result, "get", None)) or result.get("ok") is not True or not isinstance(published, dict)
-                or published.get("type") != "home" or published.get("callback_id") != view.get("callback_id")
-                or published.get("private_metadata") != view.get("private_metadata")
-                or published.get("blocks") != view.get("blocks")):
+        if not self._home_publish_confirmed(result, view):
             raise RuntimeError("Slack did not confirm the published Home view")
 
         # Persist placeholder intent immediately after Slack confirms the placeholder.
@@ -297,7 +304,7 @@ class Worker:
             enqueue(self.store, "ledger_outbox", f"home:{member_id}:reconcile:{job['_id']}", "home_publish",
                     {"member_id": member_id, "slack_id": slack_id, "reconcile_job": job["_id"]}, delay=300)
 
-    def _describe_home_profile_photo(self, member_id, slack_id):
+    def _describe_home_profile_photo(self, member_id, slack_id, refresh_key=None):
         """Refresh an opted-in member's photo description when the largest image changes."""
         try:
             response = self.slack.users_profile_get(user=slack_id)
@@ -317,6 +324,8 @@ class Worker:
                 return
             checksum = hashlib.sha256(image_bytes).hexdigest()
             saved = self.store.get("ledger_homes", member_id) or {}
+            if refresh_key is not None and saved.get("profile_photo_refresh_key") != refresh_key:
+                return
             if saved.get("profile_photo_cksum") == checksum and saved.get("profile_photo_description"):
                 return
             from .image_captioning import describe_image
@@ -326,8 +335,12 @@ class Worker:
                 return
             def save(s):
                 row = s.get("ledger_homes", member_id) or {"_id": member_id}
+                if refresh_key is not None and row.get("profile_photo_refresh_key") != refresh_key:
+                    return
                 row.update(profile_photo_cksum=checksum, profile_photo_description=description.strip(),
                            profile_photo_described_at=now())
+                if refresh_key is not None:
+                    row["profile_photo_refresh_completed_key"] = refresh_key
                 s.put("ledger_homes", row)
             self.store.atomic(save)
             log.info("home profile photo description saved member=%s", member_id)
@@ -381,7 +394,13 @@ class Worker:
                 self.store.atomic(lambda s: s.put("ledger_catalog", {"_id": f"identity:{member_id}", "deactivated": bool(user.get("deleted")), "bot": bool(user.get("is_bot")), "at": now()}))
                 self.ledger.reconcile(member_id)
                 if not user.get("deleted") and not user.get("is_bot") and self.ledger.active(member_id):
-                    self._describe_home_profile_photo(member_id, user["id"])
+                    def queue_photo_refresh(s):
+                        row = s.get("ledger_homes", member_id) or {"_id": member_id, "kind": "home"}
+                        row["profile_photo_refresh_key"] = key
+                        s.put("ledger_homes", row)
+                        enqueue(s, "ledger_outbox", f"home-photo:{member_id}:{key}", "home_profile_photo",
+                                {"member_id": member_id, "slack_id": user["id"], "refresh_key": key})
+                    self.store.atomic(queue_photo_refresh)
                 if user.get("deleted"):
                     self.reconcile_channels()
             return
@@ -464,11 +483,7 @@ class Worker:
             if callback_id != "ledger_home_processing":
                 placeholder = {**home_processing(), "private_metadata": home_private_metadata(self.ledger, member_id)}
                 response = self.slack.views_publish(user_id=event["user"], view=placeholder)
-                published = response.get("view") if callable(getattr(response, "get", None)) else None
-                if (not callable(getattr(response, "get", None)) or response.get("ok") is not True or not isinstance(published, dict)
-                        or published.get("type") != "home" or published.get("callback_id") != placeholder["callback_id"]
-                        or published.get("private_metadata") != placeholder["private_metadata"]
-                        or published.get("blocks") != placeholder.get("blocks")):
+                if not self._home_publish_confirmed(response, placeholder):
                     raise RuntimeError("Slack did not confirm the published Home placeholder")
                 def mark_placeholder(s):
                     row = s.get("ledger_homes", member_id) or {"_id": member_id}
@@ -924,6 +939,21 @@ class Worker:
         self.store.atomic(write)
         return result
 
+    def kick(self, channel, uid):
+        if not uid or uid == self.bot_id:
+            if uid == self.bot_id:
+                log.warning("Slack channel removal skipped for The Ledger bot channel=%s", channel)
+            return False
+        try:
+            self.slack.conversations_kick(channel=channel, user=uid)
+            return True
+        except SlackApiError as exc:
+            response = exc.response
+            slack_error = response.get("error") if hasattr(response, "get") else None
+            log.warning("Slack channel removal failed channel=%s user=%s status=%s slack_error=%s; not retrying",
+                channel, uid, getattr(response, "status_code", None), slack_error or "unknown")
+            return False
+
     def _rank_transition_access(self, job, uid, store=None):
         store = store or self.store
         payload = job["payload"]
@@ -971,11 +1001,7 @@ class Worker:
         # a present membership immediately before the external Slack kick.
         if committed_only and not self._rank_transition_commit_owns_membership(job, uid):
             return False
-        try:
-            self.slack.conversations_kick(channel=channel, user=uid)
-        except SlackApiError as exc:
-            if exc.response.get("error") not in ("not_in_channel", "user_not_found", "channel_not_found"):
-                raise
+        self.kick(channel, uid)
 
         def clear_membership(store):
             key = f"membership:{member_id}:{payload['channel_key']}"
@@ -1143,11 +1169,7 @@ class Worker:
 
         if prior_channel:
             self._cancel_after_committed_transition_if_stale(job, invite_uid)
-            try:
-                self.slack.conversations_kick(channel=prior_channel["channel_id"], user=uid)
-            except SlackApiError as exc:
-                if exc.response.get("error") not in ("not_in_channel", "user_not_found", "channel_not_found"):
-                    raise
+            self.kick(prior_channel["channel_id"], uid)
             old_membership = self.store.get("ledger_channels", f"membership:{member_id}:rank:{old_slot}")
             if old_membership:
                 old_membership.update(present=False, desired=False)
@@ -1285,6 +1307,14 @@ class Worker:
             return self.deliver_guidance(job)
         if kind == "home_publish":
             return self.publish_home(job)
+        if kind == "home_profile_photo":
+            refresh_key = p.get("refresh_key")
+            saved = self.store.get("ledger_homes", member_id) or {}
+            slack_id = p.get("slack_id")
+            if (not isinstance(refresh_key, str) or saved.get("profile_photo_refresh_key") != refresh_key
+                    or not self.ledger.active(member_id) or self.valid_identity(member_id) != slack_id):
+                raise Denied("Profile photo refresh is no longer current.")
+            return self._describe_home_profile_photo(member_id, slack_id, refresh_key)
         if kind in ("review_notice", "quest_review_notice"):
             from .review_notifications import deliver
             return deliver(self, job)
@@ -1296,11 +1326,7 @@ class Worker:
                     return  # A rejoin supersedes a delayed opt-out removal.
             uid = p.get("slack_id") or self.ledger.sources.slack_id(member_id)
             if uid:
-                try:
-                    self.slack.conversations_kick(channel=p["channel"], user=uid)
-                except SlackApiError as e:
-                    if e.response.get("error") not in ("not_in_channel", "user_not_found"):
-                        raise
+                self.kick(p["channel"], uid)
             return
         if kind == "review_channel_invite":
             from .admin_access import deliver_review_invite
@@ -1341,7 +1367,7 @@ class Worker:
             # Compensate an opt-out that happened while Slack processed the invitation.
             latest_membership = self.store.get("ledger_channels", membership["_id"]) or {}
             if not self.ledger.active(member_id) or latest_membership.get("voluntary_leave") or not latest_membership.get("desired"):
-                self.slack.conversations_kick(channel=p["channel"], user=uid)
+                self.kick(p["channel"], uid)
             return
         if kind == "mqtt":
             if not self.ledger.active(member_id):

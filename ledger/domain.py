@@ -187,7 +187,7 @@ class Ledger:
         for job in self.store.select("ledger_outbox", {"status": {"$in": ["pending", "working"]}}):
             payload = job["payload"]
             if payload.get("member_id") == member_id and job["kind"] in ("invite", "message", "mqtt", "conversation", "welcome", "quest_draft",
-                    "summary_flush", "summary_delivery", "guidance", "rank_art", "home_publish") and not payload.get("peer_kudos"):
+                    "summary_flush", "summary_delivery", "guidance", "rank_art", "home_publish", "home_profile_photo") and not payload.get("peer_kudos"):
                 job["status"] = "cancelled"
                 self.store.put("ledger_outbox", job)
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):

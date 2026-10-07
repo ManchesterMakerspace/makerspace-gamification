@@ -1,7 +1,10 @@
 import argparse
 import json
 import logging
+from multiprocessing import current_process
 import os
+import re
+import secrets
 import time
 from pathlib import Path
 from threading import Event, Thread
@@ -24,19 +27,20 @@ from .worker import Worker, ingest_mqtt
 CHANNEL_KINDS = ["remove", "invite", "provision_slot", "review_channel_invite"]
 RESULT_KINDS = ["summary_flush", "summary_delivery"]
 INTERACTIVE_KINDS = ["conversation", "guidance"]
+HOME_KINDS = ["home_publish", "home_profile_photo"]
 
 
 def outbox_filters(queue):
     """Disjoint lanes: slow routine delivery cannot claim interactive/results work."""
     if queue == "homes":
-        return {"kinds": ["home_publish"]}
+        return {"kinds": HOME_KINDS}
     if queue == "channels":
         return {"kinds": CHANNEL_KINDS}
     if queue == "results":
         return {"kinds": RESULT_KINDS}
     if queue == "interactive":
         return {"kinds": INTERACTIVE_KINDS}
-    return {"exclude": CHANNEL_KINDS + RESULT_KINDS + INTERACTIVE_KINDS + ["home_publish"]}
+    return {"exclude": CHANNEL_KINDS + RESULT_KINDS + INTERACTIVE_KINDS + HOME_KINDS}
 
 
 def database_ledger():
@@ -74,7 +78,10 @@ def make_app():
 
 
 def broker(store, subscribe=True):
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=os.environ.get("MQTT_CLIENT_ID", "makerspace-ledger"), clean_session=False)
+    configured_id = os.environ.get("MQTT_CLIENT_ID", "").strip()
+    process_name = re.sub(r"[^A-Za-z0-9_-]+", "-", current_process().name).strip("-") or "ledger"
+    client_id = configured_id or f"{process_name}-{secrets.randbelow(1_000_000):06d}"
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, clean_session=False)
     if os.environ.get("MQTT_USER"):
         client.username_pw_set(os.environ["MQTT_USER"], os.environ.get("MQTT_PASSWORD"))
     if os.environ.get("MQTT_TLS", "false").lower() == "true":
@@ -206,7 +213,7 @@ def main():
                             f"home-reconcile:daily:{int(time.time() // 86400)}", "home_reconcile", {"source": "daily"}))
                         last_home_scan = time.monotonic()
                     if queue == "homes" and ledger.store.exists("ledger_outbox", {
-                            "kind": {"$ne": "home_publish"}, "status": "pending", "available_at": {"$lte": now()}}):
+                            "kind": {"$nin": HOME_KINDS}, "status": "pending", "available_at": {"$lte": now()}}):
                         stop.wait(0.25)
                         continue
                     worked = worker.step("ledger_inbox", exclude=["engagement"]) if queue == "inbox" else worker.step("ledger_inbox", kinds=["engagement"]) if queue == "engagement" else worker.step(
