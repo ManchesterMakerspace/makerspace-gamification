@@ -435,6 +435,7 @@ def member_quest_review(ledger, quest, approve=True):
         tool = ledger.sources.tool(identifier) or {}
         shop = ledger.sources.shop(tool.get("shop_id")) or {}
         tools.append(option(f"{tool.get('name', identifier)} — {shop.get('name', 'Shop')}", identifier))
+    explicit_shops = service.explicit_shops(quest)
     duration = quest.get("duration") or {"value": 1, "unit": "hours"}
     disciplines = quest.get("disciplines") or []
     blocks = [section("*Original participant proposal*"),
@@ -446,6 +447,8 @@ def member_quest_review(ledger, quest, approve=True):
         select_input("target_rank", "Minimum rank", ranks,
                      selected=next((c for c in ranks if c["value"] == str(quest["target_rank"])), None)),
         multi_external_input("quest_tools", "Required tools", tools),
+        section("*Shop-only prerequisites:* " + escape(", ".join(
+            (ledger.sources.shop(identifier) or {}).get("name", identifier) for identifier in explicit_shops) or "None")),
         text_input("duration_value", "Estimated duration", duration["value"], max_length=3),
         select_input("duration_unit", "Duration unit", units,
                      selected=next(c for c in units if c["value"] == duration["unit"])),

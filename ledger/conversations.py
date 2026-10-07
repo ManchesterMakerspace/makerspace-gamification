@@ -86,10 +86,42 @@ def sponsorship_request(text):
         r"\bi(?:['’]ve|\s+have|\s+had|\s+am|['’]m)?\s+"
         r"(?:sponsor(?:ed|ing)?|invit(?:e|ed|ing))\b", text, re.I)
     caller_owned_register = re.search(
-        r"\bmy\s+(?:sponsorships?|invitees?|invitation\s+(?:history|register)|sponsor\s+(?:history|register))\b",
+        r"\bmy\s+(?:sponsorships?|invites?|invitees?|invitations?|invited\s+(?:members?|people|makers?)|"
+        r"invitation\s+(?:history|register)|sponsor\s+(?:history|register))\b",
         text, re.I)
     caller_is_passive_agent = re.search(r"\b(?:sponsored|invited)\s+by\s+me\b", text, re.I)
-    return bool(caller_is_actor or caller_owned_register or caller_is_passive_agent)
+    caller_sent_invitation = re.search(
+        r"\b(?:(?:invitations?|invites?)\s+(?:(?:that\s+)?i(?:['’]ve|\s+have|\s+had)?\s+sent|"
+        r"(?:have\s+|had\s+)i\s+sent|did\s+i\s+send)|i(?:['’]ve|\s+have|\s+had)?\s+sent\s+"
+        r"(?:an?\s+|the\s+|those\s+|these\s+)?(?:invitations?|invites?))\b",
+        text, re.I)
+    return bool(caller_is_actor or caller_owned_register or caller_is_passive_agent or caller_sent_invitation)
+
+
+def incoming_sponsorship_request(text):
+    """Identify a request about an invitation received by the caller."""
+    if not isinstance(text, str):
+        return False
+    return bool(re.search(
+        r"\b(?:who\s+(?:sponsored|invited)\s+me|who\s+(?:is|was)\s+my\s+sponsor|"
+        r"who\s+sent\s+me\s+(?:an?\s+)?(?:invitation|invite)|my\s+sponsor|"
+        r"(?:invitations?|invites?)\s+(?:i\s+received|did\s+i\s+receive)|"
+        r"(?:sponsored|invited)\s+me\s+by\s+whom)\b",
+        text, re.I))
+
+
+def sponsorship_followup(request, history):
+    """Carry an outgoing-register topic through a clearly referential follow-up."""
+    if incoming_sponsorship_request(request):
+        return False
+    prior_outgoing = any(isinstance(item, dict) and sponsorship_request(item.get("content"))
+                         for item in history)
+    if not prior_outgoing:
+        return False
+    return bool(re.search(
+        r"\b(?:them|they|their|theirs|those|these|which\s+(?:one|ones|of)|any\s+of|all\s+of|"
+        r"how\s+many|what\s+about|who\s+(?:has|have)|opt(?:ed)?[ -]?(?:in|out))\b",
+        request, re.I))
 
 
 def appearance_request(ledger, requester, text):
@@ -133,7 +165,8 @@ def appearance_request(ledger, requester, text):
 def converse(ledger, composer, member, request, history=(), private=True, selection=None, *, use_tools=True, ambient=False):
     ledger.require_member(member)
     context = QueryTools(ledger, member, private)
-    requires_sponsorship_report = private and ledger.active(member) and sponsorship_request(request)
+    outgoing_sponsorship_request = sponsorship_request(request) or sponsorship_followup(request, history)
+    requires_sponsorship_report = private and ledger.active(member) and outgoing_sponsorship_request
     started = time.monotonic()
     if selection is None:
         composer.refresh_matrix()
@@ -210,7 +243,8 @@ def converse(ledger, composer, member, request, history=(), private=True, select
                     raise ValueError("Invalid tool call identity")
                 identifiers.add(call["id"])
                 function = call["function"]
-                if function["name"] == "my_sponsorships" and not requires_sponsorship_report:
+                if (function["name"] == "my_sponsorships"
+                        and (not requires_sponsorship_report or incoming_sponsorship_request(request))):
                     raise ValueError("my_sponsorships is limited to the caller's outgoing invitations")
                 raw = function["arguments"]
                 if not isinstance(raw, str) or len(raw) > 2000:

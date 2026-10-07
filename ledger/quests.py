@@ -58,6 +58,69 @@ class Quests:
             derived.add(shop_id)
         return sorted(requested), sorted(derived)
 
+    def explicit_shops(self, q):
+        """Return shop-only prerequisites, including inferred legacy entries."""
+        if isinstance(q.get("explicit_shop_ids"), list):
+            return sorted({sid(value) for value in q["explicit_shop_ids"]})
+        derived = set()
+        for identifier in q.get("tool_ids", []):
+            tool = self.l.sources.tool(identifier)
+            if tool and tool.get("shop_id") is not None:
+                derived.add(sid(tool["shop_id"]))
+        return sorted({sid(value) for value in q.get("shop_ids", [])} - derived)
+
+    def transition_project(self, reviewed):
+        """Move the one active cooperative project to a reviewed logical revision."""
+        project_id = "cooperative:" + reviewed["logical_id"]
+        project = self.l.store.get("ledger_relationships", project_id)
+        if not cooperative(reviewed):
+            if (project and project.get("status") != "completed"
+                    and project.get("quest_revision") != reviewed["_id"]):
+                reason = "A reviewed individual revision replaced this cooperative project. No XP was awarded."
+                project.update(status="superseded", superseded_by=reviewed["_id"], superseded_at=now(),
+                               disable_reason=reason)
+                for member, contribution in project.get("contributions", {}).items():
+                    if contribution.get("status") != "closed":
+                        contribution.update(status="closed", reason=reason)
+                        self.l.notify(member, "quest", {"quest_title": reviewed["title"], "summary": reason},
+                                      f"project-revision:{reviewed['logical_id']}:{project.get('quest_revision')}:{member}")
+                self.l.store.put("ledger_relationships", project)
+            return
+        if not project:
+            self.l.store.put("ledger_relationships", {"_id": project_id, "kind": "quest_project",
+                "logical_id": reviewed["logical_id"], "quest_revision": reviewed["_id"],
+                "status": "open", "contributions": {}, "at": now()})
+            return
+        if project.get("quest_revision") == reviewed["_id"] and project.get("status") == "open":
+            return
+        if project.get("status") == "completed":
+            raise ValueError("A completed cooperative logical quest cannot be reopened by a later revision.")
+        prior_revision = project.get("quest_revision")
+        if not prior_revision:
+            raise ValueError("The existing cooperative project has no quest revision.")
+        archive_id = f"cooperative-revision:{reviewed['logical_id']}:{prior_revision}"
+        if self.l.store.get("ledger_relationships", archive_id):
+            raise ValueError("The prior cooperative project revision was already archived.")
+        # Create the archive owner first so review-notice metadata on its
+        # contributions is retained when the complete immutable snapshot lands.
+        self.l.store.put("ledger_relationships", {"_id": archive_id, "kind": "quest_project",
+            "logical_id": reviewed["logical_id"], "quest_revision": prior_revision,
+            "status": "superseded", "contributions": {}})
+        archived = deepcopy(project)
+        archived.update(_id=archive_id, kind="quest_project", prior_status=project.get("status"),
+                        status="superseded", superseded_by=reviewed["_id"], archived_at=now())
+        reason = "A later reviewed quest revision replaced this cooperative project. No XP was awarded."
+        archived["disable_reason"] = reason
+        for member, contribution in archived.get("contributions", {}).items():
+            if contribution.get("status") != "closed":
+                contribution.update(status="closed", reason=reason)
+                self.l.notify(member, "quest", {"quest_title": reviewed["title"], "summary": reason},
+                              f"project-revision:{reviewed['logical_id']}:{prior_revision}:{member}")
+        self.l.store.put("ledger_relationships", archived)
+        self.l.store.put("ledger_relationships", {"_id": project_id, "kind": "quest_project",
+            "logical_id": reviewed["logical_id"], "quest_revision": reviewed["_id"],
+            "revision_of_project": prior_revision, "status": "open", "contributions": {}, "at": now()})
+
     def author_available(self, q):
         if generated(q):
             return enabled_rank(self.l, q["target_rank"]) and not contains_rank_name(self.l, q)
@@ -185,7 +248,8 @@ class Quests:
             for value, limit in ((title, 100), (description, 2000), (criteria, 2000)):
                 if not isinstance(value, str) or not value.strip() or len(value) > limit:
                     raise ValueError("Provide a title, description, and observable criteria within the form limits.")
-            tool_ids, shop_ids = service.validate_author_tools(actor, tools, shops)
+            explicit_shop_ids = sorted({sid(value) for value in shops if value is not None})
+            tool_ids, shop_ids = service.validate_author_tools(actor, tools, explicit_shop_ids)
             normalized_duration = validate_duration(proposal_duration or {"value": 1, "unit": "hours"})
             normalized_photo = validate_photo(proposal_photo)
             normalized_disciplines = list(proposal_disciplines or [])
@@ -219,7 +283,8 @@ class Quests:
             doc = {"_id": identifier, "kind": "member_quest", "logical_id": old["logical_id"] if old else identifier,
                    "creator": actor, "title": title, "description": description, "criteria": criteria,
                    "quest_type": quest_type, "rank_mode": "minimum", "target_rank": target_rank,
-                   "shop_ids": shop_ids, "tool_ids": tool_ids, "disciplines": normalized_disciplines,
+                   "shop_ids": shop_ids, "explicit_shop_ids": explicit_shop_ids,
+                   "tool_ids": tool_ids, "disciplines": normalized_disciplines,
                    "duration": normalized_duration, "photo": normalized_photo, "status": "draft", "at": now()}
             d.touch(actor)
             s.put("ledger_quests", doc)
@@ -320,6 +385,9 @@ class Quests:
             original["shop_ids"] = original.get("shop_ids") or []
             original["tool_ids"] = original.get("tool_ids") or []
             definition = service.normalize_review(q["creator"], edits if edits is not None else original) if approve else original
+            prior_explicit = set(service.explicit_shops(q))
+            inferred_explicit = set(service.explicit_shops(definition))
+            reviewed_explicit = sorted(inferred_explicit | (prior_explicit & set(definition.get("shop_ids", []))))
             audit = Authority(d).authorize(actor, q["creator"], "quest_publish",
                                            definition.get("shop_ids", q["shop_ids"]), q["logical_id"], commit=True)
             reviewed = q
@@ -331,18 +399,13 @@ class Quests:
                 s.put("ledger_quests", q)
             reviewed.update(status="published" if approve else "rejected", reward=reward,
                             classification=classification, catalog_id=catalog_id, reviewer=actor,
-                            reviewed_at=now(), review_authority=audit, reason=reason)
+                            reviewed_at=now(), review_authority=audit, reason=reason,
+                            explicit_shop_ids=reviewed_explicit if approve else service.explicit_shops(q))
             s.put("ledger_quests", reviewed)
             if approve:
                 from .quest_discovery import quest_head
                 s.put("ledger_catalog", quest_head(reviewed))
-                if cooperative(reviewed):
-                    project_id = "cooperative:" + reviewed["logical_id"]
-                    if s.get("ledger_relationships", project_id):
-                        raise ValueError("This logical quest already has a shared project.")
-                    s.put("ledger_relationships", {"_id": project_id, "kind": "quest_project",
-                        "logical_id": reviewed["logical_id"], "quest_revision": reviewed["_id"],
-                        "status": "open", "contributions": {}, "at": now()})
+                service.transition_project(reviewed)
             s.put("ledger_evidence", {"_id": "quest-review:" + key, "kind": "quest_review",
                 "proposal": key, "quest": reviewed["_id"], "actor": actor, **audit, "at": now(),
                 "reason": reason, "status": reviewed["status"]})
@@ -517,6 +580,17 @@ class Quests:
                 raise Denied("Only the author may withdraw this quest.")
             q.update(status="withdrawn", withdrawn_at=now())
             s.put("ledger_quests", q)
+            if cooperative(q):
+                project = s.get("ledger_relationships", "cooperative:" + q["logical_id"])
+                if project and project.get("status") == "open" and project.get("quest_revision") == key:
+                    reason = "The proposer withdrew this quest revision. No XP was awarded."
+                    project.update(status="withdrawn", disable_reason=reason, withdrawn_at=now())
+                    for member, contribution in project.get("contributions", {}).items():
+                        if contribution.get("status") != "closed":
+                            contribution.update(status="closed", reason=reason)
+                            d.notify(member, "quest", {"quest_title": q["title"], "summary": reason},
+                                     f"project-withdrawn:{q['logical_id']}:{key}:{member}")
+                    s.put("ledger_relationships", project)
         return self.l.store.atomic(run)
 
     def disable(self, actor, key, reason):

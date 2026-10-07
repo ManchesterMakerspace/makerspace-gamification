@@ -166,7 +166,9 @@ def test_private_sponsorship_tool_is_caller_scoped_and_qwen_only_opens(env):
     assert any(item["function"]["name"] == "my_sponsorships" for item in tools)
 
 
-@pytest.mark.parametrize("prompt", ["Who have I sponsored?", "Did someone I invited opt in?"])
+@pytest.mark.parametrize("prompt", ["Who have I sponsored?", "Did someone I invited opt in?",
+                                    "Show my invites", "List my invited members",
+                                    "What invitations have I sent?"])
 def test_sponsorship_question_rejects_answer_without_tool_result(env, prompt):
     ledger, _, _, composer, api, _ = env
     ledger.join(mid(1))
@@ -176,6 +178,40 @@ def test_sponsorship_question_rejects_answer_without_tool_result(env, prompt):
     assert response["outcome"] == "fallback"
     assert response["text"] == "Use /ledger sponsor to review your private sponsorship register."
     assert "sponsorship_report" not in response
+
+
+@pytest.mark.parametrize("prompt", ["Show my invites", "List my invited members",
+                                    "What invitations have I sent?", "List invitations I sent",
+                                    "Show invitations I've sent", "What invitations did I send?"])
+def test_common_outgoing_invitation_phrases_require_the_private_register(prompt):
+    assert sponsorship_request(prompt)
+
+
+def test_contextual_sponsorship_followup_can_refresh_the_private_register(env):
+    ledger, _, _, composer, api, _ = env
+    ledger.join(mid(1))
+    ledger.sponsor(mid(1), mid(3))
+    history = [{"role": "user", "content": "Who have I sponsored?"},
+               {"role": "assistant", "content": "The Ledger opens your private sponsorship register."}]
+    api.tool_response.side_effect = [
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "sponsor-followup", "type": "function",
+            "function": {"name": "my_sponsorships", "arguments": json.dumps({"mode": "list"})}}]},
+        {"role": "assistant", "content": "The Ledger checks the register again."},
+    ]
+    response = converse(ledger, composer, mid(1), "Which of them opted in?", history=history, private=True)
+    assert response["outcome"] == "generated"
+    assert response["sponsorship_report"]["rows"][0]["recipient"] == mid(3)
+
+
+def test_contextual_sponsorship_followup_rejects_unverified_direct_answer(env):
+    ledger, _, _, composer, api, _ = env
+    ledger.join(mid(1))
+    history = [{"role": "user", "content": "Show my invites"},
+               {"role": "assistant", "content": "The Ledger opens your private sponsorship register."}]
+    api.tool_response.return_value = {"role": "assistant", "content": "Someone opted in."}
+    response = converse(ledger, composer, mid(1), "Which of them opted in?", history=history, private=True)
+    assert response["outcome"] == "fallback"
+    assert response["text"] == "Use /ledger sponsor to review your private sponsorship register."
 
 
 @pytest.mark.parametrize("prompt", ["When did I opt in?", "Was I opted out yesterday?"])

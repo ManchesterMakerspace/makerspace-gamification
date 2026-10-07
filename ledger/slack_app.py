@@ -319,8 +319,10 @@ class SlackUI:
                 photo = {key: file.get(key) for key in ("id", "name", "mimetype", "filetype", "size")}
             elif meta.get("revision_of"):
                 photo = (self.ledger.store.get("ledger_quests", meta["revision_of"]) or {}).get("photo")
+            revision = self.ledger.store.get("ledger_quests", meta["revision_of"]) if meta.get("revision_of") else None
             q = service.draft(actor, data["title"], data["description"], data["criteria"], int(data["target_rank"]),
-                tools=data.get("quest_tools") or [], disciplines=disciplines, revision_of=meta.get("revision_of"),
+                shops=service.explicit_shops(revision) if revision else [], tools=data.get("quest_tools") or [],
+                disciplines=disciplines, revision_of=meta.get("revision_of"),
                 key=meta["submission_key"], quest_type=data.get("quest_type") or "individual",
                 duration={"value": int(data.get("duration_value") or "1"),
                           "unit": data.get("duration_unit") or "hours"}, photo=photo)
@@ -346,7 +348,7 @@ class SlackUI:
             edits = {key: data.get(key) or original.get(key) for key in ("title", "description", "criteria")}
             edits["quest_type"] = data.get("quest_type") or original.get("quest_type", "individual")
             edits.update(target_rank=int(data.get("target_rank") or original.get("target_rank")),
-                         tool_ids=tool_ids, shop_ids=[], disciplines=disciplines,
+                         tool_ids=tool_ids, shop_ids=Quests(self.ledger).explicit_shops(original), disciplines=disciplines,
                          duration={"value": int(data.get("duration_value") or prior_duration["value"]),
                                    "unit": data.get("duration_unit") or prior_duration["unit"]})
             Quests(self.ledger).publish(actor, meta["quest"], int(data["reward"]), data.get("classification") or "challenge",

@@ -209,6 +209,62 @@ def test_approval_revalidates_tools_and_review_edits_create_child(joined):
     assert saved_original["quest_type"] == "cooperative" and saved_original["status"] == "superseded"
 
 
+def test_slack_review_preserves_shop_only_prerequisites(joined):
+    ledger, store, source, composer, _, slack = joined
+    rank(ledger, store, 10, 2)
+    original = Quests(ledger).draft(member(1), "Shop-only quest", "Work safely in the shop.",
+        "Show the completed result.", 1, shops=[member(202)], duration={"value": 1, "unit": "hours"})
+    Quests(ledger).submit_draft(member(1), original["_id"])
+
+    view = views.member_quest_review(ledger, original)
+    assert "Shop2" in json.dumps(view)
+    body = form(view, {"quest_type": "individual", "title": original["title"],
+        "description": original["description"], "criteria": original["criteria"],
+        "target_rank": "1", "duration_value": "1", "duration_unit": "hours",
+        "reward": "100", "proposer_bonus": "100", "classification": "challenge"}, "U10")
+    body["view"]["state"]["values"]["quest_tools"]["quest_tools"] = {
+        "type": "multi_external_select", "selected_options": []}
+    SlackUI(ledger, composer).submission(body, slack)
+
+    receipt = store.get("ledger_evidence", "quest-review:" + original["_id"])
+    reviewed = store.get("ledger_quests", receipt["quest"])
+    assert reviewed["shop_ids"] == [member(202)]
+    assert reviewed["explicit_shop_ids"] == [member(202)]
+
+
+@pytest.mark.parametrize("prior_status", ["withdrawn", "disabled"])
+def test_cooperative_revision_replaces_closed_project(joined, prior_status):
+    ledger, store, source, *_ = joined
+    original = proposal(ledger, store, source, quest_type="cooperative", reward=100)
+    service = LedgerQuests(ledger)
+    rank(ledger, store, 2, 2)
+    checkout(source, 2, 311, 1982)
+    service.contribute(member(2), original["_id"], "join", role="Design")
+
+    if prior_status == "withdrawn":
+        Quests(ledger).withdraw(member(1), original["_id"])
+    else:
+        Quests(ledger).disable(member(10), original["_id"], "Replace with a reviewed revision.")
+
+    prior_project = store.get("ledger_relationships", "cooperative:" + original["logical_id"])
+    assert prior_project["status"] == prior_status
+    revised = Quests(ledger).draft(member(1), "Revised cooperative jig", "Build the revised jig safely.",
+        "Demonstrate the revised result.", 1, tools=[member(311)], revision_of=original["_id"],
+        quest_type="cooperative", duration={"value": 3, "unit": "hours"},
+        disciplines=[{"name": "Design", "expectation": "Document the revised design."},
+                     {"name": "Fabrication", "expectation": "Build and inspect the revised jig."}])
+    Quests(ledger).submit_draft(member(1), revised["_id"])
+    reviewed = Quests(ledger).publish(member(10), revised["_id"], 100)
+
+    current = store.get("ledger_relationships", "cooperative:" + original["logical_id"])
+    archived = store.get("ledger_relationships",
+        f"cooperative-revision:{original['logical_id']}:{original['_id']}")
+    assert current["status"] == "open" and current["quest_revision"] == reviewed["_id"]
+    assert current["contributions"] == {}
+    assert archived["status"] == "superseded" and archived["prior_status"] == prior_status
+    assert archived["contributions"][member(2)]["status"] == "closed"
+
+
 @pytest.mark.parametrize("photo", [
     {"id": "F1", "name": "sample.pdf", "mimetype": "application/pdf", "filetype": "pdf", "size": 100},
     {"id": "F2", "name": "huge.png", "mimetype": "image/png", "filetype": "png", "size": 10 * 1024 * 1024 + 1},
