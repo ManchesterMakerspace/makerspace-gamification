@@ -157,3 +157,18 @@ def test_sponsorship_words_enable_private_conversation_tools_without_question_ma
     assert outcome == "reply_queued"
     job = store.get("ledger_outbox", "reply:DU1:100.200")
     assert job["payload"]["use_tools"] is True and job["payload"]["slack_id"] == "U1"
+
+
+@pytest.mark.parametrize("text", [
+    "List everyone I invite",
+    "List everyone I invited",
+    "Show the people I am inviting",
+])
+def test_sponsor_invite_verbs_enable_tools_without_question_mark(env, text):
+    ledger, store, _, composer, _, slack = env
+    ledger.join(mid(1))
+    outcome = Worker(ledger, composer, slack).event({"type": "message", "channel": "DU1", "channel_type": "im",
+        "user": "U1", "text": text, "ts": "100.201"}, "slack:event:sponsor-invite-verb")
+    assert outcome == "reply_queued"
+    job = store.get("ledger_outbox", "reply:DU1:100.201")
+    assert job["payload"]["use_tools"] is True and job["payload"]["slack_id"] == "U1"

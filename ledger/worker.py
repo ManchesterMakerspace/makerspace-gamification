@@ -737,7 +737,7 @@ class Worker:
                         "exception": True, "participating": self.ledger.active(member_id),
                         "consent_generation": (self.ledger.participant(member_id) or {}).get("consent_generation", 0),
                         "ambient": not (addressed or continuing or progress_request),
-                        "use_tools": question or progress_request or bool(re.search(r"\b(shop|shops|tool|tools|clearances|volunteer|downtime|sponsor(?:ed|ships?)?|invitees?|invitations?|what|where|when|how|can|does|tell me about)\b", text, re.I))})
+                        "use_tools": question or progress_request or bool(re.search(r"\b(shop|shops|tool|tools|clearances|volunteer|downtime|sponsor(?:ed|ships?)?|invit(?:e(?:d|s|es?)?|ing|ations?)|what|where|when|how|can|does|tell me about)\b", text, re.I))})
             self.store.atomic(write)
             return "reply_queued"
         return "ignored_unaddressed_channel_message"
