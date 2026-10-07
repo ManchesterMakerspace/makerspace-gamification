@@ -372,6 +372,44 @@ class Worker:
                 if user.get("deleted"):
                     self.reconcile_channels()
             return
+        # These narrowly recognized questions are public aggregates. Handle
+        # them before resolving a Slack identity or requiring Ledger consent.
+        if kind in ("message", "app_mention"):
+            from .community_counts import clarification, format_answer, is_count_question, recognize, safe_count
+            text = event.get("text", "")
+            count_request = recognize(text)
+            count_question = is_count_question(text)
+            if ((count_request or count_question) and not event.get("bot_id") and
+                    not event.get("bot_profile") and not event.get("app_id") and
+                    isinstance(event.get("user"), str) and bool(event["user"]) and
+                    event.get("user") != self.bot_id and
+                    not event.get("subtype")):
+                channel = event.get("channel")
+                is_dm = event.get("channel_type") == "im" or (isinstance(channel, str) and channel.startswith("D"))
+                if not channel:
+                    return "ignored_community_count_without_channel"
+                if not is_dm and self.slack.conversations_info(channel=channel)["channel"].get("is_member") is not True:
+                    return "ignored_community_count_unjoined_channel"
+                if count_request:
+                    result = safe_count(self.ledger.sources, *count_request)
+                    if result is None:
+                        return "community_count_unavailable"
+                    response_text = format_answer(result)
+                else:
+                    response_text = clarification(text)
+                # Membership may change while the read runs; check immediately
+                # before replying and do not retain the ambient message body.
+                if not is_dm and self.slack.conversations_info(channel=channel)["channel"].get("is_member") is not True:
+                    return "ignored_community_count_unjoined_channel"
+                reply = {"channel": channel, "text": response_text,
+                         "client_msg_id": str(uuid5(NAMESPACE_URL, f"community-count:{channel}:{event.get('ts', key)}"))}
+                thread = event.get("thread_ts") or event.get("ts")
+                if thread:
+                    reply["thread_ts"] = thread
+                    if not event.get("thread_ts"):
+                        reply["reply_broadcast"] = True
+                self.slack.chat_postMessage(**reply)
+                return "community_count_answered"
         if kind in ("member_joined_channel", "member_left_channel"):
             channels = [c for c in self.store.select("ledger_channels", {"kind": "channel"}) if c["channel_id"] == event["channel"]]
             if not channels or event["user"] == self.bot_id:
