@@ -72,6 +72,9 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert crlf_bytes <= MAX_MATRIX_BYTES
     assert {r.get('id') for r in root.find('roles')} == REQUIRED_ROLES
     assert 'Repeated join requests show saved participation' in root.find('consent').text
+    sponsor = root.find("roles/role[@id='sponsor']").text
+    assert 'only their own invites' in sponsor and 'latest opt-in/out dates' in sponsor
+    assert 'First sponsor keeps credit' in sponsor and 'grants no consent' in sponsor
     assert 'In registered Ledger channels only' in root.find('channels').text
     assert 'reject stale ambient jobs before inference' in root.find('channels').text
     channels = root.find('channels').text
@@ -91,6 +94,9 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'saved member identity' in channels and 'terminal failure of the owning Slack event' in channels
     assert 'workspace authentication/scope failures' in channels
     assert 'clear invalid Slack-file caches' in root.find('progression').text
+    assert 'my_sponsorships is active-caller-only in private DMs' in root.find('privacy').text
+    assert 'Qwen adds a fact-free opener' in root.find('privacy').text
+    assert 'Sponsor reports append Python tables' in root.find('response').text
     assert 'distinct specialized evidence attempt' in root.find('economy').text
     delegate = root.find("roles/role[@id='delegated_reviewer']").text
     assert 'stable logical ID' in delegate and 'actual-shop scope per operation' in delegate

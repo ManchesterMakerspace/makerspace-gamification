@@ -6,7 +6,7 @@ import time
 from xml.etree import ElementTree
 from pymongo.errors import PyMongoError
 
-from .query_tools import QueryTools, QUERY_TOOL, PROGRESS_TOOL
+from .query_tools import QueryTools, QUERY_TOOL, PROGRESS_TOOL, SPONSORSHIPS_TOOL
 from .messages import member_text
 from .prompt_library import render, variables_for
 from .progress import progress
@@ -146,11 +146,14 @@ def converse(ledger, composer, member, request, history=(), private=True, select
         "Observation defaults on for eligible members in configured channels after notice, independently of game participation. "
         "Anyone eligible can opt out using /ledger preferences and unchecking Allow observation. Never claim chat saved this preference. " +
         "Only mention administrative commands when administrative_help is supplied; never expose them in shared channels. " +
+        ("For a private question about the caller's sponsorships, use my_sponsorships and return only a short stylistic opener; "
+         "the application appends every authoritative name, date, status and count. Never answer sponsorship facts yourself. " if private and ledger.active(member) else
+         "Sponsorship history is private; direct the caller to DM The Ledger or use /ledger sponsor. ") +
         ("This is an unaddressed channel question. Reply only if useful and relevant to makerspace shops/tools or The Ledger. Otherwise return exactly NO_REPLY. " if ambient else "") +
         "Authoritative caller facts: " + json.dumps(facts, default=str) + "\n" +
         ("This is a private DM." if private else "This is a shared Ledger thread; eligibility details belong in private detail.")},
         *history, {"role": "user", "content": task}]
-    available_tools = [QUERY_TOOL, PROGRESS_TOOL] if ledger.active(member) else [{**QUERY_TOOL, "function": {**QUERY_TOOL["function"],
+    available_tools = ([QUERY_TOOL, PROGRESS_TOOL] + ([SPONSORSHIPS_TOOL] if private else [])) if ledger.active(member) else [{**QUERY_TOOL, "function": {**QUERY_TOOL["function"],
         "description": "Read enabled makerspace shops and tools. No personal game data or mutations.",
         "parameters": {**QUERY_TOOL["function"]["parameters"], "properties": {**QUERY_TOOL["function"]["parameters"]["properties"],
             "collection": {"type": "string", "enum": ["shops", "tools"]}}}}}]
@@ -175,6 +178,11 @@ def converse(ledger, composer, member, request, history=(), private=True, select
                     raise ValueError("Invalid member-facing response")
                 if restricted_answer(ledger, member, content) or (not private and "/ledger-admin" in content):
                     raise ValueError("Answer disclosed an inaccessible rank or quest")
+                if context.sponsorship_report is not None:
+                    from .sponsorships import valid_opener
+                    content = content.strip() if valid_opener(content, context.sponsorship_report) else "The Ledger opens your private sponsorship register."
+                    return {"text": member_text(content), "outcome": "generated", "tool_calls": context.calls,
+                            "sponsorship_report": context.sponsorship_report, "latency": time.monotonic() - started}
                 return {"text": member_text(content), "outcome": "generated", "tool_calls": context.calls, "latency": time.monotonic() - started}
             calls = response["tool_calls"]
             if context.calls + len(calls) > 3:
@@ -206,5 +214,9 @@ def converse(ledger, composer, member, request, history=(), private=True, select
     except (OSError, TimeoutError, ValueError, KeyError, TypeError, PyMongoError, http.client.HTTPException):
         fallback = "I don't know." if use_tools else ("Use /ledger progress to review your progress." if ledger.active(member) else
                    "The Ledger recognizes learning and contribution with XP. Use /ledger join to see behind the curtain and start your journey.")
-        return {"text": "" if ambient else fallback,
-                "outcome": "fallback", "tool_calls": context.calls, "latency": time.monotonic() - started}
+        result = {"text": "" if ambient else fallback,
+                  "outcome": "fallback", "tool_calls": context.calls, "latency": time.monotonic() - started}
+        if context.sponsorship_report is not None:
+            result.update(text="The Ledger opens your private sponsorship register.",
+                          sponsorship_report=context.sponsorship_report)
+        return result

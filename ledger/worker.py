@@ -733,10 +733,11 @@ class Worker:
             def write(s):
                 enqueue(s, "ledger_outbox", f"reply:{channel}:{event['ts']}", "conversation", {"member_id": member_id, "channel": channel,
                         "thread": thread, "text": text[:6000], "message_id": message_id, "progress_request": progress_request,
+                        "slack_id": event.get("user"),
                         "exception": True, "participating": self.ledger.active(member_id),
                         "consent_generation": (self.ledger.participant(member_id) or {}).get("consent_generation", 0),
                         "ambient": not (addressed or continuing or progress_request),
-                        "use_tools": question or progress_request or bool(re.search(r"\b(shop|shops|tool|tools|clearances|volunteer|downtime|what|where|when|how|can|does|tell me about)\b", text, re.I))})
+                        "use_tools": question or progress_request or bool(re.search(r"\b(shop|shops|tool|tools|clearances|volunteer|downtime|sponsor(?:ed|ships?)?|invitees?|invitations?|what|where|when|how|can|does|tell me about)\b", text, re.I))})
             self.store.atomic(write)
             return "reply_queued"
         return "ignored_unaddressed_channel_message"
@@ -761,8 +762,27 @@ class Worker:
                 self.store.atomic(lambda s: s.put("ledger_evidence", {"_id": key, "kind": "feedback", "member_id": member_id, "text": " ".join(args[1:])[:2000], "at": now()}))
                 facts = {"summary": "Your feedback has been recorded for the pilot review. Thank you."}
             elif args and args[0] == "sponsor":
-                l.sponsor(member_id, ui.resolve(" ".join(args[1:])))
-                facts = {"summary": "Sponsorship invitation recorded. The recipient must explicitly opt in."}
+                participant = l.require(member_id)
+                if len(args) == 1:
+                    self.store.atomic(lambda s: enqueue(s, "ledger_outbox", f"sponsor-report:{key}",
+                        "sponsor_report", {"member_id": member_id, "mode": "list",
+                            "consent_generation": participant.get("consent_generation", 0)}))
+                    return
+                target = ui.resolve(" ".join(args[1:]))
+                from .sponsorships import caller_invitation
+                if caller_invitation(l, member_id, target):
+                    self.store.atomic(lambda s: enqueue(s, "ledger_outbox", f"sponsor-report:{key}",
+                        "sponsor_report", {"member_id": member_id, "mode": "detail", "recipient": target,
+                            "consent_generation": participant.get("consent_generation", 0)}))
+                    return
+                if l.active(target) or not l.member_eligible(target):
+                    facts = {"summary": "That member cannot receive a sponsorship invitation."}
+                else:
+                    l.sponsor(member_id, target)
+                    self.store.atomic(lambda s: enqueue(s, "ledger_outbox", f"sponsor-report:{key}",
+                        "sponsor_report", {"member_id": member_id, "mode": "detail", "recipient": target,
+                            "consent_generation": participant.get("consent_generation", 0)}))
+                    return
             elif args and args[0] == "invite":
                 target = ui.resolve(" ".join(args[1:]))
                 channel_key = next((a for a in args if a == "chat" or a.startswith("rank:")), "chat")
@@ -1460,6 +1480,45 @@ class Worker:
         if current["status"] != "working" or current.get("lease") != job["lease"]:
             raise Denied("Delivery was cancelled.")
 
+    def deliver_sponsor_report(self, job):
+        p, member_id = job["payload"], job["payload"].get("member_id")
+        participant = self.ledger.participant(member_id)
+        if (not participant or not self.ledger.active(member_id)
+                or participant.get("consent_generation", 0) != p.get("consent_generation")):
+            raise Denied("Sponsorship report access changed.")
+        current = self.store.get("ledger_outbox", job["_id"])
+        report = current.get("report_snapshot")
+        if not report:
+            from .sponsorships import build_report
+            report = build_report(self.ledger, member_id, p.get("mode", "list"), recipient=p.get("recipient"))
+            def save_snapshot(s):
+                saved = s.get("ledger_outbox", job["_id"])
+                if saved.get("lease") != job["lease"] or saved.get("status") != "working":
+                    raise Denied("Sponsorship report was cancelled.")
+                saved["report_snapshot"] = report
+                s.put("ledger_outbox", saved)
+            self.store.atomic(save_snapshot)
+        composed = self.persist_composition(job, "status", "member",
+            {"summary": "A private sponsorship register was requested."}, profile="summary")
+        from .sponsorships import render_report, valid_opener
+        opener = composed.get("text") if composed.get("outcome") == "generated" else ""
+        if not valid_opener(opener, report):
+            opener = "The Ledger opens your private sponsorship register."
+        uid = self.valid_identity(member_id)
+        if not uid:
+            raise Denied("The caller's Slack identity is unavailable.")
+        dm = self.slack.conversations_open(users=uid)["channel"]["id"]
+        for index, page in enumerate(render_report(report, opener)):
+            self.assert_live_job(job)
+            latest = self.ledger.participant(member_id)
+            if (not latest or not self.ledger.active(member_id)
+                    or latest.get("consent_generation", 0) != p.get("consent_generation")
+                    or self.valid_identity(member_id) != uid):
+                raise Denied("Sponsorship report access changed before delivery.")
+            self.post_message(channel=dm, text=page["text"], blocks=page["blocks"],
+                client_msg_id=str(uuid5(NAMESPACE_URL, f"{job['_id']}:{index}")),
+                unfurl_links=False, unfurl_media=False)
+
     def outbox(self, job):
         p = job["payload"]
         kind = job["kind"]
@@ -1471,6 +1530,8 @@ class Worker:
             return TicketQuests(self.ledger, worker=self).deliver(job)
         if kind == "guidance":
             return self.deliver_guidance(job)
+        if kind == "sponsor_report":
+            return self.deliver_sponsor_report(job)
         if kind == "community_count_reply":
             from .community_counts import format_answer, timeframe, valid_space_answer
             result, channel = p.get("result"), p.get("channel")
@@ -1777,6 +1838,24 @@ class Worker:
             from .conversations import restricted_answer
             if restricted_answer(self.ledger, member_id, composed["text"]):
                 raise Denied("Rank visibility changed during generation.")
+            sponsorship_report = composed.get("sponsorship_report")
+            if sponsorship_report is not None:
+                if not p["channel"].startswith("D") or self.valid_identity(member_id) != p.get("slack_id"):
+                    raise Denied("Sponsorship history requires the caller's current private DM.")
+                from .sponsorships import render_report, valid_opener
+                opener = composed["text"] if valid_opener(composed["text"], sponsorship_report) else "The Ledger opens your private sponsorship register."
+                pages = render_report(sponsorship_report, opener)
+                for index, page in enumerate(pages):
+                    self.assert_live_job(job)
+                    latest = self.ledger.participant(member_id)
+                    if (not latest or not self.ledger.active(member_id)
+                            or latest.get("consent_generation", 0) != p.get("consent_generation", 0)
+                            or self.valid_identity(member_id) != p.get("slack_id")):
+                        raise Denied("Sponsorship report access changed before delivery.")
+                    post_args = {"channel": p["channel"], "thread_ts": p["thread"], "text": page["text"],
+                        "blocks": page["blocks"], "client_msg_id": str(uuid5(NAMESPACE_URL, f"{job['_id']}:{index}"))}
+                    self.post_message(**post_args)
+                return
             blocks = [section(composed["text"])]
             elements = ([button("Private progress detail", "progress", ""), button("Explore quests", "browse_quests", "")] if self.ledger.active(member_id)
                         else [button("Join The Ledger", "join", "")])

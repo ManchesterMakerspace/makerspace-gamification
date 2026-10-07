@@ -49,6 +49,10 @@ class Ledger:
                         "criteria": "Document the skill shared and obtain each learner's acknowledgment." if kind == "mentoring" else "Document a safe small build, the shop rules and tools you learned, and feedback you applied. An accessible self-directed alternative is welcome.", "active": True})
         self.store.atomic(create)
 
+    def backfill_sponsor_invitations(self):
+        from .sponsorships import backfill
+        return self.store.atomic(backfill)
+
     def participant(self, member_id):
         return self.store.get("ledger_participants", str(member_id))
 
@@ -153,7 +157,10 @@ class Ledger:
                        "member_id": member_id, "opted_in": True, "at": now(), "silent_accrual": True})
         if sponsor:
             rel = self.store.get("ledger_relationships", f"sponsor:{member_id}")
-            if rel and rel["giver"] == sponsor and rel["status"] == "pending":
+            from .sponsorships import invitation_key
+            attributed = rel and (rel.get("giver") == sponsor or
+                self.store.get("ledger_relationships", invitation_key(sponsor, member_id)))
+            if attributed and rel["status"] == "pending":
                 rel.update(status="accepted", accepted_at=now())
                 self.store.put("ledger_relationships", rel)
         from .admin_access import sync_review_membership
@@ -187,7 +194,7 @@ class Ledger:
         for job in self.store.select("ledger_outbox", {"status": {"$in": ["pending", "working"]}}):
             payload = job["payload"]
             if payload.get("member_id") == member_id and job["kind"] in ("invite", "message", "mqtt", "conversation", "welcome", "quest_draft",
-                    "summary_flush", "summary_delivery", "guidance", "rank_art", "home_publish", "home_profile_photo") and not payload.get("peer_kudos"):
+                    "summary_flush", "summary_delivery", "guidance", "sponsor_report", "rank_art", "home_publish", "home_profile_photo") and not payload.get("peer_kudos"):
                 job["status"] = "cancelled"
                 self.store.put("ledger_outbox", job)
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
@@ -349,7 +356,7 @@ class Ledger:
                 collect(self, evidence["action_id"], recipient, "kudos", {"award_id": award_id,
                         "xp_change": award["delta"], "xp_total": self.participant(recipient)["xp"]}, award_id)
         if invite and not participating and self.active(giver):
-            self._sponsor(giver, recipient, notify=False)
+            self._sponsor(giver, recipient, notify=False, source="kudos_invitation")
         for audience in ["recipient"] + (["shared"] if public else []):
             enqueue(self.store, "ledger_outbox", f"{evidence['_id']}:{audience}", "kudos",
                     {"evidence": evidence["_id"], "audience": audience, "member_id": recipient, "peer_kudos": True})
@@ -359,22 +366,34 @@ class Ledger:
         finish_action(self, evidence["action_id"])
         return evidence
 
-    def sponsor(self, giver, recipient):
-        return self.tx("_sponsor", giver, recipient)
+    def sponsor(self, giver, recipient, *, source="sponsor_command"):
+        return self.tx("_sponsor", giver, recipient, source=source)
 
-    def _sponsor(self, giver, recipient, notify=True):
+    def _sponsor(self, giver, recipient, notify=True, *, source="sponsor_command"):
         self.require(giver)
         if giver == recipient or not self.sources.good_standing(recipient):
             raise Denied("Choose another linked member in good standing.")
+        from .sponsorships import invitation_key
+        invitation_id = invitation_key(giver, recipient)
+        invitation = self.store.get("ledger_relationships", invitation_id)
         key = f"sponsor:{recipient}"
         existing = self.store.get("ledger_relationships", key)
-        if existing:
-            return existing
+        if invitation:
+            return existing or invitation
+        if self.active(recipient):
+            raise Denied("That member cannot receive a sponsorship invitation.")
         self.touch(giver)
-        rel = {"_id": key, "kind": "sponsor", "giver": giver, "recipient": recipient, "status": "pending", "at": now()}
-        self.store.put("ledger_relationships", rel)
+        invited_at = now()
+        if existing:
+            rel = existing
+        else:
+            rel = {"_id": key, "kind": "sponsor", "giver": giver, "recipient": recipient,
+                   "status": "pending", "at": invited_at}
+            self.store.put("ledger_relationships", rel)
+        self.store.put("ledger_relationships", {"_id": invitation_id, "kind": "sponsor_invitation",
+            "giver": giver, "recipient": recipient, "at": invited_at, "source": source})
         if notify:
-            self.notify(recipient, "invitation", {"sponsor": giver}, key, exception=True)
+            self.notify(recipient, "invitation", {"sponsor": giver}, invitation_id, exception=True)
         return rel
 
     def _recruitment(self, member_id, at, *, action_id=None):
