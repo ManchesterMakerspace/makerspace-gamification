@@ -78,6 +78,18 @@ def self_progress_question(text):
     return bool(re.search(r"\b(my|i|me)\b", text) and re.search(r"\b(next rank|rank up|rank-up|progress|remaining xp|need to advance|need to level|level up|promotion|my stats)\b", text))
 
 
+def sponsorship_request(text):
+    """Identify private questions that require caller-owned invitation facts."""
+    if not isinstance(text, str):
+        return False
+    personal = re.search(r"\b(?:i|me|my|mine|who|whom|everyone|people|person)\b", text, re.I)
+    invitation = re.search(
+        r"\b(?:sponsor(?:ed|s|ing|ships?)?|invit(?:e(?:d|s|es?)?|ing|ations?))\b", text, re.I)
+    participation = re.search(
+        r"\b(?:did|has|have|is|was|when|whether)\b.{0,100}\bopt(?:ed)?[ -]?(?:in|out)\b", text, re.I)
+    return bool((personal and invitation) or participation)
+
+
 def appearance_request(ledger, requester, text):
     """Resolve an appearance question only to the caller or an opted-in member."""
     if not isinstance(text, str):
@@ -119,6 +131,7 @@ def appearance_request(ledger, requester, text):
 def converse(ledger, composer, member, request, history=(), private=True, selection=None, *, use_tools=True, ambient=False):
     ledger.require_member(member)
     context = QueryTools(ledger, member, private)
+    requires_sponsorship_report = private and ledger.active(member) and sponsorship_request(request)
     started = time.monotonic()
     if selection is None:
         composer.refresh_matrix()
@@ -170,6 +183,8 @@ def converse(ledger, composer, member, request, history=(), private=True, select
                 content = response.get("content")
                 if ambient and content == "NO_REPLY":
                     return {"text": "", "outcome": "ignored", "tool_calls": context.calls, "latency": time.monotonic() - started}
+                if requires_sponsorship_report and context.sponsorship_report is None:
+                    raise ValueError("Sponsorship answer requires my_sponsorships")
                 if use_tools and not context.calls and re.search(r"\b(shops?|tools?|downtime)\b", request, re.I) and content != "I don't know.":
                     raise ValueError("Shop/tool answer requires a catalog query")
                 if context.calls and re.search(r"\b(shops?|tools?|downtime)\b", request, re.I) and not usable_catalog:
@@ -219,4 +234,6 @@ def converse(ledger, composer, member, request, history=(), private=True, select
         if context.sponsorship_report is not None:
             result.update(text="The Ledger opens your private sponsorship register.",
                           sponsorship_report=context.sponsorship_report)
+        elif requires_sponsorship_report:
+            result["text"] = "Use /ledger sponsor to review your private sponsorship register."
         return result

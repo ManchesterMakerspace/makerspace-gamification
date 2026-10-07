@@ -182,6 +182,12 @@ def _cell(text):
     return {"type": "raw_text", "text": str(text)}
 
 
+def _fallback_cell(text):
+    """Escape Slack control syntax in top-level accessibility text."""
+    value = re.sub(r"[\r\n]+", " ", str(text))
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _table_pages(header, data):
     pages, rows, characters = [], [[_cell(value) for value in header]], sum(map(len, header))
     for values in data:
@@ -219,7 +225,7 @@ def render_report(report, opener="The Ledger opens your private sponsorship regi
     total = len(tables)
     for index, table in enumerate(tables, 1):
         lead = opener if index == 1 else f"Sponsorship register continued ({index} of {total})."
-        plain_rows = [" | ".join(cell["text"] for cell in row) for row in table]
+        plain_rows = [" | ".join(_fallback_cell(cell["text"]) for cell in row) for row in table]
         text = lead + "\n" + "\n".join(plain_rows)
         pages.append({"text": text, "blocks": [
             {"type": "section", "text": {"type": "mrkdwn", "text": lead}},

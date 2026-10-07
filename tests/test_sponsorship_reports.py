@@ -81,6 +81,17 @@ def test_report_table_pages_preserve_every_row():
     assert all(f"Maker {index}" in rendered for index in range(205))
 
 
+def test_report_fallback_escapes_slack_markup_but_table_keeps_raw_name():
+    name = "Maker <!here> <@U123> & Friends"
+    report = {"mode": "list", "status": "ok", "rows": [{"recipient": mid(3), "name": name,
+        "invited": "Oct 7, 2026", "status": "Never opted in", "latest_opt_in": "—", "latest_opt_out": "—"}],
+        "totals": {}, "as_of": "now"}
+    page = render_report(report)[0]
+    assert "<!here>" not in page["text"] and "<@U123>" not in page["text"]
+    assert "&lt;!here&gt;" in page["text"] and "&lt;@U123&gt;" in page["text"] and "&amp; Friends" in page["text"]
+    assert page["blocks"][1]["rows"][1][0]["text"] == name
+
+
 def test_sponsor_opener_rejects_names_dates_counts_and_status_claims():
     report = {"rows": [{"name": "Alex Maker"}]}
     assert valid_opener("The Ledger opens the private register.", report)
@@ -139,6 +150,18 @@ def test_private_sponsorship_tool_is_caller_scoped_and_qwen_only_opens(env):
     assert response["sponsorship_report"]["rows"][0]["recipient"] == mid(3)
     tools = api.tool_response.call_args_list[0].args[1]
     assert any(item["function"]["name"] == "my_sponsorships" for item in tools)
+
+
+@pytest.mark.parametrize("prompt", ["Who have I sponsored?", "Did Maker3 opt in?"])
+def test_sponsorship_question_rejects_answer_without_tool_result(env, prompt):
+    ledger, _, _, composer, api, _ = env
+    ledger.join(mid(1))
+    ledger.sponsor(mid(1), mid(3))
+    api.tool_response.return_value = {"role": "assistant", "content": "Maker3 opted in yesterday."}
+    response = converse(ledger, composer, mid(1), prompt, private=True)
+    assert response["outcome"] == "fallback"
+    assert response["text"] == "Use /ledger sponsor to review your private sponsorship register."
+    assert "sponsorship_report" not in response
 
 
 def test_opt_out_cancels_pending_sponsor_report(env):
