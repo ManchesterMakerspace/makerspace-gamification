@@ -37,6 +37,30 @@ def test_channel_kick_never_targets_bot_and_slack_failures_are_not_raised(joined
     assert 'Slack channel removal failed' in caplog.text and 'not retrying' in caplog.text
 
 
+def test_remove_job_transport_failure_is_logged_once_without_retry(joined, caplog):
+    ledger, store, _, _, _, slack = joined
+    w = worker(joined)
+    member_id = str(oid(1))
+    ledger.leave(member_id)
+    removals = store.select('ledger_outbox', {'kind': 'remove', 'payload.member_id': member_id})
+    target = next(job for job in removals if job['payload']['channel'] == 'CRANK1')
+    for job in removals:
+        if job['_id'] != target['_id']:
+            job['status'] = 'done'
+            store.put('ledger_outbox', job)
+    slack.conversations_kick.side_effect = RuntimeError('private transport details')
+
+    assert w.step('ledger_outbox', kinds=['remove'])
+
+    saved = store.get('ledger_outbox', target['_id'])
+    assert saved['status'] == 'done' and saved['attempts'] == 1
+    slack.conversations_kick.assert_called_once_with(channel='CRANK1', user='U1')
+    assert 'transport_error=RuntimeError' in caplog.text and 'not retrying' in caplog.text
+    assert 'private transport details' not in caplog.text
+    assert not w.step('ledger_outbox', kinds=['remove'])
+    slack.conversations_kick.assert_called_once()
+
+
 def test_welcome_waits_for_accounting_without_exhausting_delivery_retries(joined, caplog):
     ledger, store, _, _, _, slack = joined
     w = worker(joined)
@@ -210,12 +234,12 @@ def test_rank_transition_retry_compensates_a_committed_invite(joined, stale_caus
                          'consent_generation': participant['consent_generation']})
     s.put('ledger_outbox', job)
 
-    def fail_prior_kick(channel, user):
-        if channel == 'CRANK1':
+    def fail_welcome(**kwargs):
+        if kwargs['channel'] == 'CRANK2':
             raise RuntimeError('temporary Slack failure')
-        return {'ok': True}
+        return {'ts': '123.456'}
 
-    slack.conversations_kick.side_effect = fail_prior_kick
+    slack.chat_postMessage.side_effect = fail_welcome
     first_attempt = claim(s, job['_id'])
     with pytest.raises(RuntimeError, match='temporary Slack failure'):
         w.outbox(first_attempt)

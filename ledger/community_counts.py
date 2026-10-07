@@ -17,6 +17,9 @@ PERIOD_PATTERNS = {
 SPACE_QUESTION = re.compile(
     r"\b(?:how\s+busy|how\s+many\s+(?:visitors?|check-?ins?)|"
     r"how\s+many\s+people(?:\s+(?:are|were|have\s+been))?\s+(?:here|(?:at|in)\s+(?:the\s+)?(?:space|makerspace))|"
+    r"how\s+many\s+people\s+(?:(?:have\s+)?visited|(?:came|have\s+come)\s+to|"
+    r"(?:have\s+)?checked-?\s*in(?:\s+at)?)\s+"
+    r"(?:here|(?:the\s+)?(?:space|makerspace))|"
     r"(?:space|makerspace)\s+(?:busy|attendance|visitors?)|"
     r"(?:busy|crowded)\s+(?:is|was|has)|attendance\s+(?:today|yesterday|this))\b", re.I)
 MEMBER_QUESTION = re.compile(
