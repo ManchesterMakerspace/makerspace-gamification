@@ -14,12 +14,26 @@ PERIOD_PATTERNS = {
     "this_week": re.compile(r"\b(?:this\s+week|week\s+to\s+date|week\s+so\s+far)\b", re.I),
     "this_month": re.compile(r"\b(?:this\s+month|month\s+to\s+date|month\s+so\s+far)\b", re.I),
 }
+ATTENDANCE_DESTINATION_SUFFIX = (
+    r"(?=\s*(?:(?:right\s+now|currently|in\s+the\s+last\s+two\s+hours?|today|yesterday|"
+    r"this\s+(?:week|month)|(?:week|month)\s+(?:to\s+date|so\s+far))\b|[?!.;,:]|$))"
+)
+HERE_DESTINATION = r"here" + ATTENDANCE_DESTINATION_SUFFIX
+SPACE_DESTINATION = r"(?:the\s+)?(?:space|makerspace)" + ATTENDANCE_DESTINATION_SUFFIX
+NONPHYSICAL_ATTENDANCE_CONTEXT = re.compile(
+    r"\b(?:space|makerspace)\s+(?:website|web\s*site|web\s*page|site|page|station)\b|"
+    r"\b(?:website|web\s*site|web\s*page|site|page|station|class(?:room)?|course|workshop)\b[^?!.]{0,80}\b"
+    r"(?:busy|attendance|visitors?|visits?|check-?ins?)\b|"
+    r"\b(?:busy|attendance|visitors?|visits?|check-?ins?)\b[^?!.]{0,80}\b"
+    r"(?:website|web\s*site|web\s*page|site|page|station|class(?:room)?|course|workshop)\b", re.I)
 SPACE_QUESTION = re.compile(
     r"\b(?:how\s+busy|how\s+many\s+(?:visitors?|check-?ins?)|"
-    r"how\s+many\s+people(?:\s+(?:are|were|have\s+been))?\s+(?:here|(?:at|in)\s+(?:the\s+)?(?:space|makerspace))|"
-    r"how\s+many\s+people\s+(?:(?:have\s+)?visited|(?:came|have\s+come)\s+to|"
-    r"(?:have\s+)?checked-?\s*in(?:\s+at)?)\s+"
-    r"(?:here|(?:the\s+)?(?:space|makerspace))|"
+    r"how\s+many\s+people(?:\s+(?:are|were|have\s+been))?\s+(?:" + HERE_DESTINATION +
+    r"|(?:at|in)\s+" + SPACE_DESTINATION + r")|"
+    r"how\s+many\s+people\s+(?:"
+    r"(?:have\s+)?visited\s+(?:" + HERE_DESTINATION + r"|" + SPACE_DESTINATION + r")|"
+    r"(?:came|have\s+come)\s+(?:" + HERE_DESTINATION + r"|to\s+" + SPACE_DESTINATION + r")|"
+    r"(?:have\s+)?checked-?\s*in\s+(?:" + HERE_DESTINATION + r"|at\s+" + SPACE_DESTINATION + r"))|"
     r"(?:space|makerspace)\s+(?:busy|attendance|visitors?)|"
     r"(?:busy|crowded)\s+(?:is|was|has)|attendance\s+(?:today|yesterday|this))\b", re.I)
 MEMBER_QUESTION = re.compile(
@@ -27,11 +41,16 @@ MEMBER_QUESTION = re.compile(
     r"\bnew\s+members?\b.{0,80}\b(?:join(?:ed)?|sign\s*ups?|added)\b", re.I)
 
 
+def _is_space_question(text):
+    """Recognize attendance wording only when it has no nonphysical target."""
+    return bool(SPACE_QUESTION.search(text) and not NONPHYSICAL_ATTENDANCE_CONTEXT.search(text))
+
+
 def recognize(text):
     """Return a fixed (subject, period) request; ambiguous requests are ignored."""
     if not isinstance(text, str) or len(text) > 6000:
         return None
-    space = bool(SPACE_QUESTION.search(text))
+    space = _is_space_question(text)
     members = bool(MEMBER_QUESTION.search(text))
     if space == members:
         return None
@@ -49,11 +68,11 @@ def is_count_question(text):
     """Identify count topics even when the requested period needs clarification."""
     if not isinstance(text, str) or len(text) > 6000:
         return False
-    return bool(SPACE_QUESTION.search(text) or MEMBER_QUESTION.search(text))
+    return bool(_is_space_question(text) or MEMBER_QUESTION.search(text))
 
 
 def clarification(text):
-    space = bool(SPACE_QUESTION.search(text))
+    space = _is_space_question(text)
     members = bool(MEMBER_QUESTION.search(text))
     periods = "today, yesterday, this week, or this month so far"
     if space:

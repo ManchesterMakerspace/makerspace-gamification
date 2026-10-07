@@ -60,6 +60,7 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
                      and any(isinstance(target, ast.Name) and target.id == 'supported' for target in node.targets))
     assert {event.split('.')[0] for event in EVENTS} == supported
     assert {'message.im', 'message.groups', 'message.channels'} <= set(EVENTS)
+    assert 'member_joined_channel' in EVENTS
     assert len(COMMANDS) == len({c['command'] for c in COMMANDS}) == 7
     settings = MANIFEST['settings']
     assert settings['event_subscriptions']['request_url'] == 'https://LEDGER_HOST/slack/events'

@@ -23,12 +23,17 @@ def worker(env):
     return Worker(l, composer, slack, bot_id='UBOT')
 
 
-def test_channel_kick_never_targets_bot_and_slack_failures_are_not_raised(joined, caplog):
+def test_channel_kick_silently_skips_all_bots_and_slack_failures_are_not_raised(joined, caplog):
     _, _, _, _, _, slack = joined
     w = worker(joined)
+    slack.users_info.side_effect = lambda user: {"user": {"id": user, "is_bot": user == "UOTHERBOT"}}
 
     assert not w.kick('CRANK1', 'UBOT')
+    assert not w.kick('CRANK1', 'USLACKBOT')
+    assert not w.kick('CRANK1', 'UOTHERBOT')
     slack.conversations_kick.assert_not_called()
+    assert 'Slack channel removal skipped' not in caplog.text
+    assert [call.kwargs['user'] for call in slack.users_info.call_args_list] == ['UOTHERBOT']
 
     response = SimpleNamespace(status_code=500, get=lambda key, default=None: 'fatal_error' if key == 'error' else default)
     slack.conversations_kick.side_effect = SlackApiError('failed', response)
@@ -59,6 +64,30 @@ def test_remove_job_transport_failure_is_logged_once_without_retry(joined, caplo
     assert 'private transport details' not in caplog.text
     assert not w.step('ledger_outbox', kinds=['remove'])
     slack.conversations_kick.assert_called_once()
+
+
+def test_channel_reconcile_excludes_and_caches_all_bots_before_queueing_removal(env):
+    _, store, source, _, _, slack = env
+    for channel in store.select('ledger_channels', {'kind': 'channel'}):
+        if channel['_id'] != 'chat':
+            store.delete('ledger_channels', channel['_id'])
+    slack.conversations_members.return_value = {
+        'members': ['UBOT', 'UOTHERBOT', 'UUNLINKED'], 'response_metadata': {}}
+    slack.users_info.side_effect = lambda user: {
+        'user': {'id': user, 'deleted': False, 'is_bot': user == 'UOTHERBOT'}}
+    source.identity = MagicMock(wraps=source.identity)
+    w = worker(env)
+
+    w.reconcile_channels()
+    w.reconcile_channels()
+
+    removals = store.select('ledger_outbox', {'kind': 'remove'})
+    assert len(removals) == 1
+    assert removals[0]['_id'] == 'unauthorized:chat:UUNLINKED'
+    assert removals[0]['payload'] == {'slack_id': 'UUNLINKED', 'channel': 'CCHAT'}
+    assert [call.kwargs['user'] for call in slack.users_info.call_args_list].count('UOTHERBOT') == 1
+    assert sum(call.args == ('UOTHERBOT',) for call in source.identity.call_args_list) == 1
+    assert store.get('ledger_catalog', 'slack-user:UOTHERBOT')['bot'] is True
 
 
 def test_welcome_waits_for_accounting_without_exhausting_delivery_retries(joined, caplog):
@@ -549,7 +578,34 @@ def test_voluntary_departure_and_lower_rank_reinvite(joined):
     l.invite(other, m, 'rank:1')
     assert not s.get('ledger_channels', f'membership:{m}:rank:1')['voluntary_leave']
     w.event({'type': 'member_joined_channel', 'channel': 'CCHAT', 'user': 'U3'}, 'unauthorized')
-    assert s.get('ledger_outbox', 'unauthorized:remove')
+    removal = s.get('ledger_outbox', 'unauthorized:chat:U3')
+    assert removal['payload']['member_id'] == str(oid(3))
+    reconciliation = s.get('ledger_inbox', 'channel-reconcile:unauthorized')
+    assert reconciliation['kind'] == 'channel_reconcile'
+    assert reconciliation['payload'] == {'channel': 'CCHAT', 'source': 'member_joined_channel'}
+    w.slack.conversations_members.return_value = {'members': ['U3'], 'response_metadata': {}}
+    w.inbox(reconciliation)
+    removals = [job for job in s.select('ledger_outbox', {'kind': 'remove'})
+                if job['payload'].get('channel') == 'CCHAT' and job['payload'].get('slack_id') == 'U3']
+    assert [job['_id'] for job in removals] == ['unauthorized:chat:U3']
+    removal = removals[0]
+    removal.update(status='done', attempts=1)
+    s.put('ledger_outbox', removal)
+    w.event({'type': 'member_joined_channel', 'channel': 'CCHAT', 'user': 'U3'}, 'unauthorized-again')
+    refreshed = s.get('ledger_outbox', 'unauthorized:chat:U3')
+    assert refreshed['status'] == 'pending' and refreshed['attempts'] == 0
+    assert len([job for job in s.select('ledger_outbox', {'kind': 'remove'})
+                if job['payload'].get('channel') == 'CCHAT' and job['payload'].get('slack_id') == 'U3']) == 1
+
+
+def test_bot_join_enqueues_channel_reconciliation_without_membership_removal(joined):
+    _, store, *_ = joined
+    w = worker(joined)
+    w.event({'type': 'member_joined_channel', 'channel': 'CRANK1', 'user': 'UBOT'}, 'bot-join')
+    job = store.get('ledger_inbox', 'channel-reconcile:bot-join')
+    assert job['kind'] == 'channel_reconcile'
+    assert job['payload'] == {'channel': 'CRANK1', 'source': 'member_joined_channel'}
+    assert not store.get('ledger_outbox', 'bot-join:remove')
 
 
 def test_only_major_automatic_posts_coalesce_and_historical_posts_suppressed(joined):

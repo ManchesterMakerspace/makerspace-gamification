@@ -81,7 +81,7 @@ Bindings were checked against the adjacent Rails models. Legacy coverage that ca
 
 ## MQTT
 
-Consume existing `<collection>/<operation>` topics. The bridge sends `operation unix_timestamp {"document": ExtendedJSON}`; it provides neither a global sequence nor a stable event ID. The consumer hashes the received packet for duplicate scheduling and uses allowlisted identity hints to schedule a fresh Mongo read. Deletes, null `updateLookup` documents, catalog changes, and identity changes request broad reconciliation. Startup and five-minute reconciliation recover missed/reordered events, changed ownership, disconnected periods, and linked reversals.
+Consume existing `<collection>/<operation>` topics. The bridge sends `operation unix_timestamp {"document": ExtendedJSON}`; it provides neither a global sequence nor a stable event ID. The consumer hashes the received packet for duplicate scheduling and uses allowlisted identity hints to schedule a fresh Mongo read. Deletes, null `updateLookup` documents, catalog changes, and identity changes request broad reconciliation. Startup and thirteen-minute reconciliation recover missed/reordered events, changed ownership, disconnected periods, and linked reversals.
 
 The bridge excludes `^ledger_` in its Mongo watch pipeline and again before dispatch or publishing/logging. Ledger itself subscribes only to allowlisted source collections. It publishes minimal QoS-1, non-retained `ledger/v1/advancements` events with stable `event_id`, member ID, achievement, pinned ruleset, and time. Subscriber consumers must deduplicate by event ID. No message bodies, billing records, or conversation context are published.
 

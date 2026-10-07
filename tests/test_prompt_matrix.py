@@ -75,17 +75,19 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'In registered Ledger channels only' in root.find('channels').text
     assert 'reject stale ambient jobs before inference' in root.find('channels').text
     channels = root.find('channels').text
-    assert 'People counts need space/here & attendance terms' in channels
-    assert 'visited,came,check-in; never class registration' in channels
+    assert 'Attendance wording rejects class/web/station contexts' in channels
+    assert 'people wording needs complete space/here destination' in channels
     assert 'Python filters out seed/global quest examples' in channels
     assert 'post a generic ascent in the prior rank channel without hinting at the next' in channels
     assert 'then remove from the prior & welcome only after invite succeeds' in channels
     assert 'Python supplies stage-limited facts' in channels and 'rejects next-rank names' in channels
-    assert 'Never kick bot' in channels and 'log any kick failure,do not retry' in channels
+    assert 'Dedupe removals' in channels and 'skip bots before queue/kick' in channels
+    assert 'log human failure,no retry' in channels
     assert 'Slack 429 pauses all API calls for Retry-After' in channels
     assert 'Bind reserved JPEG claims to the consent generation' in channels
     assert 'saved member identity' in channels and 'terminal failure of the owning Slack event' in channels
     assert 'workspace authentication/scope failures' in channels
+    assert 'clear invalid Slack-file caches' in root.find('progression').text
     assert 'distinct specialized evidence attempt' in root.find('economy').text
     delegate = root.find("roles/role[@id='delegated_reviewer']").text
     assert 'stable logical ID' in delegate and 'actual-shop scope per operation' in delegate
