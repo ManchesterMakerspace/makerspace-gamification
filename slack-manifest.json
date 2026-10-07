@@ -77,7 +77,7 @@
         "groups:write",
         "im:history",
         "im:write",
-        "users:read",
+        "users:read","users.profile:read",
         "files:write",
         "files:read"
       ]

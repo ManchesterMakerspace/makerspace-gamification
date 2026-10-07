@@ -8,6 +8,17 @@ from ledger.views import home, home_processing
 from ledger.worker import Worker
 
 
+class SlackResponseLike:
+    """Minimal SlackResponse mapping interface used by WebClient endpoints."""
+    def __init__(self, data):
+        self.data = data
+        self.keys_read = []
+
+    def get(self, key, default=None):
+        self.keys_read.append(key)
+        return self.data.get(key, default)
+
+
 def working_job(store, key):
     job = store.get("ledger_outbox", key)
     job.update(status="working", lease="test-home", attempts=1)
@@ -17,6 +28,7 @@ def working_job(store, key):
 
 def test_first_home_open_publishes_processing_and_queues_one_build(env):
     ledger, store, _, composer, _, slack = env
+    slack.views_publish.side_effect = lambda user_id, view: SlackResponseLike({"ok": True, "view": view})
     worker = Worker(ledger, composer, slack)
     event = {"type": "app_home_opened", "tab": "home", "user": "U1"}
 
@@ -103,6 +115,7 @@ def test_home_build_publishes_rank_and_reuses_skill_tree_cache(joined):
     participant["import_pending"] = False
     ledger.store.put("ledger_participants", participant)
     slack.files_info.return_value = {"file": {"id": "F_RANK_ICON", "is_deleted": False}}
+    slack.views_publish.side_effect = lambda user_id, view: SlackResponseLike({"ok": True, "view": view})
     worker = Worker(ledger, composer, slack)
     enqueue_home_refresh(store, member_id, "home-test", "U1")
 
@@ -119,6 +132,34 @@ def test_home_build_publishes_rank_and_reuses_skill_tree_cache(joined):
     second_job = working_job(store, f"home:{member_id}:home-test-again")
     worker.publish_home(second_job)
     assert slack.files_upload_v2.call_count == first_upload_count
+
+
+def test_user_change_clears_and_refreshes_profile_photo_caption(joined):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+    store.put("ledger_homes", {"_id": member_id, "profile_photo_cksum": "old",
+        "profile_photo_description": "A previous photo", "profile_photo_described_at": "old-date"})
+    worker = Worker(ledger, composer, slack, bot_id="UBOT")
+    observed = []
+    worker._describe_home_profile_photo = lambda mid, uid: observed.append(
+        (mid, uid, store.get("ledger_homes", mid)))
+
+    worker.event({"type": "user_change", "user": {"id": "U1", "deleted": False, "is_bot": False}}, "profile-change")
+
+    assert observed[0][:2] == (member_id, "U1")
+    assert not {"profile_photo_cksum", "profile_photo_description", "profile_photo_described_at"} & set(observed[0][2])
+
+
+def test_profile_lookup_accepts_slack_response_mapping(joined):
+    ledger, store, _, composer, _, slack = joined
+    worker = Worker(ledger, composer, slack)
+    response = SlackResponseLike({"profile": {}})
+    slack.users_profile_get.return_value = response
+
+    worker._describe_home_profile_photo(str(oid(1)), "U1")
+
+    # The response's mapping API is consulted; a dict-only check returns early.
+    assert response.keys_read == ["profile"]
 
 
 def test_home_tree_cache_refreshes_when_content_changes_or_file_disappears(joined, monkeypatch):

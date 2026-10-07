@@ -16,7 +16,7 @@ from .messages import DEFAULT_MODEL, ChatAPI, Composer
 from .prompt_matrix import PromptMatrix
 from .slack_app import SlackUI, build_app
 from .sources import FIELDS, Sources
-from .storage import connect, connect_database, enqueue
+from .storage import connect, connect_database, enqueue, now
 from .slack_client import SlackCallDebugClient
 from .worker import Worker, ingest_mqtt
 
@@ -28,13 +28,15 @@ INTERACTIVE_KINDS = ["conversation", "guidance"]
 
 def outbox_filters(queue):
     """Disjoint lanes: slow routine delivery cannot claim interactive/results work."""
+    if queue == "homes":
+        return {"kinds": ["home_publish"]}
     if queue == "channels":
         return {"kinds": CHANNEL_KINDS}
     if queue == "results":
         return {"kinds": RESULT_KINDS}
     if queue == "interactive":
         return {"kinds": INTERACTIVE_KINDS}
-    return {"exclude": CHANNEL_KINDS + RESULT_KINDS + INTERACTIVE_KINDS}
+    return {"exclude": CHANNEL_KINDS + RESULT_KINDS + INTERACTIVE_KINDS + ["home_publish"]}
 
 
 def database_ledger():
@@ -173,6 +175,9 @@ def main():
     elif args.action == "reconcile":
         ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"manual:{time.time_ns()}", "reconcile", {}))
     elif args.action == "worker":
+        if args.queue in ("all", "inbox"):
+            ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"home-reconcile:startup:{time.time_ns()}",
+                "home_reconcile", {"source": "startup"}))
         connection = broker(ledger.store, subscribe=args.queue in ("all", "inbox")) if args.queue in ("all", "inbox", "outbox") else None
         worker = Worker(ledger, composer, client, connection, os.environ["SLACK_BOT_USER_ID"])
         if args.queue in ("all", "inbox"):
@@ -182,6 +187,7 @@ def main():
         def run(queue):
             last = 0
             last_ticket_scan = 0
+            last_home_scan = 0
             last_metrics = 0
             while not stop.is_set():
                 try:
@@ -195,6 +201,14 @@ def main():
                             ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"ticket-quest-reconcile:{int(time.time() // 3600)}", "ticket_quest_reconcile", {}))
                             last_ticket_scan = time.monotonic()
                         last = time.monotonic()
+                    if queue == "inbox" and time.monotonic() - last_home_scan >= 86400:
+                        ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox",
+                            f"home-reconcile:daily:{int(time.time() // 86400)}", "home_reconcile", {"source": "daily"}))
+                        last_home_scan = time.monotonic()
+                    if queue == "homes" and ledger.store.exists("ledger_outbox", {
+                            "kind": {"$ne": "home_publish"}, "status": "pending", "available_at": {"$lte": now()}}):
+                        stop.wait(0.25)
+                        continue
                     worked = worker.step("ledger_inbox", exclude=["engagement"]) if queue == "inbox" else worker.step("ledger_inbox", kinds=["engagement"]) if queue == "engagement" else worker.step(
                         "ledger_outbox", **outbox_filters(queue))
                     if not worked:
@@ -202,7 +216,7 @@ def main():
                 except Exception as exc:
                     logging.warning("Worker queue %s unavailable: %s", queue, type(exc).__name__)
                     stop.wait(2)
-        queues = ["inbox", "outbox", "channels", "engagement", "results", "interactive"] if args.queue == "all" else [args.queue]
+        queues = ["inbox", "outbox", "channels", "engagement", "results", "interactive", "homes"] if args.queue == "all" else [args.queue, "homes"] if args.queue == "outbox" else [args.queue]
         threads = [Thread(target=run, args=(q,), name=q, daemon=True) for q in queues]
         for thread in threads:
             thread.start()

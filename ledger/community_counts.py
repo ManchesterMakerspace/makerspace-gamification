@@ -1,0 +1,141 @@
+"""Public, deterministic aggregate answers about attendance and new members."""
+from datetime import datetime, time, timedelta, timezone
+import re
+from zoneinfo import ZoneInfo
+
+from pymongo.errors import PyMongoError
+
+
+NEW_YORK = ZoneInfo("America/New_York")
+PERIOD_PATTERNS = {
+    "right_now": re.compile(r"\b(?:right\s+now|currently|in\s+the\s+last\s+two\s+hours?)\b", re.I),
+    "today": re.compile(r"\btoday\b", re.I),
+    "yesterday": re.compile(r"\byesterday\b", re.I),
+    "this_week": re.compile(r"\b(?:this\s+week|week\s+to\s+date|week\s+so\s+far)\b", re.I),
+    "this_month": re.compile(r"\b(?:this\s+month|month\s+to\s+date|month\s+so\s+far)\b", re.I),
+}
+SPACE_QUESTION = re.compile(
+    r"\b(?:how\s+busy|how\s+many\s+(?:people|visitors?|check-?ins?)|"
+    r"(?:space|makerspace)\s+(?:busy|attendance|visitors?)|"
+    r"(?:busy|crowded)\s+(?:is|was|has)|attendance\s+(?:today|yesterday|this))\b", re.I)
+MEMBER_QUESTION = re.compile(
+    r"\bhow\s+many\b.{0,80}\bnew\s+members?\b|"
+    r"\bnew\s+members?\b.{0,80}\b(?:join(?:ed)?|sign\s*ups?|added)\b", re.I)
+
+
+def recognize(text):
+    """Return a fixed (subject, period) request; ambiguous requests are ignored."""
+    if not isinstance(text, str) or len(text) > 6000:
+        return None
+    space = bool(SPACE_QUESTION.search(text))
+    members = bool(MEMBER_QUESTION.search(text))
+    if space == members:
+        return None
+    periods = [name for name, pattern in PERIOD_PATTERNS.items() if pattern.search(text)]
+    if len(periods) != 1:
+        return None
+    period = periods[0]
+    subject = "space" if space else "members"
+    if subject == "members" and period == "right_now":
+        return None
+    return subject, period
+
+
+def is_count_question(text):
+    """Identify count topics even when the requested period needs clarification."""
+    if not isinstance(text, str) or len(text) > 6000:
+        return False
+    return bool(SPACE_QUESTION.search(text) or MEMBER_QUESTION.search(text))
+
+
+def clarification(text):
+    space = bool(SPACE_QUESTION.search(text))
+    members = bool(MEMBER_QUESTION.search(text))
+    periods = "today, yesterday, this week, or this month so far"
+    if space:
+        periods = "the last two hours, today, yesterday, this week, or this month so far"
+    if space and members:
+        return ("I can count check-in UIDs for the last two hours or a calendar period, and new members for "
+                "today, yesterday, this week, or this month so far. Which period would you like?")
+    return f"I can count {('check-in UIDs' if space else 'new members')} for {periods}. Which period would you like?"
+
+
+def bounds(period, instant=None):
+    """Return a half-open UTC range using New York local calendar boundaries."""
+    instant = instant or datetime.now(timezone.utc)
+    local_now = instant.astimezone(NEW_YORK)
+    if period == "right_now":
+        start = instant - timedelta(hours=2)
+        end = instant
+    elif period in ("today", "yesterday"):
+        day = local_now.date() - (timedelta(days=1) if period == "yesterday" else timedelta())
+        local_start = datetime.combine(day, time.min, NEW_YORK)
+        local_end = local_start + timedelta(days=1)
+        start, end = local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
+    elif period == "this_week":
+        day = local_now.date() - timedelta(days=local_now.weekday())
+        start = datetime.combine(day, time.min, NEW_YORK).astimezone(timezone.utc)
+        end = instant
+    elif period == "this_month":
+        start = datetime.combine(local_now.date().replace(day=1), time.min, NEW_YORK).astimezone(timezone.utc)
+        end = instant
+    else:
+        raise ValueError("Unsupported community count period")
+    return start, end
+
+
+def count(sources, subject, period, instant=None):
+    """Return only a count and period label from a fixed source aggregation."""
+    if subject not in ("space", "members") or period not in PERIOD_PATTERNS:
+        raise ValueError("Unsupported community count request")
+    if subject == "members" and period == "right_now":
+        raise ValueError("New-member counts do not support a rolling period")
+    start, end = bounds(period, instant)
+    if subject == "space":
+        start_ms, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+        start_s, end_s = int(start.timestamp()), int(end.timestamp())
+        pipeline = [
+            {"$match": {"uid": {"$type": "string", "$ne": ""}, "$or": [
+                {"timeOf": {"$gte": start_ms, "$lt": end_ms}},
+                {"timeOf": {"$gte": start_s, "$lt": end_s}},
+                {"timeOf": {"$gte": start, "$lt": end}},
+            ]}},
+            {"$project": {"_id": 0, "uid": 1}},
+            {"$group": {"_id": "$uid"}},
+            {"$count": "count"},
+        ]
+        collection = "checkins"
+    elif subject == "members":
+        pipeline = [
+            {"$match": {"merged_at": None, "startDate": {"$gte": start, "$lt": end}}},
+            {"$project": {"_id": 0, "startDate": 1}},
+            {"$count": "count"},
+        ]
+        collection = "members"
+    else:
+        raise ValueError("Unsupported community count subject")
+    rows = sources._aggregate(collection, pipeline, timeout_ms=2000)
+    return {"subject": subject, "period": period, "count": int(rows[0]["count"]) if rows else 0}
+
+
+def format_answer(result):
+    number = result["count"]
+    period = result["period"]
+    if result["subject"] == "space":
+        if period == "right_now":
+            return (f"In the last two hours, {number:,} unique check-in UIDs were recorded. "
+                    "This is a recent-visitor estimate, not a live occupancy count.")
+        label = {"today": "today", "yesterday": "yesterday", "this_week": "this week so far",
+                 "this_month": "this month so far"}[period]
+        return f"There were {number:,} unique check-in UIDs recorded {label}."
+    label = {"today": "today", "yesterday": "yesterday", "this_week": "this week so far",
+             "this_month": "this month so far"}[period]
+    return f"{number:,} new member records have a start date {label}. Merged duplicate records are excluded."
+
+
+def safe_count(sources, subject, period, instant=None):
+    """Return None on source failures; never expose raw database errors."""
+    try:
+        return count(sources, subject, period, instant)
+    except (PyMongoError, OSError, TimeoutError, ValueError, KeyError, TypeError):
+        return None

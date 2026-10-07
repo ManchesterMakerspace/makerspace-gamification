@@ -641,6 +641,26 @@ class TicketQuests:
         if not quest:
             return
         image = self._download_jpeg(response)
+        image_description = response.get("image_description")
+        if image and not image_description:
+            try:
+                from .image_captioning import describe_image
+                image_description = describe_image(self.worker.composer.api, image, "image/jpeg")
+                def save_description(s):
+                    current = s.get("ledger_evidence", response["_id"])
+                    if current and not current.get("image_description"):
+                        current["image_description"] = image_description
+                        current["image_description_at"] = now()
+                        s.put("ledger_evidence", current)
+                    return current
+                response = self.store.atomic(save_description) or response
+                image_description = response.get("image_description") or image_description
+                log.info("ticket quest image description saved response=%s", response["_id"])
+            except Exception as exc:
+                # Captioning adds helpful alt text, but must never block delivery.
+                image_description = None
+                log.info("ticket quest image description unavailable response=%s error_type=%s",
+                         response["_id"], type(exc).__name__)
         filename = self._image_filename(quest, response)
         try:
             drive_url = self._upload_drive(image, filename) if image else None
@@ -674,8 +694,11 @@ class TicketQuests:
                 files = self._thread_file_list(fix_channel, file_thread)
                 found = next((f for f in files if f.get("name") == filename), None)
                 if not found:
-                    uploaded = self.worker.slack.files_upload_v2(file_uploads=[{"file": BytesIO(image), "filename": filename,
-                        "title": filename}], channel=fix_channel, thread_ts=file_thread)
+                    upload = {"file": BytesIO(image), "filename": filename, "title": filename}
+                    if image_description:
+                        upload["alt_txt"] = image_description
+                    uploaded = self.worker.slack.files_upload_v2(file_uploads=[upload],
+                        channel=fix_channel, thread_ts=file_thread)
                     found = next(iter(uploaded.get("files") or []), None)
                 if found:
                     image_url = drive_url or found.get("permalink")
@@ -730,23 +753,40 @@ class TicketQuests:
                     if not ticket:
                         raise ValueError("Ticket no longer exists")
                     revision = int(ticket.get("revision", 0))
+                    notes = self._build_event_notes(ticket["_id"], quest, response, image_url,
+                        revision, actor, note_id, getattr(self.worker, "bot_id", None))
                     changed = db.fix_tickets.update_one({"_id": ticket["_id"], "revision": revision},
-                        {"$inc": {"revision": 1}, "$set": {"updated_at": now()}}, session=s)
+                        {"$inc": {"revision": len(notes)}, "$set": {"updated_at": now()}}, session=s)
                     if changed.modified_count != 1:
                         raise RuntimeError("Ticket revision changed concurrently")
-                    note = {"_id": note_id, "ticket_id": ticket["_id"], "actor_id": actor,
-                        "kind": "note", "note": response["text"], "image_url": image_url,
-                        "revision": revision + 1, "created_at": now(), "field_changes": {}, "recipients": [],
-                        "unscoped_staff_notification": False, "central_enabled": False, "delivered": {},
-                        "delivery_attempts": {}, "completed_at": now()}
-                    if image_url is None:
-                        note.pop("image_url")
-                    db.fix_ticket_events.insert_one(note, session=s)
-                    return revision + 1
+                    for note in notes:
+                        db.fix_ticket_events.insert_one(note, session=s)
+                    return revision + len(notes)
                 session.with_transaction(transaction)
             self.store.atomic(lambda s: self._mark_note_written(s, response["_id"]))
         except (PyMongoError, ValueError, TypeError, RuntimeError, AttributeError, KeyError) as exc:
             log.info("ticket quest note skipped response=%s error_type=%s", response["_id"], type(exc).__name__)
+
+    @staticmethod
+    def _build_event_notes(ticket_id, quest, response, image_url, revision, actor, note_id, bot_id):
+        """Build the member response and optional generated caption as separate events."""
+        created = now()
+        notes = [{"_id": note_id, "ticket_id": ticket_id, "actor_id": actor, "kind": "note",
+            "note": response["text"], "revision": revision + 1, "created_at": created,
+            "field_changes": {}, "recipients": [], "unscoped_staff_notification": False,
+            "central_enabled": False, "delivered": {}, "delivery_attempts": {}, "completed_at": created}]
+        if image_url is not None:
+            notes[0]["image_url"] = image_url
+        caption = response.get("image_description")
+        if caption:
+            caption_id = ObjectId(sha1((quest["_id"] + ":" + response["_id"] + ":caption").encode()).digest()[:12])
+            notes.append({"_id": caption_id, "ticket_id": ticket_id, "actor_id": None,
+                "actor_slack_id": bot_id, "note_role": "ledger", "kind": "note",
+                "note": "Image description (automatically generated): " + caption,
+                "revision": revision + 2, "created_at": created, "field_changes": {}, "recipients": [],
+                "unscoped_staff_notification": False, "central_enabled": False, "delivered": {},
+                "delivery_attempts": {}, "completed_at": created})
+        return notes
 
     def _thread_file_list(self, channel, thread_ts):
         try:

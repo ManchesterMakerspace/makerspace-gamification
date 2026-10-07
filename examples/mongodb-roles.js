@@ -21,7 +21,7 @@ var LedgerMongoRoles = (() => {
     "ledger_participants", "ledger_relationships", "ledger_rulesets",
     "ledger_catalog", "ledger_evidence", "ledger_awards", "ledger_quests",
     "ledger_projects", "ledger_channels", "ledger_message_templates",
-    "ledger_inbox", "ledger_outbox", "ledger_context", "ledger_files",
+    "ledger_inbox", "ledger_outbox", "ledger_context", "ledger_files", "ledger_homes",
   ];
   // Exactly the collections where MongoStore.indexes() calls create_index().
   const indexedCollections = new Set([
