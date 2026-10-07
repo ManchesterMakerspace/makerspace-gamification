@@ -20,7 +20,7 @@ from .prompt_library import (AUDIENCES, METRICS, TYPES, library_template, normal
 DEFAULT_MODEL = "nvidia/Qwen3.8-27B-NVFP4"
 PROMPT_RECENT_COUNT = 2
 log = logging.getLogger(__name__)
-SHORT_PROFILES = {"receipt": 128, "summary": 128, "guidance": 256}
+SHORT_PROFILES = {"receipt": 128, "summary": 128, "guidance": 256, "community_count": 96}
 
 
 class ChatTransportError(OSError):
@@ -80,7 +80,8 @@ def _breaker_for(api):
 def _generation_profile(matrix, name, max_tokens=None):
     if name not in SHORT_PROFILES:
         raise ValueError("Unknown short generation profile")
-    sections = ["identity", "authority"] + (["kudos"] if name == "receipt" else []) + ["privacy", "response"]
+    sections = (["identity", "authority", "channels", "privacy", "response"] if name == "community_count" else
+                ["identity", "authority"] + (["kudos"] if name == "receipt" else []) + ["privacy", "response"])
     # The snapshot has already passed full XML validation. Preserve its exact
     # section text and CDATA in canonical document order, rather than reserializing.
     header = re.search(r"<prompt_matrix\b[^>]*>", matrix["text"])

@@ -11,6 +11,7 @@ from pymongo import timeout
 from .domain import Denied
 from .progress import progress
 from .sources import object_id
+from .sponsorships import SPONSORSHIPS_TOOL
 from .source_reads import CATALOG_FIELDS
 from .storage import now
 from .read_options import optimized_reads
@@ -41,6 +42,7 @@ class QueryTools:
     def __init__(self, ledger, member, private=True):
         self.l, self.member, self.private = ledger, member, private
         self.started, self.calls = time.monotonic(), 0
+        self.sponsorship_report = None
 
     def call(self, name, arguments):
         self.calls += 1
@@ -57,6 +59,21 @@ class QueryTools:
                 if not self.private:
                     facts.pop("blockers", None)
                 return facts
+            if name == "my_sponsorships":
+                if not self.private:
+                    raise Denied("Sponsorship history is available only in a private DM.")
+                self.l.require(self.member)
+                if (not isinstance(arguments, dict) or set(arguments) - {"mode", "invitee"}
+                        or arguments.get("mode") not in ("summary", "list", "detail")
+                        or ("invitee" in arguments and (not isinstance(arguments["invitee"], str)
+                            or not arguments["invitee"].strip() or len(arguments["invitee"]) > 100))
+                        or (arguments.get("mode") != "detail" and "invitee" in arguments)
+                        or (arguments.get("mode") == "detail" and "invitee" not in arguments)):
+                    raise ValueError("Choose summary/list, or detail with one invitee.")
+                from .sponsorships import build_report, tool_result
+                self.sponsorship_report = build_report(self.l, self.member, arguments["mode"],
+                                                         invitee=arguments.get("invitee"))
+                return tool_result(self.sponsorship_report)
             if name != "query_makerspace":
                 raise ValueError("Unknown read-only tool.")
             return self.query(arguments)

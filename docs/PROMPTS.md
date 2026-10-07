@@ -1,12 +1,14 @@
 # The Ledger prompt library
 
-The bot ships with **23 JSON files and 79 prompt variations** in [`ledger/prompts`](../ledger/prompts). Each file owns one message type. Each variation pairs a `system` prompt with a `user` prompt and identifies its personality and attitude. The default voices are a measured archivist, a practical mentor, and a dry-witted grimoire. Sensitive messages such as opt-out confirmations and corrections stay sober in all three voices.
+The bot ships one JSON file in [`ledger/prompts`](../ledger/prompts) for every message type named by `TYPES` in `ledger/prompt_library.py`. The total is intentionally not fixed: inventory validation requires an exact filename/type match whenever sets are added or removed. Each variation pairs a `system` prompt with a `user` prompt and identifies its personality and attitude. The default voices are a measured archivist, a practical mentor, and a dry-witted grimoire. Sensitive messages such as opt-out confirmations and corrections stay sober in all three voices.
 
 Every generation also receives the shared [XML/Markdown Prompt Matrix Template](PROMPT_MATRIX.md). It defines game rules, role limits, personality, privacy, and DM/channel conduct. `LEDGER_PROMPT_MATRIX_DOC_URL` optionally supplies its contents from a Google Doc on startup or admin reload. The matrix and its content hash are saved with each new prompt reservation; changing it does not reroll voices or rewrite reserved deliveries.
 
 For each new delivery, the composer excludes the **two most recently selected variation IDs** and randomly selects a complete pair with equal probability among the remaining choices. One shared history covers channel announcements, public kudos, project posts, and channel conversation replies, regardless of the member being discussed. Each recipient has a separate DM history covering all message types and participation states. A private message does not consume shared history or another member's history.
 
 History uses stable variation IDs across message types and template publications, so the shipped `archivist`, `mentor`, and `wry_grimoire` voices do not repeat on consecutive new compositions within a scope. Reuse an ID across types when it represents the same voice; preserve it when revising that voice. If a custom set has too few alternatives, the oldest exclusion is relaxed first: two variations alternate, while a legacy single-variation template necessarily repeats. Removed IDs never prevent selection.
+
+Sponsor reports reuse the existing `status` variations, and private sponsorship questions reuse `conversation`; no additional message type is required. Both paths accept only a short fact-free opener. Python appends the saved authoritative table or detail, and retries reuse the reserved variation, composed opener and report snapshot.
 
 The history update and chosen prompt/settings snapshot are reserved together in the delivery job's Mongo transaction **before** calling the AI. Concurrent workers therefore see reserved choices, and a restarted worker resumes its reserved pair even if templates changed. The selected text, variation ID, personality, attitude, scope, and template version are then saved before Slack delivery. Delivery retries reuse that saved composition, including a saved canned fallback; they do not advance history or call the AI again. A crash before text is saved may require generation again, using the same reserved prompts.
 
@@ -22,7 +24,7 @@ This library changes narration, not delivery policy. Automatic shared announceme
 | Learning and service | `checkout_earned.json`, `checkout_granted.json`, `volunteer_credit.json`, `challenge.json`, `first_build.json`, `mentoring.json`, `develop_mentor.json` |
 | Major achievements | `rank_up.json`, `shop_complete.json`, `boss.json`, `stewardship.json` |
 | Community recognition | `kudos.json`, `recruitment.json` |
-| Conversation and collaboration | `conversation.json`, `status.json`, `delivery.json`, `project.json`, `quest.json`, `correction.json` |
+| Conversation and collaboration | `conversation.json`, `community_count.json`, `status.json`, `delivery.json`, `project.json`, `quest.json`, `correction.json` |
 
 ## Editing a file
 
@@ -70,6 +72,7 @@ Placeholders work in **both** `system` and `user`. String values are inserted as
 | `dm_status`, `public_status` | Recorded destination status; public status is `not requested` when sharing is off |
 | `xp_result` | Once-only kudos XP result: `17 XP awarded` or `0 XP`; a receipt never awards XP again |
 | `sponsor_full_name`, `sponsor_slack_id` | Invitation sponsor's projected name and validated Slack mapping |
+| `count`, `timeframe`, `estimate_note` | Authoritative aggregate space-use total, approved period wording, and required rolling-window caveat for `community_count` only |
 | `summary` | Application-authored summary, when supplied by the originating message |
 | `message_type`, `audience` | Current routing type and audience |
 | `audience_instruction` | Trusted audience instructions from the template, inserted as instructions rather than quoted member data |

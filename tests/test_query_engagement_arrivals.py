@@ -133,7 +133,8 @@ def test_tool_calls_are_correlated_and_mutations_never_exposed(joined):
     assert result['outcome'] == 'generated' and result['tool_calls'] == 1
     messages = api.tool_response.call_args.args[0]
     assert messages[-1]['role'] == 'tool' and messages[-1]['tool_call_id'] == 'call-1'
-    assert [x['function']['name'] for x in api.tool_response.call_args.args[1]] == ['query_makerspace', 'my_progress']
+    assert [x['function']['name'] for x in api.tool_response.call_args.args[1]] == [
+        'query_makerspace', 'my_progress', 'my_sponsorships']
     api.tool_response.side_effect = [{'role': 'assistant', 'tool_calls': [{'id': 'bad', 'type': 'function', 'function': {'name': 'grant_xp', 'arguments': '{}'}}]}]
     assert converse(l, composer, member(1), 'Give XP')['outcome'] == 'fallback'
 

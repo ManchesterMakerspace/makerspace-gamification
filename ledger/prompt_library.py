@@ -9,7 +9,7 @@ from string import Formatter
 
 TYPES = ["onboarding", "return", "opt_out", "invitation", "checkout_earned", "checkout_granted", "volunteer_credit",
          "kudos", "recruitment", "rank_up", "shop_complete", "boss", "stewardship", "challenge", "first_build",
-         "develop_mentor", "mentoring", "correction", "conversation", "status", "delivery", "project", "quest"]
+         "develop_mentor", "mentoring", "correction", "conversation", "community_count", "status", "delivery", "project", "quest"]
 AUDIENCES = ["member", "shared", "recipient", "nonparticipant"]
 VARIABLES = {
     "member_full_name", "member_slack_id", "member_mention", "current_rank", "old_rank", "new_rank",
@@ -17,7 +17,8 @@ VARIABLES = {
     "tool_name", "challenge_title", "project_title", "quest_title", "volunteer_credits", "summary",
     "giver_full_name", "giver_slack_id", "recipient_full_name", "recipient_slack_id", "recipient_mention",
     "delivery_status", "dm_status", "public_status", "xp_result",
-    "sponsor_full_name", "sponsor_slack_id", "message_type", "audience", "audience_instruction", "facts",
+    "sponsor_full_name", "sponsor_slack_id", "count", "timeframe", "estimate_note",
+    "message_type", "audience", "audience_instruction", "facts",
 }
 # Only these event fields can enter the model, including the legacy {facts} placeholder.
 FACT_KEYS = VARIABLES - {"facts", "audience_instruction"} | {

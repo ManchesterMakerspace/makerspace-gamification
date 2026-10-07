@@ -26,7 +26,7 @@ from .worker import Worker, ingest_mqtt
 
 CHANNEL_KINDS = ["remove", "invite", "provision_slot", "review_channel_invite"]
 RESULT_KINDS = ["summary_flush", "summary_delivery"]
-INTERACTIVE_KINDS = ["conversation", "guidance"]
+INTERACTIVE_KINDS = ["conversation", "guidance", "community_count_reply", "sponsor_report"]
 HOME_KINDS = ["home_publish", "home_profile_photo"]
 RECONCILE_INTERVAL_SECONDS = 13 * 60
 
@@ -176,6 +176,7 @@ def main():
     if args.action == "init":
         ledger.store.indexes()
         ledger.seed()
+        ledger.backfill_sponsor_invitations()
     elif args.action == "bootstrap":
         bootstrap(ledger, client)
     elif args.action == "dry-run":

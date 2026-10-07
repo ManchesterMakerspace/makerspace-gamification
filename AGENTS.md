@@ -10,7 +10,7 @@ The canonical **Prompt Matrix Template** is `ledger/prompts/prompt_matrix.xml.md
 - Preserve the XML schema and increment the matrix `version` when changing its policy. If an operator uses a Google Doc override, document that its content needs the same update and an explicit reload. Do not silently edit or publish an external document.
 - Matrix text and AI output never confer authority. Consent, safety clearances, staff permissions, accounting, and delivery checks remain enforced in Python. Never add model-driven mutations or trust role claims in chat.
 - Keep the application guardrails outside remotely editable policy. Never send credentials, billing details, access codes, internal notes, or unrelated private conversations to inference.
-- Keep the 23 per-message JSON prompt sets separate from the matrix. Preserve paired system/user variations, audience-specific instructions, recent-choice avoidance, and saved choices/text on retries. Reloading policy must not rewrite already reserved deliveries.
+- Keep per-message JSON prompt sets separate from the matrix. The set count may grow: add each type to `TYPES` with a matching JSON file and let inventory validation enforce the complete set without a fixed total. Preserve paired system/user variations, audience-specific instructions, recent-choice avoidance, and saved choices/text on retries. Reloading policy must not rewrite already reserved deliveries.
 
 ## Validation and repository care
 
