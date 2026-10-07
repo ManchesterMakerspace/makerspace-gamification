@@ -641,6 +641,21 @@ class TicketQuests:
         if not quest:
             return
         image = self._download_jpeg(response)
+        image_description = response.get("image_description")
+        if image and not image_description:
+            from .image_captioning import describe_image
+            image_description = describe_image(self.worker.composer.api, image, "image/jpeg")
+            def save_description(s):
+                current = s.get("ledger_evidence", response["_id"])
+                if current and not current.get("image_description"):
+                    current["image_description"] = image_description
+                    current["image_description_at"] = now()
+                    s.put("ledger_evidence", current)
+                return current
+            response = self.store.atomic(save_description) or response
+            image_description = response.get("image_description") or image_description
+            log.info("ticket quest image description saved response=%s description=%s",
+                     response["_id"], image_description)
         filename = self._image_filename(quest, response)
         try:
             drive_url = self._upload_drive(image, filename) if image else None
@@ -674,8 +689,11 @@ class TicketQuests:
                 files = self._thread_file_list(fix_channel, file_thread)
                 found = next((f for f in files if f.get("name") == filename), None)
                 if not found:
-                    uploaded = self.worker.slack.files_upload_v2(file_uploads=[{"file": BytesIO(image), "filename": filename,
-                        "title": filename}], channel=fix_channel, thread_ts=file_thread)
+                    upload = {"file": BytesIO(image), "filename": filename, "title": filename}
+                    if image_description:
+                        upload["alt_txt"] = image_description
+                    uploaded = self.worker.slack.files_upload_v2(file_uploads=[upload],
+                        channel=fix_channel, thread_ts=file_thread)
                     found = next(iter(uploaded.get("files") or []), None)
                 if found:
                     image_url = drive_url or found.get("permalink")
@@ -734,8 +752,11 @@ class TicketQuests:
                         {"$inc": {"revision": 1}, "$set": {"updated_at": now()}}, session=s)
                     if changed.modified_count != 1:
                         raise RuntimeError("Ticket revision changed concurrently")
+                    note_text = response["text"]
+                    if response.get("image_description"):
+                        note_text += "\n\nImage description: " + response["image_description"]
                     note = {"_id": note_id, "ticket_id": ticket["_id"], "actor_id": actor,
-                        "kind": "note", "note": response["text"], "image_url": image_url,
+                        "kind": "note", "note": note_text, "image_url": image_url,
                         "revision": revision + 1, "created_at": now(), "field_changes": {}, "recipients": [],
                         "unscoped_staff_notification": False, "central_enabled": False, "delivered": {},
                         "delivery_attempts": {}, "completed_at": now()}

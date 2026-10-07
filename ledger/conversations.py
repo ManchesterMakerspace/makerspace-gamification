@@ -78,6 +78,44 @@ def self_progress_question(text):
     return bool(re.search(r"\b(my|i|me)\b", text) and re.search(r"\b(next rank|rank up|rank-up|progress|remaining xp|need to advance|need to level|level up|promotion|my stats)\b", text))
 
 
+def appearance_request(ledger, requester, text):
+    """Resolve an appearance question only to the caller or an opted-in member."""
+    if not isinstance(text, str):
+        return None
+    self_request = bool(re.search(
+        r"\b(?:what\s+do\s+you\s+think\s+i\s+look\s+like|what\s+do\s+i\s+look\s+like|how\s+do\s+i\s+look(?:\s+like)?)\b",
+        text, re.I))
+    if self_request:
+        return {"member_id": requester if ledger.active(requester) else None}
+    match = re.search(r"\bwhat\s+(?:do\s+you\s+think\s+)?does\s+(.+?)\s+look\s+like\b", text, re.I)
+    if not match:
+        match = re.search(r"\bwhat\s+do\s+you\s+think\s+(.+?)\s+looks\s+like\b", text, re.I)
+    if not match:
+        return None
+    target = match.group(1).strip().strip(" ?!.,:;")
+    mention = re.fullmatch(r"<@([UW][A-Z0-9]+)(?:\|[^>]+)?>(?:'s)?", target)
+    if mention:
+        identity = ledger.sources.identity(mention.group(1))
+        member_id = str(identity["_id"]) if identity and ledger.active(str(identity["_id"])) else None
+        return {"member_id": member_id}
+    normalized = re.sub(r"[^\w ]", "", target).casefold().split()
+    if not normalized:
+        return {"member_id": None}
+    name = " ".join(normalized)
+    participants = ledger.store.select("ledger_participants", {"opted_in": True}, projection={"_id": 1})
+    identities = ledger.sources.identities([row["_id"] for row in participants])
+    matches = []
+    for member_id, identity in identities.items():
+        if not ledger.active(member_id):
+            continue
+        full_name = re.sub(r"[^\w ]", "", " ".join(
+            str(identity.get(key) or "").strip() for key in ("firstname", "lastname"))).casefold().split()
+        first_name = re.sub(r"[^\w ]", "", str(identity.get("firstname") or "")).casefold().split()
+        if " ".join(full_name) == name or " ".join(first_name) == name:
+            matches.append(member_id)
+    return {"member_id": matches[0] if len(matches) == 1 else None}
+
+
 def converse(ledger, composer, member, request, history=(), private=True, selection=None, *, use_tools=True, ambient=False):
     ledger.require_member(member)
     context = QueryTools(ledger, member, private)
