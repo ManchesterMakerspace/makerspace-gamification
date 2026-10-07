@@ -60,7 +60,7 @@ class Worker:
             slack_error = exc.response.get("error") if isinstance(exc, SlackApiError) else None
             # Only known protocol codes belong in diagnostics, never arbitrary API text.
             safe_slack_errors = {"invalid_auth", "not_authed", "token_revoked", "account_inactive", "missing_scope",
-                                 "invalid_blocks",
+                                 "invalid_blocks", "invalid_arguments",
                                  "channel_not_found", "not_in_channel", "user_not_found", "ratelimited", "no_permission"}
             log.warning("job %s failed: %s code=%s slack_error=%s", job["_id"], type(exc).__name__,
                         code if isinstance(code, int) else "none", slack_error if isinstance(slack_error, str) and slack_error in safe_slack_errors else "none")
@@ -138,6 +138,43 @@ class Worker:
             cursor = response.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 return members
+
+    def _slack_user_is_cached_bot(self, slack_id):
+        if not slack_id or slack_id in (self.bot_id, "USLACKBOT"):
+            return True
+        return (self.store.get("ledger_catalog", f"slack-user:{slack_id}") or {}).get("bot") is True
+
+    def _slack_user_is_bot(self, slack_id):
+        """Identify and durably remember Slack bot identities before cleanup."""
+        if self._slack_user_is_cached_bot(slack_id):
+            return True
+        cache_key = f"slack-user:{slack_id}"
+        response = self.slack.users_info(user=slack_id)
+        user = response.get("user") if callable(getattr(response, "get", None)) else None
+        if not isinstance(user, dict):
+            raise RuntimeError("Slack did not return user details during channel reconciliation")
+        is_bot = bool(user.get("is_bot") or user.get("is_app_user"))
+        if is_bot:
+            self.store.atomic(lambda s: s.put("ledger_catalog", {
+                "_id": cache_key, "kind": "slack_user", "slack_id": slack_id,
+                "bot": True, "at": now()}))
+        return is_bot
+
+    @staticmethod
+    def _enqueue_unauthorized_removal(store, channel, slack_id, member_id=None, joined=False):
+        """Coalesce one unauthorized presence into one reusable cleanup record."""
+        key = f"unauthorized:{channel['_id']}:{slack_id}"
+        payload = {"slack_id": slack_id, "channel": channel["channel_id"]}
+        if member_id:
+            payload["member_id"] = member_id
+        existing = store.get("ledger_outbox", key)
+        if not existing:
+            enqueue(store, "ledger_outbox", key, "remove", payload)
+            return
+        if joined and existing.get("status") not in ("pending", "working"):
+            stamp = now()
+            store.put("ledger_outbox", {"_id": key, "kind": "remove", "payload": payload,
+                "status": "pending", "attempts": 0, "created_at": stamp, "available_at": stamp})
 
     def valid_identity(self, member_id):
         slack_id = self.ledger.sources.slack_id(member_id)
@@ -230,6 +267,88 @@ class Worker:
                 and published.get("callback_id") == submitted.get("callback_id")
                 and published.get("private_metadata") == submitted.get("private_metadata"))
 
+    @staticmethod
+    def _invalid_home_slack_file_blocks(exc):
+        """Return block indexes Slack explicitly rejected as invalid files."""
+        response = getattr(exc, "response", None)
+        data = getattr(response, "data", None)
+        if not isinstance(data, dict) and callable(getattr(response, "get", None)):
+            data = response
+        if not isinstance(data, dict) or data.get("error") != "invalid_arguments":
+            return []
+        metadata = data.get("response_metadata") or {}
+        messages = metadata.get("messages") if isinstance(metadata, dict) else []
+        indexes = []
+        for message in messages if isinstance(messages, list) else []:
+            match = re.search(r"invalid slack file \[json-pointer:view/blocks/(\d+)/slack_file\.id/slack_file\]",
+                              str(message), re.I)
+            if match:
+                indexes.append(int(match.group(1)))
+        return sorted(set(indexes))
+
+    def _discard_invalid_home_slack_files(self, job, member_id, view, exc):
+        """Invalidate only cached files named by Slack's Home validation error."""
+        indexes = self._invalid_home_slack_file_blocks(exc)
+        if not indexes:
+            return False
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", {}) or {}
+        request_id = next((value for key, value in headers.items()
+                           if str(key).lower().replace("-", "_") == "x_slack_req_id"), None)
+        blocks = view.get("blocks") if isinstance(view, dict) else None
+        for index in indexes:
+            block = blocks[index] if isinstance(blocks, list) and 0 <= index < len(blocks) else {}
+            slack_file = block.get("slack_file") if isinstance(block, dict) else None
+            file_id = slack_file.get("id") if isinstance(slack_file, dict) else None
+            alt_text = block.get("alt_text") if isinstance(block, dict) else None
+            expected_asset_key = None
+            if isinstance(alt_text, str) and alt_text.startswith("Rank icon for "):
+                participant = self.ledger.participant(member_id) or {}
+                expected_asset_key = f"rank_icon:{participant.get('rank')}"
+            elif alt_text == "Your current skill paths and clearance states":
+                expected_asset_key = f"skill_tree:{member_id}"
+            cached_rows = self.store.select("ledger_files", {"file_id": file_id}) if file_id else []
+            asset_keys = sorted({row["_id"] for row in cached_rows if isinstance(row.get("_id"), str)})
+            if expected_asset_key and not asset_keys:
+                expected = self.store.get("ledger_files", expected_asset_key)
+                if expected and expected.get("file_id") == file_id:
+                    asset_keys.append(expected_asset_key)
+            for asset_key in asset_keys:
+                def discard(s, key=asset_key, expected=file_id):
+                    row = s.get("ledger_files", key)
+                    if row and row.get("file_id") == expected:
+                        row.update(file_id=None, invalidated_at=now(),
+                                   invalidation_reason="views_publish_invalid_slack_file",
+                                   invalidated_slack_request_id=request_id,
+                                   invalidated_home_job=job["_id"])
+                        s.put("ledger_files", row)
+                self.store.atomic(discard)
+            invalidated = bool(asset_keys)
+            diagnostic = {"available": False}
+            if isinstance(file_id, str) and file_id:
+                try:
+                    info = self.slack.files_info(file=file_id)
+                    file = info.get("file") if callable(getattr(info, "get", None)) else None
+                    if isinstance(file, dict):
+                        diagnostic = {key: file.get(key) for key in
+                            ("id", "mimetype", "filetype", "mode", "size", "is_external",
+                             "is_public", "public_url_shared", "display_as_bot", "is_deleted")}
+                        diagnostic["available"] = file.get("id") == file_id and not file.get("is_deleted")
+                except SlackApiError as probe:
+                    probe_response = getattr(probe, "response", None)
+                    probe_data = getattr(probe_response, "data", probe_response)
+                    diagnostic = {"available": False, "probe_error":
+                        probe_data.get("error") if callable(getattr(probe_data, "get", None)) else type(probe).__name__,
+                        "probe_status": getattr(probe_response, "status_code", None)}
+                except Exception as probe:
+                    diagnostic = {"available": False, "probe_error": type(probe).__name__}
+            log.error("Home publish rejected Slack file job=%s member=%s block_index=%s file_id=%s "
+                      "asset_key=%s cache_invalidated=%s slack_request_id=%s file_info=%s",
+                      job["_id"], member_id, index, file_id or "missing",
+                      ",".join(asset_keys) or expected_asset_key or "unknown",
+                      invalidated, request_id or "unknown", json.dumps(diagnostic, default=str, sort_keys=True))
+        return True
+
     def publish_home(self, job):
         payload = job["payload"]
         member_id = payload["member_id"]
@@ -263,7 +382,11 @@ class Worker:
         rendered_rank = rendered_participant.get("rank") if rendered_participant else None
         view = home(self.ledger, member_id, rank_icon_file_id=rank_icon_file_id,
                     skill_tree_file_id=skill_tree_file_id)
-        result = self.slack.views_publish(user_id=slack_id, view=view)
+        try:
+            result = self.slack.views_publish(user_id=slack_id, view=view)
+        except SlackApiError as exc:
+            self._discard_invalid_home_slack_files(job, member_id, view, exc)
+            raise
         if not self._home_publish_confirmed(result, view):
             raise RuntimeError("Slack did not confirm the published Home view")
 
@@ -354,17 +477,18 @@ class Worker:
         for channel in self.store.select("ledger_channels", {"kind": "channel"}):
             present = self.channel_members(channel["channel_id"])
             for slack_id in present:
-                # SLACK_BOT_USER_ID is passed into this worker at startup. Keep
-                # our own required channel membership out of removal queues.
-                if slack_id == self.bot_id:
+                if self._slack_user_is_cached_bot(slack_id):
                     continue
                 member = self.ledger.sources.identity(slack_id)
                 member_id = sid(member["_id"]) if member else None
                 p = self.ledger.participant(member_id) if member_id else None
                 allowed = p and self.ledger.active(member_id) and (channel["_id"] == "chat" or p["rank"] >= channel.get("slot", 0))
                 if not allowed:
-                    self.store.atomic(lambda s, uid=slack_id, c=channel: enqueue(s, "ledger_outbox", f"unauthorized:{c['_id']}:{uid}:{uuid4()}", "remove",
-                        {"slack_id": uid, "channel": c["channel_id"]}))
+                    removal_key = f"unauthorized:{channel['_id']}:{slack_id}"
+                    if self.store.get("ledger_outbox", removal_key) or self._slack_user_is_bot(slack_id):
+                        continue
+                    self.store.atomic(lambda s, uid=slack_id, c=channel, mid=member_id:
+                        self._enqueue_unauthorized_removal(s, c, uid, mid))
                 if member_id:
                     key = f"membership:{member_id}:{channel['_id']}"
                     def update(s):
@@ -455,15 +579,22 @@ class Worker:
             channels = [c for c in self.store.select("ledger_channels", {"kind": "channel"}) if c["channel_id"] == event["channel"]]
             if not channels or event["user"] == self.bot_id:
                 return
-            member = self.ledger.sources.identity(event["user"])
             channel = channels[0]
+            if kind == "member_joined_channel" and self._slack_user_is_cached_bot(event["user"]):
+                return
+            member = self.ledger.sources.identity(event["user"])
             if not member:
                 if kind == "member_joined_channel":
-                    self.store.atomic(lambda s: enqueue(s, "ledger_outbox", key + ":remove", "remove", {"slack_id": event["user"], "channel": event["channel"]}))
+                    if self._slack_user_is_bot(event["user"]):
+                        return
+                    self.store.atomic(lambda s: self._enqueue_unauthorized_removal(
+                        s, channel, event["user"], joined=True))
                 return
             member_id = sid(member["_id"])
             p = self.ledger.participant(member_id)
             allowed = p and self.ledger.active(member_id) and p["rank"] >= channel.get("slot", 0)
+            if kind == "member_joined_channel" and not allowed and self._slack_user_is_bot(event["user"]):
+                return
             rowkey = f"membership:{member_id}:{channel['_id']}"
             def update(s):
                 row = s.get("ledger_channels", rowkey) or {"_id": rowkey, "kind": "membership", "member_id": member_id, "channel_key": channel["_id"]}
@@ -471,7 +602,7 @@ class Worker:
                 row.update(present=joined, voluntary_leave=not joined, desired=bool(joined and allowed))
                 s.put("ledger_channels", row)
                 if joined and not allowed:
-                    enqueue(s, "ledger_outbox", key + ":remove", "remove", {"member_id": member_id, "channel": event["channel"]})
+                    self._enqueue_unauthorized_removal(s, channel, event["user"], member_id, joined=True)
             self.store.atomic(update)
             return
         member = self.ledger.sources.identity(event.get("user"))

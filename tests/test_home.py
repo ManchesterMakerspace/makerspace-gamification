@@ -1,5 +1,10 @@
 import hashlib
 import json
+import logging
+from types import SimpleNamespace
+
+import pytest
+from slack_sdk.errors import SlackApiError
 
 from conftest import oid
 from ledger.community import Community
@@ -158,6 +163,54 @@ def test_home_publish_accepts_slack_normalized_blocks(joined):
     saved = store.get("ledger_homes", member_id)
     assert saved["published_rank"] == participant["rank"]
     assert saved["needs_replacement"] is False
+
+
+def test_invalid_home_slack_file_is_diagnosed_discarded_and_regenerated(joined, caplog):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+    participant = ledger.participant(member_id)
+    participant["import_pending"] = False
+    store.put("ledger_participants", participant)
+    enqueue_home_refresh(store, member_id, "invalid-slack-file", "U1")
+    job = working_job(store, f"home:{member_id}:invalid-slack-file")
+    slack.files_upload_v2.side_effect = [
+        {"files": [{"id": "F_RANK_VALID"}]},
+        {"files": [{"id": "F_TREE_REJECTED"}]},
+    ]
+    slack.files_info.side_effect = lambda file: {
+        "file": {"id": file, "mimetype": "image/png", "filetype": "png", "mode": "hosted",
+                 "size": 1234, "is_external": False, "is_public": False,
+                 "public_url_shared": False, "display_as_bot": False, "is_deleted": False}}
+    response_data = {"ok": False, "error": "invalid_arguments", "response_metadata": {
+        "messages": ["[ERROR] invalid slack file [json-pointer:view/blocks/3/slack_file.id/slack_file]"]}}
+    response = SimpleNamespace(status_code=200, data=response_data,
+        headers={"x-slack-req-id": "req-invalid-file"}, get=response_data.get)
+    slack.views_publish.side_effect = SlackApiError("invalid Slack file", response)
+    worker = Worker(ledger, composer, slack)
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(SlackApiError):
+        worker.publish_home(job)
+
+    rank_file = store.get("ledger_files", f"rank_icon:{participant['rank']}")
+    tree_file = store.get("ledger_files", f"skill_tree:{member_id}")
+    assert rank_file["file_id"] == "F_RANK_VALID"
+    assert tree_file["file_id"] is None
+    assert tree_file["invalidation_reason"] == "views_publish_invalid_slack_file"
+    assert tree_file["invalidated_slack_request_id"] == "req-invalid-file"
+    assert tree_file["invalidated_home_job"] == job["_id"]
+    assert "block_index=3" in caplog.text
+    assert "file_id=F_TREE_REJECTED" in caplog.text
+    assert f"asset_key=skill_tree:{member_id}" in caplog.text
+    assert '"available": true' in caplog.text and '"mode": "hosted"' in caplog.text
+
+    slack.files_upload_v2.side_effect = None
+    slack.files_upload_v2.return_value = {"files": [{"id": "F_TREE_REPLACEMENT"}]}
+    slack.views_publish.side_effect = lambda user_id, view: SlackResponseLike({"ok": True, "view": view})
+    worker.publish_home(job)
+
+    assert store.get("ledger_files", f"skill_tree:{member_id}")["file_id"] == "F_TREE_REPLACEMENT"
+    assert store.get("ledger_homes", member_id)["published_rank"] == participant["rank"]
 
 
 def test_user_change_clears_and_refreshes_profile_photo_caption(joined):
