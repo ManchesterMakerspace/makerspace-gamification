@@ -142,7 +142,8 @@ class Worker:
     def _slack_user_is_cached_bot(self, slack_id):
         if not slack_id or slack_id in (self.bot_id, "USLACKBOT"):
             return True
-        return (self.store.get("ledger_catalog", f"slack-user:{slack_id}") or {}).get("bot") is True
+        cached = self.store.get("ledger_catalog", f"slack-user:{slack_id}") or {}
+        return cached.get("bot") is True and cached.get("bot_identity_source") == "is_bot"
 
     def _slack_user_is_bot(self, slack_id):
         """Identify and durably remember Slack bot identities before cleanup."""
@@ -153,11 +154,17 @@ class Worker:
         user = response.get("user") if callable(getattr(response, "get", None)) else None
         if not isinstance(user, dict):
             raise RuntimeError("Slack did not return user details during channel reconciliation")
-        is_bot = bool(user.get("is_bot") or user.get("is_app_user"))
+        # is_app_user means a human has authorized this app; Slack exposes
+        # actual bot identity separately through is_bot.
+        is_bot = user.get("is_bot") is True
         if is_bot:
             self.store.atomic(lambda s: s.put("ledger_catalog", {
                 "_id": cache_key, "kind": "slack_user", "slack_id": slack_id,
-                "bot": True, "at": now()}))
+                "bot": True, "bot_identity_source": "is_bot", "at": now()}))
+        elif self.store.get("ledger_catalog", cache_key):
+            # Recheck and remove legacy rows that may have treated
+            # is_app_user as bot identity.
+            self.store.atomic(lambda s: s.delete("ledger_catalog", cache_key))
         return is_bot
 
     @staticmethod
