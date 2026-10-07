@@ -78,7 +78,19 @@ def test_report_table_pages_preserve_every_row():
     rendered = [cell["text"] for page in pages for row in page["blocks"][1]["rows"][1:] for cell in row]
     assert len(pages) >= 3
     assert all(len(page["blocks"][1]["rows"]) <= 100 for page in pages)
+    assert all(page["blocks"][1]["column_settings"] == [
+        {"is_wrapped": True}, {"is_wrapped": False}, {"is_wrapped": True},
+        {"is_wrapped": False}, {"is_wrapped": False}] for page in pages)
     assert all(f"Maker {index}" in rendered for index in range(205))
+
+
+def test_summary_table_has_one_object_setting_per_column():
+    report = {"mode": "summary", "status": "ok", "rows": [],
+        "totals": {"Invited": 2, "Opted in": 1}, "as_of": "now"}
+    table = render_report(report)[0]["blocks"][1]
+    assert len(table["column_settings"]) == len(table["rows"][0]) == 2
+    assert table["column_settings"] == [{"is_wrapped": True}, {"is_wrapped": False}]
+    assert all(isinstance(setting, dict) for setting in table["column_settings"])
 
 
 def test_report_fallback_escapes_slack_markup_but_table_keeps_raw_name():
@@ -175,6 +187,28 @@ def test_self_consent_questions_are_not_sponsorship_requests(env, prompt):
     response = converse(ledger, composer, mid(1), prompt, private=True)
     assert response["outcome"] == "generated"
     assert response["text"] == "That question concerns your own participation history."
+    assert "sponsorship_report" not in response
+
+
+@pytest.mark.parametrize("prompt", ["Who sponsored me?", "Who invited me?", "Who is my sponsor?"])
+def test_incoming_invitation_questions_do_not_use_outgoing_register(env, prompt):
+    ledger, _, _, composer, api, _ = env
+    ledger.join(mid(1))
+    assert not sponsorship_request(prompt)
+    api.tool_response.return_value = {"role": "assistant", "content": "That asks about an invitation you received."}
+    response = converse(ledger, composer, mid(1), prompt, private=True)
+    assert response["outcome"] == "generated"
+    assert response["text"] == "That asks about an invitation you received."
+    assert "sponsorship_report" not in response
+
+
+def test_incoming_invitation_rejects_model_attempt_to_use_outgoing_tool(env):
+    ledger, _, _, composer, api, _ = env
+    ledger.join(mid(1))
+    api.tool_response.return_value = {"role": "assistant", "content": None, "tool_calls": [{"id": "wrong-direction",
+        "type": "function", "function": {"name": "my_sponsorships", "arguments": json.dumps({"mode": "list"})}}]}
+    response = converse(ledger, composer, mid(1), "Who invited me?", private=True)
+    assert response["outcome"] == "fallback" and response["text"] == "I don't know."
     assert "sponsorship_report" not in response
 
 
