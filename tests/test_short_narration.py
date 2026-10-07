@@ -220,7 +220,7 @@ def test_guidance_falls_back_to_blocker_before_optional_suggestion(env, failure)
 
 
 def test_packaged_result_styles_and_policy_preserve_schema():
-    assert len(TYPES) == 24
+    assert len(TYPES) == len(set(TYPES)) and "community_count" in TYPES
     for audience in AUDIENCES:
         count_template = library_template("community_count", audience)
         assert len(count_template["variations"]) == 5

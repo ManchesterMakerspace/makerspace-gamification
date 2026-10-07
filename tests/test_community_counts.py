@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import pytest
+
 from ledger.community_counts import bounds, clarification, count, format_answer, is_count_question, recognize, safe_count, valid_space_answer
 from ledger.worker import Worker
 
@@ -80,6 +82,14 @@ def test_fixed_aggregations_return_count_only_and_format_estimate():
     assert valid_space_answer(format_answer(result), result)
     assert not valid_space_answer("3 unique check-in UIDs were recorded in the last two hours.", result)
     assert not valid_space_answer("A total of 4 members used the space in the last two hours. This is a recent-use estimate, not a live occupancy count.", result)
+    assert not valid_space_answer("3 members did not use the space in the last two hours. This is a recent-use estimate, not a live occupancy count.", result)
+    assert not valid_space_answer("More than 3 members used the space in the last two hours. This is a recent-use estimate, not a live occupancy count.", result)
+    assert not valid_space_answer("Approximately 3 members used the space in the last two hours. This is a recent-use estimate, not a live occupancy count.", result)
+
+    today = {"subject": "space", "period": "today", "count": 3}
+    assert valid_space_answer("Today, the space welcomed a total of 3 members.", today)
+    assert not valid_space_answer("At least 3 members visited the makerspace today.", today)
+    assert not valid_space_answer("3 members used the space today, perhaps more.", today)
 
     member_result = count(source, "members", "today", instant)
     assert member_result["count"] == 3
@@ -125,11 +135,16 @@ def test_unlinked_user_gets_public_count_in_any_joined_channel(env, monkeypatch)
     assert not store.select("ledger_context", {"kind": "message"})
 
 
-def test_space_count_uses_authoritative_fallback_when_qwen_changes_facts(env, monkeypatch):
+@pytest.mark.parametrize("generated", [
+    "13 unique check-in UIDs were recorded today.",
+    "12 members did not use the space today.",
+    "More than 12 members used the space today.",
+])
+def test_space_count_uses_authoritative_fallback_when_qwen_changes_facts(env, monkeypatch, generated):
     ledger, store, source, composer, api, slack = env
     worker = Worker(ledger, composer, slack, bot_id="UBOT")
     monkeypatch.setattr(source, "_aggregate", lambda *_args, **_kwargs: [{"count": 12}], raising=False)
-    api.complete.return_value = "13 unique check-in UIDs were recorded today."
+    api.complete.return_value = generated
     assert worker.event({"type": "message", "user": "U_OTHER", "channel": "DU_OTHER",
                          "channel_type": "im", "ts": "2", "text": "How busy is the space today?"}, "evt") == "community_count_queued"
     worker.outbox(store.claim("ledger_outbox", kinds=["community_count_reply"]))

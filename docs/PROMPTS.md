@@ -1,6 +1,6 @@
 # The Ledger prompt library
 
-The bot ships with **24 JSON files and 88 prompt variations** in [`ledger/prompts`](../ledger/prompts). Each file owns one message type. Each variation pairs a `system` prompt with a `user` prompt and identifies its personality and attitude. The default voices are a measured archivist, a practical mentor, and a dry-witted grimoire. Sensitive messages such as opt-out confirmations and corrections stay sober in all three voices.
+The bot ships one JSON file in [`ledger/prompts`](../ledger/prompts) for every message type named by `TYPES` in `ledger/prompt_library.py`. The total is intentionally not fixed: inventory validation requires an exact filename/type match whenever sets are added or removed. Each variation pairs a `system` prompt with a `user` prompt and identifies its personality and attitude. The default voices are a measured archivist, a practical mentor, and a dry-witted grimoire. Sensitive messages such as opt-out confirmations and corrections stay sober in all three voices.
 
 Every generation also receives the shared [XML/Markdown Prompt Matrix Template](PROMPT_MATRIX.md). It defines game rules, role limits, personality, privacy, and DM/channel conduct. `LEDGER_PROMPT_MATRIX_DOC_URL` optionally supplies its contents from a Google Doc on startup or admin reload. The matrix and its content hash are saved with each new prompt reservation; changing it does not reroll voices or rewrite reserved deliveries.
 

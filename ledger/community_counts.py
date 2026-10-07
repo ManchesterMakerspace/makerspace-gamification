@@ -162,28 +162,49 @@ def format_answer(result):
 
 
 def valid_space_answer(text, result):
-    """Accept varied wording only when every authoritative public fact survives."""
+    """Accept only a small affirmative grammar around authoritative facts."""
     if (not isinstance(text, str) or not text.strip() or len(text) > 400 or result.get("subject") != "space"
             or type(result.get("count")) is not int or result["count"] < 0):
         return False
-    lowered = text.lower()
+    lowered = re.sub(r"\s+", " ", text.strip().lower())
     if (re.search(r"\b(?:uids?|identifiers?|records?|databases?|queries|check-?ins?)\b", lowered)
             or "<@" in lowered or "<!" in lowered):
         return False
     label = timeframe(result.get("period"))
-    if (label not in lowered or not re.search(r"\bmembers?\b", lowered)
-            or not re.search(r"\b(?:space|makerspace)\b", lowered)):
+    if lowered.count(label) != 1:
         return False
     numeric_values = [int(value.replace(",", "")) for value in re.findall(r"(?<!\w)\d[\d,]*(?!\w)", text)]
     if numeric_values != [result["count"]]:
+        return False
+    expected_note = "this is a recent-use estimate, not a live occupancy count."
+    if result["period"] == "right_now":
+        if lowered.count(expected_note) != 1:
+            return False
+        lowered = re.sub(r"\s+", " ", lowered.replace(expected_note, "")).strip()
+    elif "estimate" in lowered or "occupancy" in lowered:
+        return False
+    if re.search(r"\b(?:not|never|no|more\s+than|less\s+than|fewer\s+than|at\s+least|at\s+most|"
+                 r"over|under|approximately|about|around|nearly|up\s+to|between|possibly|perhaps)\b",
+                 lowered):
         return False
     without_label = lowered.replace(label, "")
     if re.search(r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|hundred|thousand|million)\b",
                  without_label):
         return False
-    if result["period"] == "right_now" and not all(value in lowered for value in ("estimate", "not a live occupancy")):
-        return False
-    return True
+    sentence = lowered.removesuffix(".").strip()
+    number = re.escape(f"{result['count']:,}")
+    plain_number = re.escape(str(result["count"]))
+    number = number if number == plain_number else f"(?:{number}|{plain_number})"
+    period = re.escape(label)
+    members_first = (rf"(?:a total of )?{number} members? (?:used|visited) "
+                     rf"(?:the )?(?:space|makerspace)")
+    space_first = (rf"(?:the )?(?:space|makerspace) (?:welcomed|hosted|saw) "
+                   rf"(?:a total of )?{number} members?")
+    patterns = (
+        rf"{members_first} {period}", rf"{period},? {members_first}",
+        rf"{space_first} {period}", rf"{period},? {space_first}",
+    )
+    return any(re.fullmatch(pattern, sentence) for pattern in patterns)
 
 
 def safe_count(sources, subject, period, instant=None):
