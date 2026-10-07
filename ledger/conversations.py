@@ -79,13 +79,49 @@ def self_progress_question(text):
 
 
 def sponsorship_request(text):
-    """Identify private questions that require caller-owned invitation facts."""
+    """Identify questions about invitations sent by the caller, not invitations received."""
     if not isinstance(text, str):
         return False
-    personal = re.search(r"\b(?:i|me|my|mine|who|whom|everyone|people|person)\b", text, re.I)
-    invitation = re.search(
-        r"\b(?:sponsor(?:ed|s|ing|ships?)?|invit(?:e(?:d|s|es?)?|ing|ations?))\b", text, re.I)
-    return bool(personal and invitation)
+    caller_is_actor = re.search(
+        r"\bi(?:['’]ve|\s+have|\s+had|\s+am|['’]m)?\s+"
+        r"(?:sponsor(?:ed|ing)?|invit(?:e|ed|ing))\b", text, re.I)
+    caller_owned_register = re.search(
+        r"\bmy\s+(?:sponsorships?|invites?|invitees?|invitations?|invited\s+(?:members?|people|makers?)|"
+        r"invitation\s+(?:history|register)|sponsor\s+(?:history|register))\b",
+        text, re.I)
+    caller_is_passive_agent = re.search(r"\b(?:sponsored|invited)\s+by\s+me\b", text, re.I)
+    caller_sent_invitation = re.search(
+        r"\b(?:(?:invitations?|invites?)\s+(?:(?:that\s+)?i(?:['’]ve|\s+have|\s+had)?\s+sent|"
+        r"(?:have\s+|had\s+)i\s+sent|did\s+i\s+send)|i(?:['’]ve|\s+have|\s+had)?\s+sent\s+"
+        r"(?:an?\s+|the\s+|those\s+|these\s+)?(?:invitations?|invites?))\b",
+        text, re.I)
+    return bool(caller_is_actor or caller_owned_register or caller_is_passive_agent or caller_sent_invitation)
+
+
+def incoming_sponsorship_request(text):
+    """Identify a request about an invitation received by the caller."""
+    if not isinstance(text, str):
+        return False
+    return bool(re.search(
+        r"\b(?:who\s+(?:sponsored|invited)\s+me|who\s+(?:is|was)\s+my\s+sponsor|"
+        r"who\s+sent\s+me\s+(?:an?\s+)?(?:invitation|invite)|my\s+sponsor|"
+        r"(?:invitations?|invites?)\s+(?:i\s+received|did\s+i\s+receive)|"
+        r"(?:sponsored|invited)\s+me\s+by\s+whom)\b",
+        text, re.I))
+
+
+def sponsorship_followup(request, history):
+    """Carry an outgoing-register topic through a clearly referential follow-up."""
+    if incoming_sponsorship_request(request):
+        return False
+    prior_outgoing = any(isinstance(item, dict) and sponsorship_request(item.get("content"))
+                         for item in history)
+    if not prior_outgoing:
+        return False
+    return bool(re.search(
+        r"\b(?:them|they|their|theirs|those|these|which\s+(?:one|ones|of)|any\s+of|all\s+of|"
+        r"how\s+many|what\s+about|who\s+(?:has|have)|opt(?:ed)?[ -]?(?:in|out))\b",
+        request, re.I))
 
 
 def appearance_request(ledger, requester, text):
@@ -129,7 +165,8 @@ def appearance_request(ledger, requester, text):
 def converse(ledger, composer, member, request, history=(), private=True, selection=None, *, use_tools=True, ambient=False):
     ledger.require_member(member)
     context = QueryTools(ledger, member, private)
-    requires_sponsorship_report = private and ledger.active(member) and sponsorship_request(request)
+    outgoing_sponsorship_request = sponsorship_request(request) or sponsorship_followup(request, history)
+    requires_sponsorship_report = private and ledger.active(member) and outgoing_sponsorship_request
     started = time.monotonic()
     if selection is None:
         composer.refresh_matrix()
@@ -157,7 +194,7 @@ def converse(ledger, composer, member, request, history=(), private=True, select
         "Observation defaults on for eligible members in configured channels after notice, independently of game participation. "
         "Anyone eligible can opt out using /ledger preferences and unchecking Allow observation. Never claim chat saved this preference. " +
         "Only mention administrative commands when administrative_help is supplied; never expose them in shared channels. " +
-        ("For a private question about the caller's sponsorships, use my_sponsorships and return only a short stylistic opener; "
+        ("For a private question about invitations sent by the caller, use my_sponsorships and return only a short stylistic opener; "
          "the application appends every authoritative name, date, status and count. Never answer sponsorship facts yourself. " if private and ledger.active(member) else
          "Sponsorship history is private; direct the caller to DM The Ledger or use /ledger sponsor. ") +
         ("This is an unaddressed channel question. Reply only if useful and relevant to makerspace shops/tools or The Ledger. Otherwise return exactly NO_REPLY. " if ambient else "") +
@@ -206,6 +243,9 @@ def converse(ledger, composer, member, request, history=(), private=True, select
                     raise ValueError("Invalid tool call identity")
                 identifiers.add(call["id"])
                 function = call["function"]
+                if (function["name"] == "my_sponsorships"
+                        and (not requires_sponsorship_report or incoming_sponsorship_request(request))):
+                    raise ValueError("my_sponsorships is limited to the caller's outgoing invitations")
                 raw = function["arguments"]
                 if not isinstance(raw, str) or len(raw) > 2000:
                     raise ValueError("Invalid tool arguments")

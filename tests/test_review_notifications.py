@@ -170,7 +170,7 @@ def test_quest_publication_and_all_closure_paths_update_notice(reviews, close):
     elif close == 'disable':
         Quests(l).disable(member(10), q['_id'], 'Not available.')
     else:
-        set_participant(l, s, 3, rank=1)
+        set_participant(l, s, 3, rank=0)
         l.reconcile(member(3))
     drain(reviews)
     slack.chat_postMessage.assert_called_once()

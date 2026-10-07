@@ -114,15 +114,15 @@ def test_quest_browser_hash_and_forged_selection_revalidation(joined):
     body['actions'][0]['selected_option']['value'] = 'q:forged'
     with pytest.raises(ValueError):
         ui.action(body, slack)
-    assert ui.options({'user': {'id': 'U3'}, 'action_id': 'quest_selection', 'value': 'jig'})['options'] == []
+    assert ui.options({'user': {'id': 'U3'}, 'action_id': 'quest_selection', 'value': 'jig'})['options'] == [
+        views.option(q['title'], 'q:' + q['_id'])]
 
 
-def test_exact_rank_acceptance_retains_reward_and_rankup_completion(joined):
+def test_minimum_rank_acceptance_retains_reward_and_rankup_completion(joined):
     l, s, *_ = joined
     q = published(joined)
     set_participant(l, s, 2, rank=2)
-    with pytest.raises(Denied):
-        Quests(l).accept(member(2), q['_id'])
+    assert Quests(l).accept(member(2), q['_id'])['rank'] == 2
     accepted = Quests(l).accept(member(1), q['_id'])
     assert accepted['rank'] == 1 and accepted['reward'] == 123
     set_participant(l, s, 1, rank=2)
@@ -133,7 +133,8 @@ def test_exact_rank_acceptance_retains_reward_and_rankup_completion(joined):
     assert l.participant(member(1))['xp'] == '123'
     with pytest.raises(ValueError):
         Quests(l).verify(member(10), doc['_id'])
-    assert len([j for j in s.select('ledger_outbox') if j['_id'].endswith(':author')]) == 1
+    royalty = s.select('ledger_evidence', {'kind': 'quest_proposer_royalty'})
+    assert len(royalty) == 1 and royalty[0]['xp'] == '6'
 
 
 @pytest.mark.parametrize('reward', [-1, 501, 0.5, True, '100'])
@@ -151,26 +152,24 @@ def test_quest_reward_boundaries_reject_invalid_values(joined, reward):
 def test_quest_zero_and_max_rewards(joined, reward):
     l, s, *_ = joined
     q = published(joined, reward=reward)
-    assert l.participant(member(3))['xp'] == '0'
+    assert l.participant(member(3))['xp'] == '100'
     Quests(l).accept(member(1), q['_id'])
     doc = Quests(l).submit(member(1), q['_id'], 'Done and observed.')
     Quests(l).verify(member(10), doc['_id'])
     assert l.participant(member(1))['xp'] == str(reward)
+    assert l.participant(member(3))['xp'] == str(100 + (25 if reward == 500 else 0))
     assert s.get('ledger_evidence', f"quest-complete:{member(1)}:{q['logical_id']}")
 
 
-def test_author_rank_submission_publication_and_self_exclusions(joined):
+def test_all_active_ranks_can_propose_and_review_stays_independent(joined):
     l, s, *_ = joined
-    with pytest.raises(Denied):
-        Quests(l).draft(member(1), 'Quest', 'Description', 'Evidence', 1)
+    assert Quests(l).draft(member(1), 'Quest one', 'Description', 'Evidence', 1)['target_rank'] == 1
     set_participant(l, s, 3, rank=3)
-    with pytest.raises(Denied):
-        Quests(l).draft(member(3), 'Quest', 'Description', 'Evidence', 2)
-    q = Quests(l).draft(member(3), 'Quest', 'Description', 'Evidence', 1)
+    q = Quests(l).draft(member(3), 'Quest', 'Description', 'Evidence', 2)
     Quests(l).submit_draft(member(3), q['_id'])
     with pytest.raises(Denied):
         Quests(l).publish(member(3), q['_id'], 100)
-    set_participant(l, s, 3, rank=2)
+    set_participant(l, s, 3, rank=1)
     with pytest.raises(Denied):
         Quests(l).publish(member(10), q['_id'], 100)
 
@@ -336,7 +335,9 @@ def test_submission_attempts_and_reviews_preserve_history_and_once_only_completi
     assert s.get('ledger_evidence', f"quest-complete:{member(1)}:{q['logical_id']}")['submission_id'] == final['_id']
     l.reconcile(member(1))
     assert l.participant(member(1))['xp'] == '42'
-    assert len(s.select('ledger_awards', {'kind': 'quest'})) == 1
+    quest_awards = s.select('ledger_awards', {'kind': 'quest'})
+    assert len(quest_awards) == 3
+    assert sum(1 for award in quest_awards if award['member_id'] == member(1)) == 1
 
 
 def test_reviewing_legacy_pending_attempt_preserves_existing_legacy_review(joined):
@@ -442,22 +443,22 @@ def test_source_membership_revocation_is_permanent_before_reconciliation(joined)
     assert s.get('ledger_relationships', grant['_id'])['status'] == 'revoked'
 
 
-def test_launch_unlock_notice_is_once_per_highest_capability(joined):
+def test_proposal_availability_notice_is_once(joined):
     l, s, *_ = joined
     def unlocks():
         legacy = [j['_id'] for j in s.select('ledger_outbox') if j['_id'].startswith('dm:quest-unlock:')]
         grouped = [event['event_id'] for owner in s.select('ledger_evidence', {'kind': 'notification_summary'})
                    for event in owner['events'] if event['event_id'].startswith('quest-unlock:')]
         return legacy + grouped
-    set_participant(l, s, 1, rank=3)
+    set_participant(l, s, 1, rank=1)
     l.reconcile(member(1))
     l.reconcile(member(1))
     assert len(unlocks()) == 1
     set_participant(l, s, 1, rank=4)
     l.reconcile(member(1))
-    assert len(unlocks()) == 2
+    assert len(unlocks()) == 1
     l.reconcile(member(1))
-    assert len(unlocks()) == 2
+    assert len(unlocks()) == 1
 
 
 def test_async_draft_applies_suggestions_with_new_input_ids_and_preserves_review_submission(joined):
@@ -476,7 +477,8 @@ def test_async_draft_applies_suggestions_with_new_input_ids_and_preserves_review
     Worker(l, composer, slack).outbox(claim(s, 'draft-help:draft-help-trigger'))
     updated = slack.views_update.call_args.kwargs
     assert updated['hash'] == 'original-hash'
-    assert updated['view']['blocks'][0]['block_id'].startswith('title:suggestion:')
+    title = next(block for block in updated['view']['blocks'] if block.get('element', {}).get('action_id') == 'title')
+    assert title['block_id'].startswith('title:suggestion:')
     assert not s.select('ledger_quests')
     ui.submission(form(updated['view'], {'title': 'My edited jig', 'description': 'My edited description', 'criteria': 'My edited criteria', 'target_rank': '1'}, 'U1'), slack)
     ui.submission(form(updated['view'], {'title': 'My edited jig', 'description': 'My edited description', 'criteria': 'My edited criteria', 'target_rank': '1'}, 'U1'), slack)

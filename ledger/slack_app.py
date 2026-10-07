@@ -11,6 +11,7 @@ from pymongo.errors import PyMongoError
 from slack_bolt import App
 from slack_bolt.authorization import AuthorizeResult
 from slack_bolt.response import BoltResponse
+from slack_sdk.errors import SlackApiError
 
 from . import views
 from .community import Community
@@ -56,7 +57,32 @@ class SlackUI:
             raise Denied("Choose an active human Slack member.")
 
     def open(self, client, body, view):
-        client.views_open(trigger_id=body["trigger_id"], view=view)
+        try:
+            client.views_open(trigger_id=body["trigger_id"], view=view)
+        except SlackApiError as exc:
+            safe = self.discard_invalid_quest_photos(view, exc)
+            if safe is None:
+                raise
+            client.views_open(trigger_id=body["trigger_id"], view=safe)
+
+    def discard_invalid_quest_photos(self, view, exc):
+        response = getattr(exc, "response", None)
+        data = getattr(response, "data", {}) if response is not None else {}
+        messages = ((data or {}).get("response_metadata") or {}).get("messages") or []
+        if not any("invalid slack file" in str(message).lower() for message in messages):
+            return None
+        file_ids = [block.get("slack_file", {}).get("id") for block in view.get("blocks", [])
+                    if block.get("type") == "image" and block.get("slack_file", {}).get("id")]
+        if not file_ids:
+            return None
+        for quest in self.ledger.store.select("ledger_quests", {"photo.id": {"$in": file_ids}}):
+            photo = dict(quest.get("photo") or {})
+            photo["available"] = False
+            quest["photo"] = photo
+            self.ledger.store.put("ledger_quests", quest)
+        return {**view, "blocks": [section("*Example photo:* unavailable.") if block.get("type") == "image"
+                                  and block.get("slack_file", {}).get("id") in file_ids else block
+                                  for block in view.get("blocks", [])]}
 
     def queue(self, member_id, command, key):
         self.ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", key, "command", {"member_id": member_id, "command": command}))
@@ -171,22 +197,17 @@ class SlackUI:
             Authority(self.ledger).authorize(actor, quest["creator"], "quest_publish", quest["shop_ids"], quest["logical_id"])
             if generated(quest):
                 return self.open(client, body, views.ledger_quest_review(quest, text.startswith("publish-")))
-            return self.open(client, body, views.modal("member_quest_review", "Review quest", [
-                section(quest["title"]), section(quest["description"]), section(quest["criteria"]),
-                views.text_input("reward", "Whole-number reward (0–500 XP)", "100"),
-                views.select_input("classification", "Milestone classification", [views.option(c.replace("_", " ").title(), c) for c in sorted(CHALLENGES)]),
-                views.text_input("catalog", "Existing catalog ID (specialized milestones)", optional=True), views.text_input("reason", "Review reason", optional=True)],
-                {"quest": key, "approve": text.startswith("publish-")}, "Record review"))
+            return self.open(client, body, views.member_quest_review(self.ledger, quest, text.startswith("publish-")))
         if text.startswith("complete-quest "):
             from .authority import Authority
             from .ledger_quests import LedgerQuests
-            from .quest_policy import LEDGER_AUTHOR, cooperative
+            from .quest_policy import cooperative
             quest = self.ledger.store.get("ledger_quests", text.split(maxsplit=1)[1])
             if not quest or not cooperative(quest):
                 raise ValueError("Choose a cooperative Ledger quest.")
             project = LedgerQuests(self.ledger).project(quest) or {}
-            Authority(self.ledger).authorize(actor, LEDGER_AUTHOR, "quest_complete", quest["shop_ids"],
-                quest["logical_id"], excluded=project.get("contributions", {}))
+            Authority(self.ledger).authorize(actor, quest["creator"], "quest_complete", quest["shop_ids"],
+                quest["logical_id"], excluded=set(project.get("contributions", {})) | {quest["creator"]})
             return self.open(client, body, views.modal("ledger_group_complete", "Complete shared quest", [
                 section(quest["title"]), section(quest["criteria"]),
                 views.text_input("description", "Verified shared outcome evidence", multiline=True)], {"quest": quest["_id"]}, "Record completion"))
@@ -282,15 +303,57 @@ class SlackUI:
             return {}
         if callback == "member_quest_submit":
             from .quests import Quests
-            split = lambda value: [i.strip() for i in (value or "").split(",") if i.strip()]
             service = Quests(self.ledger)
+            disciplines = [{"name": data.get(f"discipline_name_{i}", ""),
+                            "expectation": data.get(f"discipline_expectation_{i}", "")}
+                           for i in range(4) if data.get(f"discipline_name_{i}") or data.get(f"discipline_expectation_{i}")]
+            selected_files = data.get("example_photo") or []
+            photo = None
+            if selected_files:
+                if len(selected_files) != 1:
+                    raise ValueError("Choose at most one example photo.")
+                response = client.files_info(file=selected_files[0])
+                file = response.get("file") if callable(getattr(response, "get", None)) else None
+                if not isinstance(file, dict) or file.get("id") != selected_files[0] or file.get("user") not in (None, body["user"]["id"]):
+                    raise ValueError("The selected example photo could not be verified.")
+                photo = {key: file.get(key) for key in ("id", "name", "mimetype", "filetype", "size")}
+            elif meta.get("revision_of"):
+                photo = (self.ledger.store.get("ledger_quests", meta["revision_of"]) or {}).get("photo")
+            revision = self.ledger.store.get("ledger_quests", meta["revision_of"]) if meta.get("revision_of") else None
             q = service.draft(actor, data["title"], data["description"], data["criteria"], int(data["target_rank"]),
-                split(data.get("shops")), split(data.get("tools")), split(data.get("disciplines")), meta.get("revision_of"), key=meta["submission_key"])
+                shops=service.explicit_shops(revision) if revision else [], tools=data.get("quest_tools") or [],
+                disciplines=disciplines, revision_of=meta.get("revision_of"),
+                key=meta["submission_key"], quest_type=data.get("quest_type") or "individual",
+                duration={"value": int(data.get("duration_value") or "1"),
+                          "unit": data.get("duration_unit") or "hours"}, photo=photo)
             service.submit_draft(actor, q["_id"])
             return {}
         if callback == "member_quest_review":
             from .quests import Quests
-            Quests(self.ledger).publish(actor, meta["quest"], int(data["reward"]), data["classification"], meta["approve"], data.get("reason", ""), data.get("catalog") or None)
+            original = self.ledger.store.get("ledger_quests", meta["quest"]) or {}
+            disciplines = [{"name": data.get(f"discipline_name_{i}", ""),
+                            "expectation": data.get(f"discipline_expectation_{i}", "")}
+                           for i in range(4) if data.get(f"discipline_name_{i}") or data.get(f"discipline_expectation_{i}")]
+            state_values = body["view"].get("state", {}).get("values", {})
+            has_discipline_state = any(action.startswith("discipline_") for block in state_values.values() for action in block)
+            if (not disciplines and not has_discipline_state
+                    and original.get("quest_type", "individual") == "cooperative"):
+                disciplines = original.get("disciplines", [])
+            tool_state = [value for block in state_values.values()
+                          for action, value in block.items() if action == "quest_tools"]
+            tool_ids = data.get("quest_tools") or []
+            if tool_state and "selected_options" not in tool_state[0]:
+                tool_ids = original.get("tool_ids", [])
+            prior_duration = original.get("duration") or {"value": 1, "unit": "hours"}
+            edits = {key: data.get(key) or original.get(key) for key in ("title", "description", "criteria")}
+            edits["quest_type"] = data.get("quest_type") or original.get("quest_type", "individual")
+            edits.update(target_rank=int(data.get("target_rank") or original.get("target_rank")),
+                         tool_ids=tool_ids, shop_ids=Quests(self.ledger).explicit_shops(original), disciplines=disciplines,
+                         duration={"value": int(data.get("duration_value") or prior_duration["value"]),
+                                   "unit": data.get("duration_unit") or prior_duration["unit"]})
+            Quests(self.ledger).publish(actor, meta["quest"], int(data["reward"]), data.get("classification") or "challenge",
+                meta["approve"], data.get("reason", ""), data.get("catalog") or None,
+                proposer_bonus=int(data.get("proposer_bonus") or "100"), edits=edits)
             return {}
         if callback == "ticket_quest_config":
             from .ticket_quests import TicketQuests
@@ -443,7 +506,13 @@ class SlackUI:
         if name == "quest_selection":
             selected = action.get("selected_option", {}).get("value")
             view = views.quest_browser(self.ledger, actor, selected)
-            return client.views_update(view_id=body["view"]["id"], hash=body["view"]["hash"], view=view)
+            try:
+                return client.views_update(view_id=body["view"]["id"], hash=body["view"]["hash"], view=view)
+            except SlackApiError as exc:
+                safe = self.discard_invalid_quest_photos(view, exc)
+                if safe is None:
+                    raise
+                return client.views_update(view_id=body["view"]["id"], hash=body["view"]["hash"], view=safe)
         if name == "quest_accept":
             from .quests import Quests
             Quests(self.ledger).accept(actor, value)
@@ -462,13 +531,19 @@ class SlackUI:
                 views.text_input("learners", "Learner @mentions (mentoring)", optional=True),
                 views.text_input("mentor", "Developing mentor @mention", optional=True),
                 views.text_input("handoff", "Usable stewardship handoff", optional=True, multiline=True)], {"quest": value}, "Submit"))
-        if name == "quest_draft_help":
+        if name in ("quest_draft_help", "quest_draft_rewrite"):
             from .quests import Quests
-            Quests(self.ledger).targets(actor)
+            service = Quests(self.ledger)
+            service.targets(actor)
             data = views.values(body)
             meta = json.loads(body["view"].get("private_metadata") or "{}")
+            public_labels = [row["label"] for row in service.eligible_tools(actor, limit=1000)
+                             if row["value"] in set(data.get("quest_tools") or [])]
             self.ledger.store.atomic(lambda s: enqueue(s, "ledger_outbox", "draft-help:" + body["trigger_id"], "quest_draft", {
                 "member_id": actor, "draft": {k: data.get(k, "") for k in ("title", "description", "criteria")},
+                "mode": "rewrite" if name == "quest_draft_rewrite" else "draft", "public_labels": public_labels,
+                "slack_id": body["user"]["id"],
+                "consent_generation": self.ledger.participant(actor).get("consent_generation", 0),
                 "original": {**data, "revision_of": meta.get("revision_of"), "submission_key": meta["submission_key"]},
                 "view_id": body["view"]["id"], "view_hash": body["view"]["hash"]}))
             return
@@ -515,6 +590,12 @@ class SlackUI:
         if name == "quest_selection":
             from .quests import Quests
             return {"options": [views.option(title, key) for key, title in Quests(self.ledger).options(actor, search)]}
+        if name == "quest_tools":
+            from .quests import Quests
+            meta = json.loads(body.get("view", {}).get("private_metadata") or "{}")
+            proposer = meta.get("proposer") or actor
+            return {"options": [views.option(row["label"], row["value"])
+                                for row in Quests(self.ledger).eligible_tools(proposer, search)]}
         options = []
         if name == "recipient":
             links = self.ledger.sources.rows("slack_users", {"invalidated_at": None})

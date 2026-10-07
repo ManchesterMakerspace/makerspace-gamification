@@ -9,7 +9,7 @@ from .storage import now
 
 SPONSORSHIPS_TOOL = {"type": "function", "function": {
     "name": "my_sponsorships",
-    "description": ("Read only the caller's own participation invitations. Use summary for counts, list for the "
+    "description": ("Read only participation invitations sent by the caller. Use summary for counts, list for the "
                     "complete register, and detail for one person. Available only in a private DM."),
     "parameters": {"type": "object", "properties": {
         "mode": {"type": "string", "enum": ["summary", "list", "detail"]},
@@ -223,9 +223,10 @@ def render_report(report, opener="The Ledger opens your private sponsorship regi
         lead = opener if index == 1 else f"Sponsorship register continued ({index} of {total})."
         plain_rows = [" | ".join(_fallback_cell(cell["text"]) for cell in row) for row in table]
         text = lead + "\n" + "\n".join(plain_rows)
+        wrapped_columns = {0, 2} if len(table[0]) > 2 else {0}
+        column_settings = [{"is_wrapped": column in wrapped_columns} for column in range(len(table[0]))]
         pages.append({"text": text, "blocks": [
             {"type": "section", "text": {"type": "mrkdwn", "text": lead}},
-            {"type": "table", "rows": table, "column_settings": [
-                {"is_wrapped": True}, None, {"is_wrapped": True}, None, None]},
+            {"type": "table", "rows": table, "column_settings": column_settings},
         ]})
     return pages

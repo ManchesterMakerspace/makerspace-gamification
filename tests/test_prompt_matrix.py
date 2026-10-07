@@ -37,6 +37,7 @@ def fake_connection(raw, *, status=200, content_type='text/plain; charset=utf-8'
 
 def test_bundled_matrix_codifies_roles_and_seed_economy():
     matrix = bundled_matrix()
+    assert matrix['version'] == '42'
     root = ElementTree.fromstring(matrix['text'])
     admin = root.find("roles/role[@id='admin']").text
     assert 'MLAB members role admin' in admin and 'every rank' in admin
@@ -44,9 +45,13 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'on opt-out remove them' in admin
     assert 'Omit /ledger-admin & related help for ineligible callers' in root.find('response').text
     generated_author = root.find("roles/role[@id='ledger_quest_author']").text
+    member_author = root.find("roles/role[@id='quest_author']").text
     privacy = root.find('privacy').text
     assert 'Never announce rank-ups in shared Ledge Chat' in root.find('channels').text
     assert 'quest/discipline prose' in generated_author and 'human publication edits' in generated_author
+    assert 'any active participant in good standing may propose/revise' in member_author
+    assert 'enabled minimum rank ≤ their rank' in member_author
+    assert 'current non-revoked proposer checkouts' in member_author
     assert 'anywhere in retained chat or completed-example prose at every rank' in privacy
     assert 'cooperative discipline prose' in privacy and 'fitted saved snapshot at composition/submission' in privacy
     assert 'Ledge Chat and the selected rank channel' in privacy
@@ -98,6 +103,18 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'Qwen adds a fact-free opener' in root.find('privacy').text
     assert 'Sponsor reports append Python tables' in root.find('response').text
     assert 'distinct specialized evidence attempt' in root.find('economy').text
+    economy = root.find('economy').text
+    assert 'first-approval bonus 0–500 XP,default 100' in economy
+    assert '5% of XP actually credited' in economy and 'Round half-up once' in economy
+    assert 'no self share or zero record/message' in economy
+    community = root.find('community').text
+    assert 'new participant proposals use approved minimum rank' in community
+    assert 'Proposers may contribute/complete' in community
+    assert 'never silently remove prerequisites' in community
+    assert 'opt-out accrues eligible XP silently' in community
+    assert 'one Slack JPEG/PNG/GIF ≤10 MiB' in community
+    assert 'Async retry-stable draft/rewrite changes prose only' in community
+    assert 'quest photos/private file URLs or clearance records' in privacy
     delegate = root.find("roles/role[@id='delegated_reviewer']").text
     assert 'stable logical ID' in delegate and 'actual-shop scope per operation' in delegate
     assert 'authorized pending contributions/ready shared projects' in delegate

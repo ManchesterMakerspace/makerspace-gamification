@@ -3,13 +3,13 @@ import re
 from types import SimpleNamespace
 from pymongo import timeout
 
-from .quest_policy import REVIEWED_KINDS, contains_rank_name, cooperative, generated, individual
+from .quest_policy import REVIEWED_KINDS, contains_rank_name, cooperative, generated, individual, minimum_rank
 from .sources import sid
 
 PAGE_SIZE = 32
 DISPLAY_LIMIT = 100
 DISPLAY_FIELDS = ("_id", "kind", "logical_id", "creator", "quest_type", "title", "target_rank",
-                  "shop_ids", "tool_ids", "status", "disciplines")
+                  "rank_mode", "shop_ids", "tool_ids", "status", "disciplines", "duration", "photo")
 
 
 def quest_head(q):
@@ -177,8 +177,12 @@ class QuestDiscovery:
                 project = projects.get("cooperative:" + q["logical_id"], {})
                 if not cooperative(q) or project.get("status") != "open" or project.get("quest_revision") != q["_id"]:
                     continue
-            elif (not individual(q) or self.member == q["creator"] or
-                  (not accepted and (q["logical_id"] in pinned or q["target_rank"] != self.participant["rank"])) or
+                if not generated(q) and (not minimum_rank(q) or self.participant["rank"] < q["target_rank"]):
+                    continue
+            elif (not individual(q) or (self.member == q["creator"] and not minimum_rank(q)) or
+                  (not accepted and (q["logical_id"] in pinned or
+                   (self.participant["rank"] < q["target_rank"] if minimum_rank(q)
+                    else q["target_rank"] != self.participant["rank"]))) or
                   f"quest-complete:{self.member}:{q['logical_id']}" in completed):
                 continue
             if generated(q):
@@ -187,19 +191,20 @@ class QuestDiscovery:
             else:
                 p, m = participants.get(q["creator"]), author_source.get(q["creator"])
                 identity = identities.get("identity:" + q["creator"], {})
+                author_limit = (p["rank"] if minimum_rank(q) else p["rank"] - 2) if p else -1
                 if (not p or not m or not m.get("slack_id") or m.get("status") in ("suspended", "revoked") or
-                    identity.get("deactivated") or identity.get("bot") or q["target_rank"] > p["rank"] - 2 or
+                    identity.get("deactivated") or identity.get("bot") or q["target_rank"] > author_limit or
                     not any(r["slot"] == q["target_rank"] and r["enabled"] for r in rules.get(p["ruleset"], {}).get("ranks", []))):
                     continue
             if any(not shops.get(sid(shop)) or shops[sid(shop)].get("disabled") or
-                   (generated(q) and shops[sid(shop)].get("out_of_service")) for shop in q.get("shop_ids", [])):
+                   shops[sid(shop)].get("out_of_service") for shop in q.get("shop_ids", [])):
                 continue
             failed = False
             for identifier in q.get("tool_ids", []):
                 tool = tools.get(sid(identifier))
                 shop = shops.get(sid(tool.get("shop_id"))) if tool else None
-                if (not tool or tool.get("disabled") or not shop or shop.get("disabled") or sid(identifier) not in cleared or
-                    (generated(q) and (tool.get("out_of_service") or shop.get("out_of_service")))):
+                if (not tool or tool.get("disabled") or tool.get("out_of_service") or not shop
+                        or shop.get("disabled") or shop.get("out_of_service") or sid(identifier) not in cleared):
                     failed = True
                     break
             if not failed:
@@ -227,7 +232,7 @@ class QuestDiscovery:
     def _listing(self, search, full):
         title_filter = {"$regex": re.escape(search.casefold())}
         heads = self._stream({"kind": "quest_head", "quest_type": "individual",
-            "target_rank": self.participant["rank"], "title_key": title_filter}, full=full)
+            "target_rank": {"$lte": self.participant["rank"]}, "title_key": title_filter}, full=full)
         accepted = self._stream({"kind": "quest_acceptance", "member_id": self.member,
             "title_key": title_filter}, "ledger_relationships", "quest_revision", accepted=True, full=full)
         by_logical = {q["logical_id"]: q for q in heads}
@@ -237,8 +242,6 @@ class QuestDiscovery:
     def _simple_options(self, collection, query, prefix, search):
         cursor, result = None, []
         query = {**query, "title_key": {"$regex": re.escape(search.casefold())}}
-        if prefix == "g":
-            query["creator"] = {"$ne": self.member}
         while len(result) < DISPLAY_LIMIT:
             page = self.l.store.select(collection, _after(query, cursor, title=True),
                 projection={"_id": 1, "title": 1, "creator": 1, "kind": 1, "status": 1},
