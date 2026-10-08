@@ -2,6 +2,7 @@ import argparse
 from copy import deepcopy
 from datetime import timedelta
 import io
+import json
 from unittest.mock import patch
 
 import pytest
@@ -9,7 +10,8 @@ from pymongo.errors import PyMongoError
 from slack_sdk.errors import SlackApiError
 
 from ledger.domain import Denied
-from ledger.sponsorship_reminder import (eligible_participants, load_variants, parse_days, run)
+from ledger.sponsorship_reminder import (CATEGORIES, DEFAULT_VARIANTS, eligible_participants,
+    load_variants, parse_days, run)
 from ledger.storage import now
 from ledger.worker import Worker
 
@@ -179,6 +181,16 @@ def test_custom_variant_file_has_all_required_categories():
     assert set(load_variants()) == {"reminder_never", "reminder_previous", "invitation_accepted"}
 
 
+def test_custom_variants_load_and_validate_every_category():
+    document = json.loads(DEFAULT_VARIANTS.read_text(encoding="utf-8"))
+    with patch("ledger.sponsorship_reminder.Path.read_text", return_value=json.dumps(document)):
+        assert set(load_variants("custom-variants.json")) == set(CATEGORIES)
+    document["invitation_accepted"]["variations"] = []
+    with patch("ledger.sponsorship_reminder.Path.read_text", return_value=json.dumps(document)):
+        with pytest.raises(ValueError):
+            load_variants("custom-variants.json")
+
+
 def test_invitation_acceptance_queues_and_delivers_recent_followup(joined):
     ledger, store, _, composer, _, slack = joined
     inviter, accepted = str(oid(1)), str(oid(3))
@@ -218,6 +230,58 @@ def test_delayed_invitation_followup_cannot_overwrite_acceptance(joined):
     with pytest.raises(Denied, match="superseded"):
         worker.deliver_sponsorship_reminder_followup(invited_job)
     assert slack.chat_update.call_count == 1
+
+
+def test_failed_accepted_text_restoration_is_retried_by_invitation_worker(joined):
+    ledger, store, _, composer, _, slack = joined
+    inviter, accepted = str(oid(1)), str(oid(3))
+    save_receipt(ledger, store, inviter)
+    worker = Worker(ledger, composer, slack)
+    assert worker.queue_sponsorship_reminder_followup(inviter, "invitation_sent", accepted)
+    invited_job = store.get("ledger_outbox", f"sponsorship-reminder-invited:{inviter}:{accepted}")
+    accepted_text = "Thank you for inviting Maker3 Test. Welcome them in <#CCHAT>."
+    participant = ledger.participant(inviter)
+    participant.update(reminder_followup_event="invitation_accepted", reminder_followup_member_id=accepted,
+                       reminder_followup_text=accepted_text, reminder_followup_restore_needed=True)
+    store.put("ledger_participants", participant)
+    invited_job.update(status="working", lease="invite-first-run")
+    store.put("ledger_outbox", invited_job)
+
+    def fail_first_update(**kwargs):
+        if slack.chat_update.call_count == 1:
+            raise TimeoutError("temporary failure")
+        return {"ts": kwargs["ts"]}
+
+    slack.chat_update.side_effect = fail_first_update
+    with pytest.raises(TimeoutError):
+        worker.deliver_sponsorship_reminder_followup(invited_job)
+    assert ledger.participant(inviter)["reminder_followup_restore_needed"] is True
+
+    invited_job.update(status="working", lease="invite-retry")
+    store.put("ledger_outbox", invited_job)
+    worker.deliver_sponsorship_reminder_followup(invited_job)
+    assert slack.chat_update.call_args.kwargs["text"] == accepted_text
+    assert ledger.participant(inviter)["reminder_followup_restore_needed"] is False
+
+
+def test_live_reminder_honors_maintenance_pause_but_dry_run_does_not(joined):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+    store.put("ledger_catalog", {"_id": "control", "paused": True})
+    stdout, stderr = io.StringIO(), io.StringIO()
+    totals = run(ledger, composer, slack, options("never", member=member_id),
+        stdout=stdout, stderr=stderr)
+    assert totals == {"sent": 0, "updated": 0, "failed": 0, "mongo_updated": 0}
+    assert "maintenance" in stderr.getvalue()
+    assert stdout.getvalue().count("Sponsorship reminder totals") == 1
+    slack.users_info.assert_not_called()
+    slack.chat_postMessage.assert_not_called()
+
+    preview = io.StringIO()
+    run(ledger, composer, slack, options("never", member=member_id, dry_run=True),
+        stdout=preview, stderr=io.StringIO())
+    assert '"member_id"' in preview.getvalue()
+    slack.users_info.assert_not_called()
 
 
 def test_invitation_delivery_followup_is_only_queued_for_recent_receipt(joined):

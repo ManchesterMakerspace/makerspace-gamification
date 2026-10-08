@@ -48,7 +48,8 @@ def parser():
     result.add_argument("--days", required=True, type=parse_days,
                         help="Remind prior inviters with no invitation in the last N days, or use 'never'.")
     result.add_argument("--variants", help="JSON file containing reminder and accepted-invitation prompt variants.")
-    result.add_argument("--dry-run", action="store_true", help="List candidates and actions without writes or Slack posts.")
+    result.add_argument("--dry-run", "--dryrun", dest="dry_run", action="store_true",
+                        help="List candidates and actions without writes or Slack posts.")
     result.add_argument("--generate", action="store_true", help="With --dry-run, generate and display text instead of prompts.")
     result.add_argument("--verbose", action="store_true", help="Show Mongo, Slack, and rate-limit diagnostics on STDERR.")
     result.add_argument("--debug", action="store_true", help="Show Mongo, Slack, and rate-limit diagnostics on STDERR.")
@@ -208,7 +209,8 @@ def has_recent_reminder(participant, at=None, slack_id=None):
 REMINDER_FIELDS = {"reminder_ts", "reminder_sent_at", "reminder_channel", "reminder_slack_id",
     "reminder_consent_generation", "reminder_accepted_template", "reminder_variant_index",
     "reminder_variant_category", "reminder_variant_used_at", "reminder_followup_event",
-    "reminder_followup_member_id", "reminder_followup_text", "reminder_followup_at"}
+    "reminder_followup_member_id", "reminder_followup_text", "reminder_followup_at",
+    "reminder_followup_restore_needed"}
 
 
 def merge_reminder_receipt(ledger, member_id, values, *, expected_generation=None, expected_ts=None):
@@ -245,7 +247,8 @@ def queue_reminder_followup(store, member_id, event, accepted_member_id, slack_i
             return False
         if event == "invitation_accepted":
             participant.update(reminder_followup_event="invitation_accepted_pending",
-                               reminder_followup_member_id=accepted_member_id, reminder_followup_at=now())
+                               reminder_followup_member_id=accepted_member_id, reminder_followup_at=now(),
+                               reminder_followup_restore_needed=True)
             current_store.put("ledger_participants", participant)
         payload = {"member_id": member_id, "event": event, "accepted_member_id": accepted_member_id,
                    "slack_id": slack_id}
@@ -270,7 +273,24 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
     candidates = eligible_participants(ledger, args.days, member_filter=args.member, limit=args.limit)
     totals = {"sent": 0, "updated": 0, "failed": 0, "mongo_updated": 0}
     diagnostics = (args.verbose or args.debug) and not args.dry_run
+    pause_warned = False
+    stopped_for_pause = False
+
+    def slack_allowed():
+        nonlocal pause_warned, stopped_for_pause
+        if args.dry_run:
+            return True
+        if (ledger.store.get("ledger_catalog", "control") or {}).get("paused"):
+            stopped_for_pause = True
+            if not pause_warned:
+                print("Sponsorship reminders paused because The Ledger is in maintenance.", file=stderr)
+                pause_warned = True
+            return False
+        return True
+
     for candidate in candidates:
+        if stopped_for_pause:
+            break
         member_id = candidate["member_id"]
         try:
             participant = ledger.participant(member_id) or {}
@@ -303,7 +323,10 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
         operation_stage = "Slack users.info"
         try:
             # Recheck consent and identity just before the external effect.
-            if not ledger.active(member_id) or ledger.sources.slack_id(member_id) != candidate["slack_id"]:
+            if not slack_allowed():
+                break
+            if (not ledger.active(member_id) or ledger.sources.slack_id(member_id) != candidate["slack_id"]
+                    or ledger.is_ineligible(member_id)):
                 continue
             slack_user = slack.users_info(user=candidate["slack_id"]).get("user", {})
             if slack_user.get("deleted") or slack_user.get("is_bot") or candidate["slack_id"] == "USLACKBOT":
@@ -315,10 +338,14 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
             recent = _within_window(participant, now(), candidate["slack_id"])
             dm = participant.get("reminder_channel") if recent else None
             if not dm:
+                if not slack_allowed():
+                    break
                 operation_stage = "Slack conversations.open"
                 dm = slack.conversations_open(users=candidate["slack_id"])["channel"]["id"]
             if recent:
                 try:
+                    if not slack_allowed():
+                        break
                     operation_stage = "Slack chat.update"
                     slack.chat_update(channel=dm, ts=participant["reminder_ts"], text=message,
                                       blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": message}}])
@@ -326,8 +353,12 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
                 except SlackApiError as exc:
                     if _slack_error(exc) != "message_not_found":
                         raise
+                    if not slack_allowed():
+                        break
                     operation_stage = "Slack conversations.open"
                     new_dm = slack.conversations_open(users=candidate["slack_id"])["channel"]["id"]
+                    if not slack_allowed():
+                        break
                     operation_stage = "Slack chat.postMessage"
                     response = slack.chat_postMessage(channel=new_dm,
                         text=message, blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": message}}],
@@ -361,6 +392,8 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
                     expected_ts=participant["reminder_ts"])
                 totals["mongo_updated"] += int(saved)
                 continue
+            if not slack_allowed():
+                break
             operation_stage = "Slack chat.postMessage"
             response = slack.chat_postMessage(channel=dm, text=message,
                 blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": message}}],

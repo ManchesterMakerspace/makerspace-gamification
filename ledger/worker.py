@@ -187,9 +187,12 @@ class Worker:
             store.put("ledger_outbox", {"_id": key, "kind": "remove", "payload": payload,
                 "status": "pending", "attempts": 0, "created_at": stamp, "available_at": stamp})
 
-    def valid_identity(self, member_id):
+    def valid_identity(self, member_id, *, allow_ineligible=False):
         slack_id = self.ledger.sources.slack_id(member_id)
         if not slack_id:
+            return None
+        from .ineligible import is_ineligible_slack_id
+        if is_ineligible_slack_id(slack_id) and not allow_ineligible:
             return None
         user = self.slack.users_info(user=slack_id)["user"]
         invalid = bool(user.get("deleted") or user.get("is_bot") or slack_id == "USLACKBOT")
@@ -220,6 +223,15 @@ class Worker:
         self.ledger.require(member_id)
         event = payload.get("event")
         if event == "invitation_sent":
+            if (participant.get("reminder_followup_event") == "invitation_accepted"
+                    and participant.get("reminder_followup_restore_needed")
+                    and participant.get("reminder_followup_text")):
+                text = participant["reminder_followup_text"]
+                self.slack.chat_update(channel=participant["reminder_channel"], ts=participant["reminder_ts"],
+                    text=text, blocks=[section(text)], unfurl_links=False, unfurl_media=False)
+                merge_reminder_receipt(self.ledger, member_id, {"reminder_followup_restore_needed": False},
+                    expected_generation=participant.get("consent_generation"), expected_ts=participant["reminder_ts"])
+                return
             if participant.get("reminder_followup_event") in ("invitation_accepted_pending", "invitation_accepted"):
                 raise Denied("An accepted invitation superseded this reminder update.")
             text = "Thank you for helping grow The Ledger. Your invitation gives another maker the choice to join."
@@ -285,12 +297,16 @@ class Worker:
             saved = merge_reminder_receipt(self.ledger, member_id, {
                 "reminder_followup_event": "invitation_accepted",
                 "reminder_followup_member_id": payload.get("accepted_member_id"),
-                "reminder_followup_text": text, "reminder_followup_at": now()},
+                "reminder_followup_text": text, "reminder_followup_at": now(),
+                "reminder_followup_restore_needed": True},
                 expected_generation=current.get("consent_generation"), expected_ts=current["reminder_ts"])
             if not saved:
                 raise Denied("Sponsorship reminder changed before acceptance update.")
         self.slack.chat_update(channel=current["reminder_channel"], ts=current["reminder_ts"], text=text,
             blocks=[section(text)], unfurl_links=False, unfurl_media=False)
+        if event == "invitation_accepted":
+            merge_reminder_receipt(self.ledger, member_id, {"reminder_followup_restore_needed": False},
+                expected_generation=current.get("consent_generation"), expected_ts=current["reminder_ts"])
         if event == "invitation_sent":
             latest = self.ledger.participant(member_id) or {}
             accepted_text = latest.get("reminder_followup_text")
@@ -298,8 +314,12 @@ class Worker:
                     and self.ledger.sources.slack_id(member_id) == slack_id
                     and has_recent_reminder(latest, slack_id=slack_id)
                     and latest.get("reminder_ts") == current.get("reminder_ts")):
+                merge_reminder_receipt(self.ledger, member_id, {"reminder_followup_restore_needed": True},
+                    expected_generation=latest.get("consent_generation"), expected_ts=latest["reminder_ts"])
                 self.slack.chat_update(channel=latest["reminder_channel"], ts=latest["reminder_ts"],
                     text=accepted_text, blocks=[section(accepted_text)], unfurl_links=False, unfurl_media=False)
+                merge_reminder_receipt(self.ledger, member_id, {"reminder_followup_restore_needed": False},
+                    expected_generation=latest.get("consent_generation"), expected_ts=latest["reminder_ts"])
 
     def _member_name(self, member_id):
         member = self.ledger.sources.member(member_id) or {}
@@ -602,13 +622,13 @@ class Worker:
                 member = self.ledger.sources.identity(slack_id)
                 member_id = sid(member["_id"]) if member else None
                 p = self.ledger.participant(member_id) if member_id else None
-                allowed = p and self.ledger.active(member_id) and (channel["_id"] == "chat" or p["rank"] >= channel.get("slot", 0))
+                allowed = (p and not self.ledger.is_ineligible(member_id) and self.ledger.active(member_id)
+                           and (channel["_id"] == "chat" or p["rank"] >= channel.get("slot", 0)))
                 if not allowed:
-                    removal_key = f"unauthorized:{channel['_id']}:{slack_id}"
-                    if self.store.get("ledger_outbox", removal_key) or self._slack_user_is_bot(slack_id):
+                    if self._slack_user_is_bot(slack_id):
                         continue
                     self.store.atomic(lambda s, uid=slack_id, c=channel, mid=member_id:
-                        self._enqueue_unauthorized_removal(s, c, uid, mid))
+                        self._enqueue_unauthorized_removal(s, c, uid, mid, joined=True))
                 if member_id:
                     key = f"membership:{member_id}:{channel['_id']}"
                     def update(s):
@@ -622,9 +642,19 @@ class Worker:
                     # Missing leave events must not cause unwanted automatic re-invitations.
                     row.update(present=False, voluntary_leave=True, desired=False)
                     self.store.atomic(lambda s, r=row: s.put("ledger_channels", r))
+        from .admin_access import sync_review_membership
+        for participant in self.store.select("ledger_participants", {"opted_in": True}):
+            member_id = participant.get("member_id", participant.get("_id"))
+            if self.ledger.is_ineligible(member_id):
+                self.store.atomic(lambda s, mid=member_id:
+                    sync_review_membership(Ledger(s, self.ledger.sources), mid))
 
     def event(self, event, key, attempts=1):
         kind = event.get("type")
+        if kind in ("message", "app_mention"):
+            from .ineligible import is_ineligible_slack_id
+            if is_ineligible_slack_id(event.get("user")):
+                return "ignored_ineligible_identity"
         if kind == "user_change":
             user = event["user"]
             member = self.ledger.sources.identity(user["id"])
@@ -859,6 +889,8 @@ class Worker:
 
     def command(self, member_id, command, key):
         from .slack_app import SlackUI
+        if self.ledger.is_ineligible(member_id):
+            return
         ui = SlackUI(self.ledger, self.composer)
         words = command.split()
         cmd, args = words[0], words[1:]
@@ -879,6 +911,8 @@ class Worker:
                             "consent_generation": participant.get("consent_generation", 0)}))
                     return
                 target = ui.resolve(" ".join(args[1:]))
+                if l.is_ineligible(target):
+                    return
                 from .sponsorships import caller_invitation
                 if caller_invitation(l, member_id, target):
                     self.store.atomic(lambda s: enqueue(s, "ledger_outbox", f"sponsor-report:{key}",
@@ -2108,7 +2142,7 @@ class Worker:
         recipient, giver = e["recipient"], e["giver"]
         if not self.ledger.sources.good_standing(recipient):
             raise Denied("Recipient no longer in good standing.")
-        uid = self.valid_identity(recipient)
+        uid = self.valid_identity(recipient, allow_ineligible=True)
         giver_uid = self.ledger.sources.slack_id(giver)
         if not uid or not giver_uid:
             raise Denied("A linked human Slack identity is required.")

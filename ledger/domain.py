@@ -72,13 +72,22 @@ class Ledger:
         self.store.put(collection, profile)
 
     def member_eligible(self, member_id):
+        from .ineligible import is_ineligible_member
         identity = self.store.get("ledger_catalog", f"identity:{member_id}") or {}
-        return bool(self.sources.permitted(member_id) and not identity.get("deactivated") and not identity.get("bot"))
+        return bool(not is_ineligible_member(self, member_id) and self.sources.permitted(member_id)
+                    and not identity.get("deactivated") and not identity.get("bot"))
 
     def active(self, member_id):
+        from .ineligible import is_ineligible_member
         p = self.participant(member_id)
         identity = self.store.get("ledger_catalog", f"identity:{member_id}") or {}
-        return bool(p and p["opted_in"] and not identity.get("deactivated") and not identity.get("bot") and self.sources.permitted(member_id))
+        return bool(not is_ineligible_member(self, member_id) and p and p["opted_in"]
+                    and not identity.get("deactivated") and not identity.get("bot")
+                    and self.sources.permitted(member_id))
+
+    def is_ineligible(self, member_id):
+        from .ineligible import is_ineligible_member
+        return is_ineligible_member(self, member_id)
 
     def staff(self, actor):
         if not self.sources.permitted(actor) or self.sources.role(actor) not in ("admin", "board_member", "resource_manager"):
@@ -130,6 +139,8 @@ class Ledger:
             raise Denied("The Ledger is paused for maintenance. Please try joining later.")
         if not self.sources.permitted(member_id):
             raise Denied("A valid makerspace account linked to an active Slack identity is required.")
+        if self.is_ineligible(member_id):
+            raise Denied("This Slack identity is not eligible for Ledger participation.")
         identity = self.store.get("ledger_catalog", f"identity:{member_id}") or {}
         if identity.get("deactivated") or identity.get("bot"):
             raise Denied("Your Slack identity is deactivated.")
@@ -214,7 +225,7 @@ class Ledger:
 
     def _invite(self, member_id, channel_key, explicit=False, inviter=None, rank_transition=None):
         channel = self.store.get("ledger_channels", channel_key)
-        if not channel or not self.active(member_id):
+        if not channel or self.is_ineligible(member_id) or not self.active(member_id):
             return
         key = f"membership:{member_id}:{channel_key}"
         membership = self.store.get("ledger_channels", key) or {"_id": key, "kind": "membership", "member_id": member_id, "channel_key": channel_key}
@@ -234,6 +245,8 @@ class Ledger:
 
     def _peer_invite(self, actor, target, channel_key):
         self.require(actor)
+        if self.is_ineligible(target):
+            return
         p = self.require(target)
         self.touch(target)
         slot = int(channel_key.split(":")[1]) if channel_key.startswith("rank:") else 0
@@ -248,6 +261,8 @@ class Ledger:
         self._invite(target, channel_key, explicit=True, inviter=actor)
 
     def notify(self, member_id, kind, facts, key, exception=False, administrative=False, *, action_id=None):
+        if self.is_ineligible(member_id):
+            return
         if not exception and not self.active(member_id):
             return
         facts = dict(facts or {})
@@ -345,6 +360,9 @@ class Ledger:
         pair_receipts = self.store.select("ledger_evidence", {"kind": "kudos", "recipient": recipient, "giver": giver, "week": week, "xp_awarded": True})
         daily_receipts = self.store.select("ledger_evidence", {"kind": "kudos", "recipient": recipient, "day": day, "xp_awarded": True})
         eligible = participating and not pair_receipts and len(daily_receipts) < 5
+        # An excluded account may receive ordinary kudos, but the invitation
+        # choice is silently suppressed and never becomes an invitation record.
+        invite = bool(invite and not self.is_ineligible(giver) and not self.is_ineligible(recipient))
         evidence = {"_id": f"kudos:{key}", "kind": "kudos", "giver": giver, "recipient": recipient,
                     "message": message, "emoji": selected_emoji(emoji), "shop": shop, "tool": tool, "shop_name": (shop_doc or {}).get("name"),
                     "tool_name": (tool_doc or {}).get("name"), "public": bool(public), "invite": bool(invite),
@@ -383,6 +401,8 @@ class Ledger:
 
     def _sponsor(self, giver, recipient, notify=True, *, source="sponsor_command"):
         self.require(giver)
+        if self.is_ineligible(recipient):
+            return None
         if giver == recipient or not self.sources.good_standing(recipient):
             raise Denied("Choose another linked member in good standing.")
         from .sponsorships import invitation_key
