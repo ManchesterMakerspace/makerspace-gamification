@@ -15,6 +15,7 @@ from ledger.sponsorship_reminder import (CATEGORIES, DEFAULT_VARIANTS, eligible_
     load_variants, merge_reminder_receipt, parse_days, run)
 from ledger.storage import now
 from ledger.worker import Worker
+from ledger.review_notifications import ReviewDeliveryBusy
 
 from conftest import oid
 
@@ -88,6 +89,67 @@ def test_dry_run_preview_avoids_the_previous_variant(joined):
         stdout=stdout, stderr=io.StringIO())
     prompt = json.loads(stdout.getvalue())["qwen_prompt"]
     assert "patient workshop mentor" in prompt[0]["content"]
+
+
+def test_delivery_retry_reuses_saved_prompt_and_text_after_slack_failure(joined):
+    ledger, store, _, composer, api, slack = joined
+    member_id = str(oid(1))
+    api.complete.return_value = "A saved reminder with one stable variation."
+    slack.chat_postMessage.side_effect = TimeoutError("temporary failure")
+    first = run(ledger, composer, slack, options("never", member=member_id),
+        stdout=io.StringIO(), stderr=io.StringIO())
+    pending = ledger.participant(member_id)
+    pending_id = pending["reminder_pending_id"]
+    selected_prompt = pending["reminder_pending_selection"]
+    saved_text = pending["reminder_pending_text"]
+    first_id = slack.chat_postMessage.call_args.kwargs["client_msg_id"]
+    assert first["failed"] == 1 and saved_text == api.complete.return_value
+
+    slack.chat_postMessage.side_effect = None
+    second = run(ledger, composer, slack, options("never", member=member_id),
+        stdout=io.StringIO(), stderr=io.StringIO())
+    sent = slack.chat_postMessage.call_args.kwargs
+    assert api.complete.call_count == 1
+    assert sent["text"] == saved_text
+    assert sent["client_msg_id"] == first_id
+    assert ledger.participant(member_id)["reminder_pending_id"] is None
+    assert second["sent"] == 1 and selected_prompt["template"]["variations"][0]["id"]
+    assert pending_id
+
+
+def test_receipt_write_retry_reuses_composition_after_slack_accepted_post(joined):
+    ledger, store, _, composer, api, slack = joined
+    member_id = str(oid(1))
+    api.complete.return_value = "A reminder accepted by Slack once."
+    fail_write = [False]
+    original_put = store.put
+
+    def post(**kwargs):
+        fail_write[0] = True
+        return {"ts": "accepted.1", "channel": kwargs["channel"]}
+
+    def put(collection, document):
+        if fail_write[0] and collection == "ledger_participants" and document.get("reminder_ts") == "accepted.1":
+            fail_write[0] = False
+            raise PyMongoError("receipt write failed")
+        return original_put(collection, document)
+
+    slack.chat_postMessage.side_effect = post
+    with patch.object(store, "put", side_effect=put):
+        first = run(ledger, composer, slack, options("never", member=member_id),
+            stdout=io.StringIO(), stderr=io.StringIO())
+    assert first["sent"] == 1 and first["mongo_updated"] == 0
+    saved_text = ledger.participant(member_id)["reminder_pending_text"]
+    first_id = slack.chat_postMessage.call_args.kwargs["client_msg_id"]
+
+    slack.chat_postMessage.side_effect = None
+    second = run(ledger, composer, slack, options("never", member=member_id),
+        stdout=io.StringIO(), stderr=io.StringIO())
+    assert api.complete.call_count == 1
+    assert slack.chat_postMessage.call_args.kwargs["text"] == saved_text
+    assert slack.chat_postMessage.call_args.kwargs["client_msg_id"] == first_id
+    assert ledger.participant(member_id)["reminder_ts"] == "123.456"
+    assert second["sent"] == 1
 
 
 def test_new_reminder_saves_receipt_then_recent_run_updates_same_dm(joined):
@@ -177,6 +239,31 @@ def test_new_send_rechecks_linked_identity_after_opening_dm(joined):
         return {"channel": {"id": "DU1"}}
 
     slack.conversations_open.side_effect = open_after_relink
+    totals = run(ledger, composer, slack, options("never", member=member_id),
+        stdout=io.StringIO(), stderr=io.StringIO())
+    slack.chat_postMessage.assert_not_called()
+    assert totals["sent"] == 0
+
+
+@pytest.mark.parametrize("change", ["opt_out", "relink"])
+def test_deleted_reminder_fallback_revalidates_recipient_after_open(joined, change):
+    ledger, store, source, composer, _, slack = joined
+    member_id = str(oid(1))
+    save_receipt(ledger, store, member_id)
+    slack.chat_update.side_effect = SlackApiError("message missing", {"error": "message_not_found"})
+
+    def open_after_change(users):
+        if change == "opt_out":
+            participant = ledger.participant(member_id)
+            participant.update(opted_in=False, consent_generation=participant["consent_generation"] + 1)
+            store.put("ledger_participants", participant)
+        else:
+            source.data["slack_users"] = [
+                {**row, "slack_id": "UNEW1"} if row["member_id"] == oid(1) else row
+                for row in source.data["slack_users"]]
+        return {"channel": {"id": "DU1"}}
+
+    slack.conversations_open.side_effect = open_after_change
     totals = run(ledger, composer, slack, options("never", member=member_id),
         stdout=io.StringIO(), stderr=io.StringIO())
     slack.chat_postMessage.assert_not_called()
@@ -396,13 +483,28 @@ def test_live_reminder_honors_maintenance_pause_but_dry_run_does_not(joined):
     assert "maintenance" in stderr.getvalue()
     assert stdout.getvalue().count("Sponsorship reminder totals") == 1
     slack.users_info.assert_not_called()
-    slack.chat_postMessage.assert_not_called()
-
     preview = io.StringIO()
     run(ledger, composer, slack, options("never", member=member_id, dry_run=True),
         stdout=preview, stderr=io.StringIO())
     assert '"member_id"' in preview.getvalue()
     slack.users_info.assert_not_called()
+
+
+def test_queued_reminder_followup_honors_maintenance_pause(joined):
+    ledger, store, _, composer, api, slack = joined
+    inviter, accepted = str(oid(1)), str(oid(3))
+    save_receipt(ledger, store, inviter)
+    ledger.sponsor(inviter, accepted)
+    ledger.join(accepted, sponsor=inviter)
+    job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{accepted}")
+    job.update(status="working", lease="paused-followup")
+    store.put("ledger_outbox", job)
+    store.put("ledger_catalog", {"_id": "control", "paused": True})
+    with pytest.raises(ReviewDeliveryBusy):
+        Worker(ledger, composer, slack).outbox(job)
+    api.complete.assert_not_called()
+    slack.chat_update.assert_not_called()
+    slack.chat_postMessage.assert_not_called()
 
 
 def test_invitation_delivery_followup_is_only_queued_for_recent_receipt(joined):
@@ -451,7 +553,8 @@ def test_debug_reports_mongo_receipt_write_error_without_counting_send_failure(j
     original_put = store.put
 
     def put(collection, document):
-        if collection == "ledger_participants" and document.get("member_id") == str(oid(2)):
+        if (collection == "ledger_participants" and document.get("member_id") == str(oid(2))
+                and document.get("reminder_ts")):
             raise PyMongoError("database unavailable")
         return original_put(collection, document)
 

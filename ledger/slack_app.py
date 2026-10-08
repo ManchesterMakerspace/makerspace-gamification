@@ -474,7 +474,7 @@ class SlackUI:
     def action(self, body, client):
         raw_actor = (body.get("user") or {}).get("id") or body.get("user_id")
         action = body["actions"][0]
-        if is_ineligible_slack_id(raw_actor) and action.get("action_id") not in ("kudos", "kudos_send"):
+        if is_ineligible_slack_id(raw_actor) and action.get("action_id") not in ("shop", "kudos_change"):
             return
         actor = self.actor(body)
         name, value = action["action_id"], action.get("value", "")
@@ -490,10 +490,12 @@ class SlackUI:
             return self.open(client, body, views.preferences(self.ledger, actor))
         if name == "review_ledger_quest":
             return self.admin_command(actor, "publish-quest " + value, body, client)
-        if name in ("shop", "kudos_change") and body.get("view", {}).get("callback_id") == "kudos_send":
-            self.ledger.require_member(actor)
-        else:
+        kudos_form_action = (name in ("shop", "kudos_change")
+            and body.get("view", {}).get("callback_id") == "kudos_send")
+        if not kudos_form_action:
             self.ledger.require(actor)
+        elif not is_ineligible_slack_id(raw_actor):
+            self.ledger.require_member(actor)
         if name == "guidance_next_step":
             participant = self.ledger.require(actor)
             if value:

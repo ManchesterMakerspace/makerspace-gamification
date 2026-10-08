@@ -1680,6 +1680,8 @@ class Worker:
         if kind == "sponsor_report":
             return self.deliver_sponsor_report(job)
         if kind == "sponsorship_reminder_followup":
+            if (self.store.get("ledger_catalog", "control") or {}).get("paused"):
+                raise ReviewDeliveryBusy()
             return self.deliver_sponsorship_reminder_followup(job)
         if kind == "community_count_reply":
             from .community_counts import format_answer, timeframe, valid_space_answer

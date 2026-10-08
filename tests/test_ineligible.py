@@ -3,11 +3,13 @@ import json
 import pytest
 
 from ledger.domain import Denied
+from ledger import views
 from ledger.ineligible import is_ineligible_slack_id, parse_slackids_ineligible
 from ledger.slack_app import SlackUI
 from ledger.worker import Worker
 
 from conftest import oid
+from test_slack import form
 
 
 def test_parse_ineligible_slack_id_set_forms(monkeypatch):
@@ -46,6 +48,24 @@ def test_excluded_user_commands_are_silent_except_kudos(joined, monkeypatch):
     # The normal public /kudos flow is still allowed to open its recipient picker.
     ui.command({"user_id": "U1", "command": "/kudos", "text": "", "trigger_id": "trigger"}, slack)
     slack.views_open.assert_called_once()
+
+
+@pytest.mark.parametrize("action_id", ["kudos_change", "shop"])
+def test_excluded_kudos_sender_can_use_kudos_form_actions(joined, monkeypatch, action_id):
+    ledger, _, _, composer, _, slack = joined
+    monkeypatch.setenv("SLACKIDS_INELIGIBLE", '["U1"]')
+    ui = SlackUI(ledger, composer)
+    view = views.kudos_form(ledger, str(oid(2)), "excluded-kudos", {"message": "Thanks"})
+    body = form(view, {"message": "Thanks", "shop": str(oid(201))}, user="U1")
+    body["actions"] = [{"action_id": action_id, "value": "selected"}]
+    ui.action(body, slack)
+    updated = slack.views_update.call_args.kwargs["view"]
+    if action_id == "kudos_change":
+        assert updated["callback_id"] == "kudos_recipient"
+        assert updated["blocks"][0]["element"]["action_id"] == "recipient"
+    else:
+        assert updated["callback_id"] == "kudos_send"
+        assert any(block.get("block_id", "").startswith("tool:") for block in updated["blocks"])
 
 
 def test_kudos_to_excluded_identity_delivers_but_suppresses_invitation(joined, monkeypatch):

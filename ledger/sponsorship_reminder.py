@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 import re
 import sys
+from uuid import uuid4
 
 from slack_sdk.errors import SlackApiError
 from pymongo.errors import PyMongoError
@@ -181,18 +182,64 @@ def prompt_preview(composer, template, facts):
             {"role": "user", "content": rendered["user"]}]
 
 
-def reminder_text(composer, template, facts, member_id, *, category, participant, generate, persist_selection):
-    selection = _selection(composer, template, member_id, category=category,
-                           participant=participant, persist=persist_selection)
+PENDING_REMINDER_FIELDS = ("reminder_pending_id", "reminder_pending_selection", "reminder_pending_text",
+    "reminder_pending_category", "reminder_pending_slack_id", "reminder_pending_consent_generation",
+    "reminder_pending_variant_index")
+
+
+def save_pending_reminder(ledger, member_id, values, *, expected_generation, expected_pending_id=None):
+    """Save prompt reservation and composition before any Slack delivery attempt."""
+    def save(store):
+        participant = store.get("ledger_participants", member_id)
+        if (not participant or participant.get("opted_in") is not True
+                or participant.get("consent_generation") != expected_generation):
+            return False
+        if expected_pending_id is not None and participant.get("reminder_pending_id") != expected_pending_id:
+            return False
+        participant.update(deepcopy(values))
+        store.put("ledger_participants", participant)
+        return True
+    return ledger.store.atomic(save)
+
+
+def reminder_text(composer, template, facts, member_id, *, category, participant, generate,
+                  persist_selection, ledger=None, slack_id=None):
+    generation = participant.get("consent_generation")
+    pending_matches = (persist_selection and participant.get("reminder_pending_category") == category
+        and participant.get("reminder_pending_slack_id") == slack_id
+        and participant.get("reminder_pending_consent_generation") == generation
+        and isinstance(participant.get("reminder_pending_selection"), dict)
+        and isinstance(participant.get("reminder_pending_id"), str))
+    pending_id = participant.get("reminder_pending_id") if pending_matches else None
+    if pending_matches:
+        selection = deepcopy(participant["reminder_pending_selection"])
+        if generate and isinstance(participant.get("reminder_pending_text"), str):
+            return participant["reminder_pending_text"], None, participant.get("reminder_pending_variant_index"), pending_id
+    else:
+        selection = _selection(composer, template, member_id, category=category,
+                               participant=participant, persist=persist_selection)
+        if persist_selection:
+            pending_id = uuid4().hex
+            values = {"reminder_pending_id": pending_id, "reminder_pending_selection": selection,
+                "reminder_pending_text": None, "reminder_pending_category": category,
+                "reminder_pending_slack_id": slack_id,
+                "reminder_pending_consent_generation": generation,
+                "reminder_pending_variant_index": selection["reminder_variant_index"]}
+            if not save_pending_reminder(ledger, member_id, values, expected_generation=generation):
+                raise RuntimeError("Reminder prompt reservation was superseded before it could be saved.")
     if not generate:
         selected_template = deepcopy(template)
         selected_template["variations"] = [deepcopy(selection["template"]["variations"][0])]
-        return None, prompt_preview(composer, selected_template, facts), selection["reminder_variant_index"]
+        return None, prompt_preview(composer, selected_template, facts), selection["reminder_variant_index"], pending_id
     composed = composer.compose("recruitment", "member", facts, selection=selection)
     text = composed.get("text") or template["fallback"]
     if not isinstance(text, str) or not text.strip() or len(text) > 1000 or re.search(r"<!?(?:channel|here|everyone)\b", text, re.I):
         text = template["fallback"]
-    return text, None, selection["reminder_variant_index"]
+    if persist_selection:
+        if not save_pending_reminder(ledger, member_id, {"reminder_pending_text": text},
+                                     expected_generation=generation, expected_pending_id=pending_id):
+            raise RuntimeError("Reminder composition was superseded before it could be saved.")
+    return text, None, selection["reminder_variant_index"], pending_id
 
 
 def _within_window(participant, at, slack_id=None):
@@ -212,11 +259,11 @@ REMINDER_FIELDS = {"reminder_ts", "reminder_sent_at", "reminder_channel", "remin
     "reminder_consent_generation", "reminder_accepted_template", "reminder_variant_index",
     "reminder_variant_category", "reminder_variant_used_at", "reminder_followup_event",
     "reminder_followup_member_id", "reminder_followup_text", "reminder_followup_at",
-    "reminder_followup_restore_needed"}
+    "reminder_followup_restore_needed", *PENDING_REMINDER_FIELDS}
 
 
 def merge_reminder_receipt(ledger, member_id, values, *, expected_generation=None, expected_ts=None,
-                           preserve_followup=False):
+                           preserve_followup=False, clear_pending_id=None):
     """Merge only reminder receipt fields into the latest participant document."""
     if set(values) - REMINDER_FIELDS:
         raise ValueError("Only reminder receipt fields may be merged.")
@@ -234,6 +281,9 @@ def merge_reminder_receipt(ledger, member_id, values, *, expected_generation=Non
             for field in ("reminder_followup_event", "reminder_followup_member_id", "reminder_followup_text",
                           "reminder_followup_at", "reminder_followup_restore_needed"):
                 update.pop(field, None)
+        if clear_pending_id is not None and participant.get("reminder_pending_id") == clear_pending_id:
+            for field in PENDING_REMINDER_FIELDS:
+                update[field] = None
         participant.update(update)
         store.put("ledger_participants", participant)
         return True
@@ -330,9 +380,9 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
             category = candidate["category"]
             facts = _facts(ledger, candidate)
             template = variants[category]
-            message, prompt, variant_index = reminder_text(composer, template, facts, member_id,
+            message, prompt, variant_index, pending_id = reminder_text(composer, template, facts, member_id,
                 category=category, participant=participant, generate=args.generate or not args.dry_run,
-                persist_selection=not args.dry_run)
+                persist_selection=not args.dry_run, ledger=ledger, slack_id=candidate["slack_id"])
             recent = _within_window(participant, now(), candidate["slack_id"])
             action = "update" if recent else "send"
             if args.dry_run:
@@ -395,6 +445,12 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
                     new_dm = slack.conversations_open(users=candidate["slack_id"])["channel"]["id"]
                     if not slack_allowed():
                         break
+                    latest = ledger.participant(member_id) or {}
+                    if (not ledger.active(member_id)
+                            or latest.get("consent_generation") != generation
+                            or ledger.sources.slack_id(member_id) != candidate["slack_id"]
+                            or ledger.is_ineligible(member_id)):
+                        continue
                     operation_stage = "Slack chat.postMessage"
                     response = slack.chat_postMessage(channel=new_dm,
                         text=message, blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": message}}],
@@ -412,7 +468,8 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
                         "reminder_variant_index": variant_index, "reminder_variant_category": category,
                         "reminder_variant_used_at": stamp, "reminder_followup_event": None,
                         "reminder_followup_member_id": None, "reminder_followup_text": None,
-                        "reminder_followup_at": None}, expected_generation=generation)
+                        "reminder_followup_at": None}, expected_generation=generation,
+                        clear_pending_id=pending_id)
                     totals["mongo_updated"] += int(saved)
                     continue
                 totals["updated"] += 1
@@ -440,7 +497,8 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
                     "reminder_accepted_template": deepcopy(variants["invitation_accepted"]),
                     "reminder_variant_index": variant_index, "reminder_variant_category": category,
                     "reminder_variant_used_at": stamp}, expected_generation=generation,
-                    expected_ts=participant["reminder_ts"], preserve_followup=True)
+                    expected_ts=participant["reminder_ts"], preserve_followup=True,
+                    clear_pending_id=pending_id)
                 totals["mongo_updated"] += int(saved)
                 continue
             if not slack_allowed():
@@ -467,7 +525,8 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
                 "reminder_variant_index": variant_index, "reminder_variant_category": category,
                 "reminder_variant_used_at": stamp, "reminder_followup_event": None,
                 "reminder_followup_member_id": None, "reminder_followup_text": None,
-                "reminder_followup_at": None}, expected_generation=generation)
+                "reminder_followup_at": None}, expected_generation=generation,
+                clear_pending_id=pending_id)
             totals["mongo_updated"] += int(saved)
         except Exception as exc:
             if not message_succeeded and not isinstance(exc, PyMongoError):
