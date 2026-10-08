@@ -171,9 +171,15 @@ class Ledger:
             from .sponsorships import invitation_key
             invited_by_sponsor = self.store.get("ledger_relationships", invitation_key(sponsor, member_id))
             attributed = rel and (rel.get("giver") == sponsor or invited_by_sponsor)
-            if attributed and rel["status"] == "pending":
-                rel.update(status="accepted", accepted_at=now())
-                self.store.put("ledger_relationships", rel)
+            if attributed:
+                accepted_at = now()
+                if rel["status"] == "pending":
+                    rel.update(status="accepted", accepted_at=accepted_at)
+                    self.store.put("ledger_relationships", rel)
+                if invited_by_sponsor:
+                    invited_by_sponsor.update(status="accepted", accepted_at=accepted_at,
+                                              accepted_generation=p.get("consent_generation"))
+                    self.store.put("ledger_relationships", invited_by_sponsor)
                 # Keep canonical first-sponsor accounting, but notify the inviter
                 # whose per-inviter invitation was actually accepted.
                 inviter = sponsor if invited_by_sponsor else rel.get("giver")
@@ -182,7 +188,7 @@ class Ledger:
                 from .sponsorship_reminder import queue_reminder_followup
                 if inviter_participant and self.active(inviter) and inviter_slack_id:
                     queue_reminder_followup(self.store, inviter, "invitation_accepted", member_id,
-                                            inviter_slack_id)
+                                            inviter_slack_id, acceptance_id=p.get("consent_generation"))
         from .admin_access import sync_review_membership
         sync_review_membership(self, member_id)
         self._invite(member_id, "chat", explicit=True)

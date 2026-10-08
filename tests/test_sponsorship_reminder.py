@@ -335,7 +335,7 @@ def test_invitation_acceptance_queues_and_delivers_recent_followup(joined):
     ledger.sponsor(inviter, accepted)
     ledger.join(accepted, sponsor=inviter)
 
-    job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{accepted}")
+    job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{accepted}:{inviter}:1")
     assert job and job["kind"] == "sponsorship_reminder_followup"
     assert job["payload"]["member_id"] == inviter
     worker = Worker(ledger, composer, slack)
@@ -354,9 +354,32 @@ def test_acceptance_followup_targets_the_inviter_whose_invitation_was_accepted(j
     ledger.sponsor(first_inviter, recipient)
     ledger.sponsor(accepted_inviter, recipient)
     ledger.join(recipient, sponsor=accepted_inviter)
-    job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{recipient}")
+    job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{recipient}:{accepted_inviter}:1")
     assert job["payload"]["member_id"] == accepted_inviter
     assert store.get("ledger_relationships", f"sponsor:{recipient}")["giver"] == first_inviter
+
+
+def test_rejoin_through_second_sponsor_queues_distinct_acceptance_followup(joined):
+    ledger, store, _, _, _, _ = joined
+    first_inviter, second_inviter, recipient = map(str, (oid(1), oid(2), oid(3)))
+    save_receipt(ledger, store, first_inviter)
+    save_receipt(ledger, store, second_inviter)
+    ledger.sponsor(first_inviter, recipient)
+    ledger.join(recipient, sponsor=first_inviter)
+    first_job_id = f"sponsorship-reminder-accepted:{recipient}:{first_inviter}:1"
+    first_job = store.get("ledger_outbox", first_job_id)
+    assert first_job
+
+    ledger.leave(recipient)
+    ledger.sponsor(second_inviter, recipient)
+    ledger.join(recipient, sponsor=second_inviter)
+
+    second_job_id = f"sponsorship-reminder-accepted:{recipient}:{second_inviter}:2"
+    second_job = store.get("ledger_outbox", second_job_id)
+    assert second_job and second_job["payload"]["member_id"] == second_inviter
+    assert store.get("ledger_outbox", first_job_id) == first_job
+    assert store.get("ledger_relationships", f"sponsor:{recipient}")["giver"] == first_inviter
+    assert store.get("ledger_relationships", f"sponsor-invite:{second_inviter}:{recipient}")["status"] == "accepted"
 
 
 def test_recent_reminder_merge_preserves_acceptance_state(joined):
@@ -427,7 +450,7 @@ def test_delayed_invitation_followup_cannot_overwrite_acceptance(joined):
     invited_job = store.get("ledger_outbox", f"sponsorship-reminder-invited:{inviter}:{accepted}")
 
     ledger.join(accepted, sponsor=inviter)
-    accepted_job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{accepted}")
+    accepted_job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{accepted}:{inviter}:1")
     accepted_job.update(status="working", lease="accepted-lease")
     store.put("ledger_outbox", accepted_job)
     worker.deliver_sponsorship_reminder_followup(accepted_job)
@@ -496,7 +519,7 @@ def test_queued_reminder_followup_honors_maintenance_pause(joined):
     save_receipt(ledger, store, inviter)
     ledger.sponsor(inviter, accepted)
     ledger.join(accepted, sponsor=inviter)
-    job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{accepted}")
+    job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{accepted}:{inviter}:1")
     job.update(status="working", lease="paused-followup")
     store.put("ledger_outbox", job)
     store.put("ledger_catalog", {"_id": "control", "paused": True})

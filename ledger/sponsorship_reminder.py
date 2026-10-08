@@ -312,12 +312,10 @@ def queue_accepted_restoration_retry(ledger, member_id, participant):
     return ledger.store.atomic(reserve)
 
 
-def queue_reminder_followup(store, member_id, event, accepted_member_id, slack_id):
+def queue_reminder_followup(store, member_id, event, accepted_member_id, slack_id, *, acceptance_id=None):
     """Reserve a bound follow-up, with acceptance taking precedence over invitation delivery."""
     if event not in ("invitation_sent", "invitation_accepted"):
         return False
-    key = (f"sponsorship-reminder-accepted:{accepted_member_id}" if event == "invitation_accepted"
-           else f"sponsorship-reminder-invited:{member_id}:{accepted_member_id}")
     def reserve(current_store):
         participant = current_store.get("ledger_participants", member_id)
         if (not participant or participant.get("opted_in") is not True
@@ -327,12 +325,18 @@ def queue_reminder_followup(store, member_id, event, accepted_member_id, slack_i
         if event == "invitation_sent" and precedence in ("invitation_accepted_pending", "invitation_accepted"):
             return False
         if event == "invitation_accepted":
+            cycle = acceptance_id if acceptance_id is not None else participant.get("consent_generation", 0)
             participant.update(reminder_followup_event="invitation_accepted_pending",
                                reminder_followup_member_id=accepted_member_id, reminder_followup_at=now(),
                                reminder_followup_restore_needed=True)
             current_store.put("ledger_participants", participant)
+            key = f"sponsorship-reminder-accepted:{accepted_member_id}:{member_id}:{cycle}"
+        else:
+            key = f"sponsorship-reminder-invited:{member_id}:{accepted_member_id}"
         payload = {"member_id": member_id, "event": event, "accepted_member_id": accepted_member_id,
                    "slack_id": slack_id}
+        if event == "invitation_accepted":
+            payload["acceptance_id"] = cycle
         enqueue(current_store, "ledger_outbox", key, "sponsorship_reminder_followup", payload)
         return True
     return store.atomic(reserve)
