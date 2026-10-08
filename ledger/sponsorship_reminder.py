@@ -182,10 +182,12 @@ def prompt_preview(composer, template, facts):
 
 
 def reminder_text(composer, template, facts, member_id, *, category, participant, generate, persist_selection):
-    if not generate:
-        return None, prompt_preview(composer, template, facts), None
     selection = _selection(composer, template, member_id, category=category,
                            participant=participant, persist=persist_selection)
+    if not generate:
+        selected_template = deepcopy(template)
+        selected_template["variations"] = [deepcopy(selection["template"]["variations"][0])]
+        return None, prompt_preview(composer, selected_template, facts), selection["reminder_variant_index"]
     composed = composer.compose("recruitment", "member", facts, selection=selection)
     text = composed.get("text") or template["fallback"]
     if not isinstance(text, str) or not text.strip() or len(text) > 1000 or re.search(r"<!?(?:channel|here|everyone)\b", text, re.I):
@@ -213,7 +215,8 @@ REMINDER_FIELDS = {"reminder_ts", "reminder_sent_at", "reminder_channel", "remin
     "reminder_followup_restore_needed"}
 
 
-def merge_reminder_receipt(ledger, member_id, values, *, expected_generation=None, expected_ts=None):
+def merge_reminder_receipt(ledger, member_id, values, *, expected_generation=None, expected_ts=None,
+                           preserve_followup=False):
     """Merge only reminder receipt fields into the latest participant document."""
     if set(values) - REMINDER_FIELDS:
         raise ValueError("Only reminder receipt fields may be merged.")
@@ -225,10 +228,38 @@ def merge_reminder_receipt(ledger, member_id, values, *, expected_generation=Non
             return False
         if expected_ts is not None and participant.get("reminder_ts") != expected_ts:
             return False
-        participant.update(deepcopy(values))
+        update = deepcopy(values)
+        if preserve_followup and participant.get("reminder_followup_event") in (
+                "invitation_accepted_pending", "invitation_accepted"):
+            for field in ("reminder_followup_event", "reminder_followup_member_id", "reminder_followup_text",
+                          "reminder_followup_at", "reminder_followup_restore_needed"):
+                update.pop(field, None)
+        participant.update(update)
         store.put("ledger_participants", participant)
         return True
     return ledger.store.atomic(merge)
+
+
+def queue_accepted_restoration_retry(ledger, member_id, participant):
+    """Persist a worker retry when a CLI reminder update races with acceptance."""
+    accepted_member_id = participant.get("reminder_followup_member_id")
+    reminder_ts = participant.get("reminder_ts")
+    if not isinstance(accepted_member_id, str) or not isinstance(reminder_ts, str):
+        return False
+    def reserve(store):
+        current = store.get("ledger_participants", member_id)
+        if (not current or current.get("reminder_ts") != reminder_ts
+                or current.get("reminder_followup_event") != "invitation_accepted"
+                or not current.get("reminder_followup_text")):
+            return False
+        current["reminder_followup_restore_needed"] = True
+        store.put("ledger_participants", current)
+        enqueue(store, "ledger_outbox", f"sponsorship-reminder-restore:{member_id}:{reminder_ts}",
+                "sponsorship_reminder_followup", {"member_id": member_id,
+                "event": "invitation_sent", "accepted_member_id": accepted_member_id,
+                "slack_id": current.get("reminder_slack_id")})
+        return True
+    return ledger.store.atomic(reserve)
 
 
 def queue_reminder_followup(store, member_id, event, accepted_member_id, slack_id):
@@ -343,6 +374,11 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
                 operation_stage = "Slack conversations.open"
                 dm = slack.conversations_open(users=candidate["slack_id"])["channel"]["id"]
             if recent:
+                # If acceptance work is underway, leave the existing reminder
+                # untouched. Acceptance has precedence over generic reminders.
+                current = ledger.participant(member_id) or {}
+                if current.get("reminder_followup_event") in ("invitation_accepted_pending", "invitation_accepted"):
+                    continue
                 try:
                     if not slack_allowed():
                         break
@@ -382,18 +418,39 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
                 totals["updated"] += 1
                 operation_stage = "Mongo ledger_participants write"
                 stamp = now()
+                latest = ledger.participant(member_id) or {}
+                if (latest.get("reminder_followup_event") == "invitation_accepted"
+                        and latest.get("reminder_followup_text")):
+                    # A worker may have committed acceptance after the preflight
+                    # check but before this generic update completed. Restore it.
+                    if not slack_allowed():
+                        break
+                    operation_stage = "Slack accepted follow-up restoration"
+                    try:
+                        slack.chat_update(channel=latest["reminder_channel"], ts=latest["reminder_ts"],
+                            text=latest["reminder_followup_text"],
+                            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": latest["reminder_followup_text"]}}],
+                            unfurl_links=False, unfurl_media=False)
+                    except Exception:
+                        queue_accepted_restoration_retry(ledger, member_id, latest)
+                        message_succeeded = False
+                        raise
                 saved = merge_reminder_receipt(ledger, member_id, {
                     "reminder_slack_id": candidate["slack_id"], "reminder_consent_generation": generation,
                     "reminder_accepted_template": deepcopy(variants["invitation_accepted"]),
                     "reminder_variant_index": variant_index, "reminder_variant_category": category,
-                    "reminder_variant_used_at": stamp, "reminder_followup_event": None,
-                    "reminder_followup_member_id": None, "reminder_followup_text": None,
-                    "reminder_followup_at": None}, expected_generation=generation,
-                    expected_ts=participant["reminder_ts"])
+                    "reminder_variant_used_at": stamp}, expected_generation=generation,
+                    expected_ts=participant["reminder_ts"], preserve_followup=True)
                 totals["mongo_updated"] += int(saved)
                 continue
             if not slack_allowed():
                 break
+            # conversations.open can overlap an opt-out or identity relink.
+            latest = ledger.participant(member_id) or {}
+            if (not ledger.active(member_id) or ledger.sources.slack_id(member_id) != candidate["slack_id"]
+                    or ledger.is_ineligible(member_id)
+                    or latest.get("consent_generation") != generation):
+                continue
             operation_stage = "Slack chat.postMessage"
             response = slack.chat_postMessage(channel=dm, text=message,
                 blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": message}}],

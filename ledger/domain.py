@@ -169,12 +169,14 @@ class Ledger:
         if sponsor:
             rel = self.store.get("ledger_relationships", f"sponsor:{member_id}")
             from .sponsorships import invitation_key
-            attributed = rel and (rel.get("giver") == sponsor or
-                self.store.get("ledger_relationships", invitation_key(sponsor, member_id)))
+            invited_by_sponsor = self.store.get("ledger_relationships", invitation_key(sponsor, member_id))
+            attributed = rel and (rel.get("giver") == sponsor or invited_by_sponsor)
             if attributed and rel["status"] == "pending":
                 rel.update(status="accepted", accepted_at=now())
                 self.store.put("ledger_relationships", rel)
-                inviter = rel.get("giver")
+                # Keep canonical first-sponsor accounting, but notify the inviter
+                # whose per-inviter invitation was actually accepted.
+                inviter = sponsor if invited_by_sponsor else rel.get("giver")
                 inviter_participant = self.participant(inviter) if isinstance(inviter, str) else None
                 inviter_slack_id = self.sources.slack_id(inviter) if isinstance(inviter, str) else None
                 from .sponsorship_reminder import queue_reminder_followup

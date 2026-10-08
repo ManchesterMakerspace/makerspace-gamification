@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import timedelta
 import io
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -11,7 +12,7 @@ from slack_sdk.errors import SlackApiError
 
 from ledger.domain import Denied
 from ledger.sponsorship_reminder import (CATEGORIES, DEFAULT_VARIANTS, eligible_participants,
-    load_variants, parse_days, run)
+    load_variants, merge_reminder_receipt, parse_days, run)
 from ledger.storage import now
 from ledger.worker import Worker
 
@@ -74,6 +75,21 @@ def test_dry_run_generate_prints_text_without_writes(joined):
     slack.chat_postMessage.assert_not_called()
 
 
+def test_dry_run_preview_avoids_the_previous_variant(joined):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+    template = load_variants()["reminder_never"]
+    composer.choose = lambda choices: choices[0]
+    participant = ledger.participant(member_id)
+    participant.update(reminder_variant_index=0, reminder_variant_category="reminder_never")
+    store.put("ledger_participants", participant)
+    stdout = io.StringIO()
+    run(ledger, composer, slack, options("never", dry_run=True, member=member_id),
+        stdout=stdout, stderr=io.StringIO())
+    prompt = json.loads(stdout.getvalue())["qwen_prompt"]
+    assert "patient workshop mentor" in prompt[0]["content"]
+
+
 def test_new_reminder_saves_receipt_then_recent_run_updates_same_dm(joined):
     ledger, store, _, composer, _, slack = joined
     # Member 1 has previously invited someone, so target only their old invite history.
@@ -131,6 +147,40 @@ def test_receipt_merge_preserves_concurrent_progress_and_opt_out(joined):
     assert current["xp"] == "77" and current["opted_in"] is False
     assert "reminder_ts" not in current
     assert totals["sent"] == 1 and totals["mongo_updated"] == 0
+
+
+def test_new_send_rechecks_opt_out_after_opening_dm(joined):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+
+    def open_after_opt_out(users):
+        participant = ledger.participant(member_id)
+        participant.update(opted_in=False, consent_generation=participant["consent_generation"] + 1)
+        store.put("ledger_participants", participant)
+        return {"channel": {"id": "D1"}}
+
+    slack.conversations_open.side_effect = open_after_opt_out
+    totals = run(ledger, composer, slack, options("never", member=member_id),
+        stdout=io.StringIO(), stderr=io.StringIO())
+    slack.chat_postMessage.assert_not_called()
+    assert totals["sent"] == 0
+
+
+def test_new_send_rechecks_linked_identity_after_opening_dm(joined):
+    ledger, _, source, composer, _, slack = joined
+    member_id = str(oid(1))
+
+    def open_after_relink(users):
+        source.data["slack_users"] = [
+            {**row, "slack_id": "UNEW1"} if row["member_id"] == oid(1) else row
+            for row in source.data["slack_users"]]
+        return {"channel": {"id": "DU1"}}
+
+    slack.conversations_open.side_effect = open_after_relink
+    totals = run(ledger, composer, slack, options("never", member=member_id),
+        stdout=io.StringIO(), stderr=io.StringIO())
+    slack.chat_postMessage.assert_not_called()
+    assert totals["sent"] == 0
 
 
 def test_receipt_merge_preserves_concurrent_progress_for_active_member(joined):
@@ -207,6 +257,77 @@ def test_invitation_acceptance_queues_and_delivers_recent_followup(joined):
     assert "Maker3 Test" in text
     assert "<#CCHAT>" in text
     assert store.get("ledger_outbox", job["_id"])["status"] == "done"
+
+
+def test_acceptance_followup_targets_the_inviter_whose_invitation_was_accepted(joined):
+    ledger, store, _, _, _, _ = joined
+    first_inviter, accepted_inviter, recipient = map(str, (oid(1), oid(2), oid(3)))
+    save_receipt(ledger, store, first_inviter)
+    save_receipt(ledger, store, accepted_inviter)
+    ledger.sponsor(first_inviter, recipient)
+    ledger.sponsor(accepted_inviter, recipient)
+    ledger.join(recipient, sponsor=accepted_inviter)
+    job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{recipient}")
+    assert job["payload"]["member_id"] == accepted_inviter
+    assert store.get("ledger_relationships", f"sponsor:{recipient}")["giver"] == first_inviter
+
+
+def test_recent_reminder_merge_preserves_acceptance_state(joined):
+    ledger, store, _, _, _, _ = joined
+    member_id = str(oid(1))
+    participant = save_receipt(ledger, store, member_id,
+        reminder_followup_event="invitation_accepted", reminder_followup_member_id=str(oid(3)),
+        reminder_followup_text="Accepted thank you", reminder_followup_restore_needed=True)
+    merged = merge_reminder_receipt(ledger, member_id, {
+        "reminder_variant_index": 1, "reminder_followup_event": None,
+        "reminder_followup_member_id": None, "reminder_followup_text": None,
+        "reminder_followup_at": None, "reminder_followup_restore_needed": False},
+        expected_generation=participant["consent_generation"], expected_ts=participant["reminder_ts"],
+        preserve_followup=True)
+    current = ledger.participant(member_id)
+    assert merged and current["reminder_variant_index"] == 1
+    assert current["reminder_followup_event"] == "invitation_accepted"
+    assert current["reminder_followup_text"] == "Accepted thank you"
+
+
+def test_cli_update_queues_retry_if_acceptance_restoration_fails(joined):
+    ledger, store, _, composer, _, slack = joined
+    inviter, recipient = str(oid(1)), str(oid(3))
+    ledger.sponsor(inviter, recipient)
+    invite = store.get("ledger_relationships", f"sponsor-invite:{inviter}:{recipient}")
+    invite["at"] = now() - timedelta(days=31)
+    store.put("ledger_relationships", invite)
+    save_receipt(ledger, store, inviter)
+    accepted_text = "Thank you for inviting Maker3 Test. Welcome them in <#CCHAT>."
+
+    def update_with_acceptance_race(**kwargs):
+        if slack.chat_update.call_count == 1:
+            participant = ledger.participant(inviter)
+            participant.update(reminder_followup_event="invitation_accepted",
+                reminder_followup_member_id=recipient, reminder_followup_text=accepted_text,
+                reminder_followup_restore_needed=False)
+            store.put("ledger_participants", participant)
+            return {"ts": kwargs["ts"]}
+        if slack.chat_update.call_count == 2:
+            raise TimeoutError("temporary Slack failure")
+        return {"ts": kwargs["ts"]}
+
+    slack.chat_update.side_effect = update_with_acceptance_race
+    run(ledger, composer, slack, options(30, member=inviter), stdout=io.StringIO(), stderr=io.StringIO())
+    participant = ledger.participant(inviter)
+    assert participant["reminder_followup_restore_needed"] is True
+    retry = store.get("ledger_outbox", f"sponsorship-reminder-restore:{inviter}:{participant['reminder_ts']}")
+    assert retry and retry["kind"] == "sponsorship_reminder_followup"
+
+    worker = Worker(ledger, composer, slack)
+    assert worker.step("ledger_outbox", kinds=["sponsorship_reminder_followup"])
+    assert slack.chat_update.call_args.kwargs["text"] == accepted_text
+    assert ledger.participant(inviter)["reminder_sent_at"] == participant["reminder_sent_at"]
+
+
+def test_compose_passes_ineligible_ids_through_shared_environment_mapping():
+    compose = (Path(__file__).parents[1] / "compose.yaml").read_text(encoding="utf-8")
+    assert 'SLACKIDS_INELIGIBLE: "${SLACKIDS_INELIGIBLE:-}"' in compose
 
 
 def test_delayed_invitation_followup_cannot_overwrite_acceptance(joined):
