@@ -135,6 +135,11 @@ $env:LEDGER_TEST_MONGO_URI = 'mongodb://localhost:27017/?replicaSet=rs0'
 python -m pytest tests/test_mongo_integration.py
 ```
 
+All pytest entry points share a session cleanup hook: temporary test trees and
+their symlinks are removed after success, failure, collection errors, or a handled
+interrupt. Forced process termination can leave files behind; `.pytest*`,
+`pytest-temp*`, and `.test-basetemp*` output is excluded from Git and Docker builds.
+
 The ordinary suite runs without credentials. It covers rules, accounting, consent, Slack forms, signed HTTP ingress, retries, public kudos, scopes, channel races, mentoring, quests, and a real local HTTP chat-API stub. The Mongo integration test is skipped unless explicitly configured; it creates and removes only its own random `ledger_test_*` database. Workspace Slack behavior, broker delivery, replica-set performance, and pilot latency need deployment validation.
 
 The sibling `ChangeStream2MQTT` change filters every `ledger_*` collection before logging or publishing, with defensive filtering at the dispatch and publish boundaries. Deploy that exclusion before enabling Ledger writes. Rails and React behavior is unchanged.

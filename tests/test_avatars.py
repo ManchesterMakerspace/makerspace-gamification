@@ -226,6 +226,42 @@ def test_preferences_preserve_other_fields_and_restore_default(setup):
     assert store.exists("ledger_outbox", {"kind": "avatar_generate", "status": "pending"})
 
 
+def test_opt_out_retires_pair_and_deletes_only_after_default_home(setup):
+    ledger, store, _, slack, _, worker, pipeline, job, member = setup
+    pipeline.generate(job)
+    ledger.preferences(member, True, True, avatars=False)
+    assert avatars.current(store, member) is None
+    assert store.get("ledger_avatars", "current:" + member)["kind"] == "current_removed"
+    cleanup = store.claim("ledger_outbox", kinds=["avatar_cleanup"])
+    while cleanup and cleanup["_id"] != "avatar-opt-out:" + job["_id"]:
+        cleanup = store.claim("ledger_outbox", kinds=["avatar_cleanup"])
+    assert cleanup
+    with pytest.raises(HistoryImportPending):
+        avatars.deliver(worker, cleanup)
+    slack.files_delete.assert_not_called()
+    store.put("ledger_homes", {"_id": member, "published_avatar_revision": "default"})
+    avatars.deliver(worker, cleanup)
+    assert {c.kwargs["file"] for c in slack.files_delete.call_args_list} == {"F_FULL", "F_SMALL"}
+    ledger.preferences(member, True, True, avatars=True)
+    assert avatars.visible(ledger, member) is None
+
+
+def test_downward_rank_correction_cancels_inflight_and_queues_replacement(setup):
+    ledger, store, _, _, _, _, pipeline, job, member = setup
+    p = ledger.participant(member)
+    p["rank"] = 2
+    store.put("ledger_participants", p)
+    before = p.get("avatar_generation", 0)
+    ledger.correct_rank(str(oid(10)), member, 1, "Independent correction")
+    assert ledger.participant(member)["avatar_generation"] == before + 1
+    assert store.get("ledger_outbox", job["_id"])["status"] == "cancelled"
+    with pytest.raises(Denied):
+        pipeline.generate(job)
+    replacement = store.select("ledger_outbox", {"kind": "avatar_generate", "status": "pending"})
+    assert len(replacement) == 1
+    assert replacement[0]["payload"]["avatar_generation"] == before + 1
+
+
 def test_milestones_coalesce_but_inflight_gets_followup(setup):
     ledger, store, _, _, _, _, _, job, member = setup
     first = ledger.store.atomic(lambda s: avatars.request(Ledger(s, ledger.sources), member, "quest:one"))

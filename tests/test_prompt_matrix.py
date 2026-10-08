@@ -37,7 +37,7 @@ def fake_connection(raw, *, status=200, content_type='text/plain; charset=utf-8'
 
 def test_bundled_matrix_codifies_roles_and_seed_economy():
     matrix = bundled_matrix()
-    assert matrix['version'] == '46'
+    assert matrix['version'] == '47'
     root = ElementTree.fromstring(matrix['text'])
     admin = root.find("roles/role[@id='admin']").text
     assert 'MLAB members role admin' in admin and 'every rank' in admin

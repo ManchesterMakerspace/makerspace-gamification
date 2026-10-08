@@ -523,9 +523,16 @@ class Ledger:
             raise ValueError("Provide an independent correction, a reason, and an already-held or lower rank.")
         self.store.put("ledger_awards", {"_id": str(uuid4()), "kind": "rank_correction", "actor": actor,
                        "member_id": member_id, "before": p["rank"], "after": slot, "reason": reason, "at": now()})
+        rank_changed = p["rank"] != slot
         p.update(rank=slot, rank_hold=True, revision=p["revision"] + 1)
+        if rank_changed:
+            p["avatar_generation"] = p.get("avatar_generation", 0) + 1
         self.store.put("ledger_participants", p)
         enqueue_home_refresh(self.store, member_id, f"rank-correction:{p['revision']}", self.sources.slack_id(member_id))
+        if rank_changed:
+            from .avatars import cancel, request
+            cancel(self, member_id)
+            request(self, member_id, f"rank-correction:{p['revision']}")
         from .quests import Quests
         Quests(self).cleanup(member_id)
         self.notify(member_id, "correction", {"summary": reason, "rank": self.presentation(slot)["name"]}, str(uuid4()))
@@ -839,9 +846,11 @@ class Ledger:
             p.update(preferences=preferences, revision=p["revision"] + 1,
                      observation_generation=p.get("observation_generation", 0) + 1)
             d.save_preference_profile(p)
-            from .avatars import cancel, request
+            from .avatars import cancel, request, retire
             if not preferences.get("avatars", True) or remove_reference or observation_changed:
                 cancel(d, member_id)
+            if not preferences.get("avatars", True):
+                retire(d, member_id)
             if remove_reference:
                 # Keep the user-owned Slack file; clear only the active reference.
                 s.put("ledger_avatars", {"_id": "reference:" + member_id, "kind": "reference_removed", "member_id": member_id})

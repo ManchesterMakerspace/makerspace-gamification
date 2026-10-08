@@ -3,13 +3,14 @@
 Personalized fantasy avatars default on for active participants. `/ledger
 preferences` offers an opt-out, one owned JPEG/PNG/WebP reference strictly below
 2,000,000 bytes, and reference removal. Opt-out restores the rank image and
-cancels generation/notices. Preferences survive leaving/rejoining. An uploaded
+cancels generation/notices, tombstones the current pair, and deletes its bot-owned
+files after the default Home is confirmed. Preferences survive leaving/rejoining. An uploaded
 reference replaces the Slack photo; its original user-owned file is retained.
 The first confirmed avatar DM explains the opt-out location.
 
 ## Generation and privacy
 
-Joining, promotion, newly recorded shop completion, and independently verified
+Joining, promotion, downward rank correction, newly recorded shop completion, and independently verified
 individual/cooperative/catalog quest completions reserve jobs in the existing
 Mongo transactions. Duplicate events do not reserve duplicate jobs. Pending
 requests coalesce for sixty seconds; milestones during generation reserve a
@@ -136,7 +137,7 @@ independent simultaneous supervisors. OOM preserves the old avatar and retries;
 move the image service to another GPU rather than automatically unloading the
 narrator.
 
-Prompt Matrix version 46 and the new paired `avatar.json` set cover avatar
+Prompt Matrix version 47 and the paired `avatar.json` set cover avatar
 policy. XML schema/required roles remain unchanged. Google Doc overrides require
 the same policy update and explicit reload; no external document is edited or
 published, and existing reserved jobs retain their policy snapshot.

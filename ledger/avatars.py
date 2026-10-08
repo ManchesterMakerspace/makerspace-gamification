@@ -39,7 +39,21 @@ def enabled(ledger, member):
 
 
 def current(store, member):
-    return store.get(COLLECTION, "current:" + member)
+    row = store.get(COLLECTION, "current:" + member)
+    return row if row and row.get("kind") == "current" else None
+
+
+def retire(ledger, member):
+    """Retire bot-owned images transactionally; delivery waits for default Home."""
+    row = current(ledger.store, member)
+    if not row:
+        return
+    ledger.store.put(COLLECTION, {"_id": row["_id"], "kind": "current_removed",
+        "member_id": member, "previous_revision": row["revision"], "removed_at": now()})
+    enqueue_home_refresh(ledger.store, member, "avatar-opt-out:" + row["revision"])
+    enqueue(ledger.store, "ledger_outbox", "avatar-opt-out:" + row["revision"], "avatar_cleanup",
+        {"member_id": member, "artifact_job": row["revision"],
+         "files": [row[k]["file_id"] for k in ("avatar", "avatar512") if row.get(k, {}).get("file_id")]})
 
 
 def custom_reference(store, member):
