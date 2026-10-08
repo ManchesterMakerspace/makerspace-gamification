@@ -120,11 +120,11 @@ def admin_invitation():
 
 
 def kudos_form(ledger, recipient, key, draft=None):
+    from .kudos import require_recipient
+    require_recipient(ledger, recipient)
     draft = draft or {}
     participating = ledger.active(recipient)
     member = ledger.sources.member(recipient)
-    if not member or not ledger.sources.good_standing(recipient):
-        raise ValueError("Choose a member in good standing with a valid Slack identity.")
     name = " ".join([member.get("firstname", ""), member.get("lastname", "")]).strip()
     blocks = [section(f"Kudos for *{escape(name)}*"),
               {"type": "actions", "elements": [button("Change recipient", "kudos_change", key)]}]

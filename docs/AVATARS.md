@@ -143,7 +143,7 @@ independent simultaneous supervisors. OOM preserves the old avatar and retries;
 move the image service to another GPU rather than automatically unloading the
 narrator.
 
-Prompt Matrix version 47 and the paired `avatar.json` set cover avatar
+Prompt Matrix version 48 and the paired `avatar.json` set cover avatar
 policy. XML schema/required roles remain unchanged. Google Doc overrides require
 the same policy update and explicit reload; no external document is edited or
 published, and existing reserved jobs retain their policy snapshot.

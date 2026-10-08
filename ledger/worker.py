@@ -80,6 +80,9 @@ class Worker:
                 if deferred:
                     current["attempts"] = max(0, current.get("attempts", 1) - 1)
                 s.put(collection, current)
+                if collection == "ledger_outbox" and job["kind"] == "kudos_submit" and status == "failed":
+                    from .kudos_submission import failed
+                    failed(s, job)
                 if collection == "ledger_outbox" and job["kind"] == "kudos" and status in ("failed", "cancelled"):
                     self.kudos_receipt(s, job, {"status": status, "at": now()})
         self.store.atomic(write)
@@ -1697,6 +1700,9 @@ class Worker:
     def outbox(self, job):
         p = job["payload"]
         kind = job["kind"]
+        if kind in ("kudos_submit", "kudos_submission_reply"):
+            from .kudos_submission import process, reply
+            return process(self, job) if kind == "kudos_submit" else reply(self, job)
         if kind == "avatar_generate":
             from .avatars import AvatarPipeline
             if not hasattr(self, "avatar_pipeline"):
@@ -2187,8 +2193,8 @@ class Worker:
                 self.queue_sponsorship_reminder_followup(e["giver"], "invitation_sent", e["recipient"])
             return
         recipient, giver = e["recipient"], e["giver"]
-        if not self.ledger.sources.good_standing(recipient):
-            raise Denied("Recipient no longer in good standing.")
+        from .kudos import require_recipient
+        require_recipient(self.ledger, recipient)
         uid = self.valid_identity(recipient, allow_ineligible=True)
         giver_uid = self.ledger.sources.slack_id(giver)
         if not uid or not giver_uid:
@@ -2201,8 +2207,7 @@ class Worker:
                     "shop": e.get("shop_name"), "tool": e.get("tool_name")})
         self.assert_live_job(job)
         self.ledger.require_member(giver)
-        if not self.ledger.sources.good_standing(recipient):
-            raise Denied("Kudos delivery is no longer permitted.")
+        require_recipient(self.ledger, recipient)
         identity = self.store.get("ledger_catalog", f"identity:{recipient}") or {}
         if identity.get("deactivated") or identity.get("bot"):
             raise Denied("Recipient identity is no longer active.")

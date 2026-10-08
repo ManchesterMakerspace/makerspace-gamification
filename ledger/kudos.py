@@ -1,6 +1,19 @@
 """Application-selected kudos emoji; authored message bodies are never filtered."""
 import re
 
+
+RECIPIENT_STATUSES = ("activeMember", "pending", "inactive", "nonMember", "expired")
+
+
+def require_recipient(ledger, recipient):
+    from .domain import Denied
+    member = ledger.sources.member(recipient) or {}
+    if member and member.get("status") not in RECIPIENT_STATUSES:
+        raise Denied("That member is ineligible for kudos: their makerspace membership is suspended, revoked, or unsupported.")
+    if not member or not ledger.sources.slack_id(recipient):
+        raise Denied("That member is ineligible for kudos: a valid linked Slack account is required.")
+
+
 EMOJI = [("silver star", ":kudo:"), ("gold star", ":kudos:"),
          ("fixed it!", ":fix_parrot:"), ("First place", ":first_place_medal:"),
          ("fistbump!", ":fistbump:"), ("used the force", ":duct_tape:"),

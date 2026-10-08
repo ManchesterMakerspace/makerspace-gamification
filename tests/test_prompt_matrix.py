@@ -37,8 +37,14 @@ def fake_connection(raw, *, status=200, content_type='text/plain; charset=utf-8'
 
 def test_bundled_matrix_codifies_roles_and_seed_economy():
     matrix = bundled_matrix()
-    assert matrix['version'] == '47'
+    assert matrix['version'] == '48'
     root = ElementTree.fromstring(matrix['text'])
+    kudos = root.find('kudos').text
+    assert 'activeMember/pending/inactive/nonMember/expired' in kudos
+    assert 'never suspended/revoked' in kudos and 'Expiry does not disqualify' in kudos
+    assert 'Save sends before ack; worker validates' in kudos
+    assert 'pending/lapsed yes,suspended/revoked no' in root.find("roles/role[@id='member']").text
+    assert 'kudos invites permit lapsed recipients' in root.find("roles/role[@id='sponsor']").text
     admin = root.find("roles/role[@id='admin']").text
     assert 'MLAB members role admin' in admin and 'every rank' in admin
     assert 'sender display name replaces the admin real name' in admin

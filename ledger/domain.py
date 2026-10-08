@@ -348,8 +348,10 @@ class Ledger:
             if existing["giver"] != giver:
                 raise Denied("Submission belongs to another member.")
             return existing
-        if giver == recipient or not self.sources.good_standing(recipient):
-            raise Denied("Choose another member in good standing with a linked Slack account.")
+        if giver == recipient:
+            raise Denied("You cannot give yourself kudos.")
+        from .kudos import require_recipient
+        require_recipient(self, recipient)
         state = self.store.get("ledger_catalog", f"identity:{recipient}") or {}
         if state.get("deactivated") or state.get("bot"):
             raise Denied("Choose an active human Slack member.")
@@ -415,7 +417,10 @@ class Ledger:
         self.require(giver)
         if self.is_ineligible(recipient):
             return None
-        if giver == recipient or not self.sources.good_standing(recipient):
+        if source == "kudos_invitation":
+            from .kudos import require_recipient
+            require_recipient(self, recipient)
+        if giver == recipient or (source != "kudos_invitation" and not self.sources.good_standing(recipient)):
             raise Denied("Choose another linked member in good standing.")
         from .sponsorships import invitation_key
         invitation_id = invitation_key(giver, recipient)
