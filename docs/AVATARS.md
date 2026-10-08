@@ -145,7 +145,7 @@ independent simultaneous supervisors. OOM preserves the old avatar and retries;
 move the image service to another GPU rather than automatically unloading the
 narrator.
 
-Prompt Matrix version 48 and the paired `avatar.json` set cover avatar
+Prompt Matrix version 49 and the paired `avatar.json` set cover avatar
 policy. XML schema/required roles remain unchanged. Google Doc overrides require
 the same policy update and explicit reload; no external document is edited or
 published, and existing reserved jobs retain their policy snapshot.
@@ -156,3 +156,5 @@ generation, narrator coexistence, sequential inference, OOM recovery, GPU memory
 release, both JPG sizes, participant file access, first-DM opt-out text, Home
 replacement, reference validation and deletion. Those checks need deployment
 hardware and Slack credentials; automated tests do not claim to perform them.
+
+Administrators and board members who are opted in can use `/ledger-admin avatar @member` to inspect a participant’s current avatar, saved visual prompt, reference manifest, model/settings, token usage, duration, completion time and attempt metrics. Raw conversations, policy snapshots and credentials are excluded. The force-generate/regenerate button invalidates queued or running candidates and reserves an immediate replacement on the sequential avatar queue, keeping the current pair until successful activation. Repeated clicks on the same button reserve only one replacement. Custom-avatar opt-out is honored at inspection, selection, enqueue and delivery. `/ledger-admin avatar` opens a participant picker filtered to eligible opted-in participants with personalized avatars enabled. Submission opens the selected participant’s avatar and saved generation details; only the optional force-generate/regenerate button queues generation. No rank, XP or consent is changed.

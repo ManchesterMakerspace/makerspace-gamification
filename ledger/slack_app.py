@@ -176,6 +176,14 @@ class SlackUI:
     def admin_command(self, actor, text, body, client):
         from .admin_access import require_command, help_text
         require_command(self.ledger, actor)
+        if text.split()[:1] == ["avatar"]:
+            from . import admin_avatars
+            admin_avatars.authorize(self.ledger, actor)
+            if text == "avatar":
+                return self.open(client, body, admin_avatars.picker())
+            if len(mentions(text)) != 1:
+                raise ValueError("Use /ledger-admin avatar @member.")
+            return self.open(client, body, admin_avatars.detail(self.ledger, actor, self.resolve(text)))
         if text == "invite":
             self.ledger.admin(actor)
             return self.open(client, body, views.admin_invitation())
@@ -279,6 +287,10 @@ class SlackUI:
         data, meta = views.values(body), json.loads(body["view"].get("private_metadata") or "{}")
         if callback == "dismiss":
             return {}
+        if callback == "admin_avatar_picker":
+            from . import admin_avatars
+            member = data.get("avatar_participant")
+            return {"response_action": "update", "view": admin_avatars.detail(self.ledger, actor, member)}
         if callback == "consent":
             if not data.get("agree"):
                 raise ValueError("Explicitly choose to participate to continue.")
@@ -497,6 +509,13 @@ class SlackUI:
             return
         actor = self.actor(body)
         name, value = action["action_id"], action.get("value", "")
+        if name == "admin_avatar_generate":
+            from . import admin_avatars
+            selection = json.loads(value)
+            member = selection["member"]
+            message = admin_avatars.generate(self.ledger, actor, member, selection.get("key"))
+            view = admin_avatars.detail(self.ledger, actor, member, message)
+            return client.views_update(view_id=body["view"]["id"], hash=body["view"].get("hash"), view=view)
         if name == "kudos_retry":
             from .kudos_submission import review
             return review(self, body, client, value)
@@ -604,6 +623,9 @@ class SlackUI:
     def options(self, body):
         actor = self.actor(body)
         name, search = body["action_id"], body.get("value", "").casefold()
+        if name == "avatar_participant":
+            from .admin_avatars import candidates
+            return candidates(self.ledger, actor, search)
         if name == "invite_recipient":
             from .admin_access import invitation_candidates, require_command
             require_command(self.ledger, actor)

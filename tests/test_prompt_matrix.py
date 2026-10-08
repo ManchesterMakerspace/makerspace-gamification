@@ -37,7 +37,7 @@ def fake_connection(raw, *, status=200, content_type='text/plain; charset=utf-8'
 
 def test_bundled_matrix_codifies_roles_and_seed_economy():
     matrix = bundled_matrix()
-    assert matrix['version'] == '48'
+    assert matrix['version'] == '49'
     root = ElementTree.fromstring(matrix['text'])
     kudos = root.find('kudos').text
     assert 'activeMember/pending/inactive/nonMember/expired' in kudos
@@ -47,6 +47,8 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'kudos invites permit lapsed recipients' in root.find("roles/role[@id='sponsor']").text
     admin = root.find("roles/role[@id='admin']").text
     assert 'MLAB members role admin' in admin and 'every rank' in admin
+    assert '/ledger-admin avatar inspects saved images/metrics' in admin
+    assert 'never overrides opt-out or exposes raw DMs' in admin
     assert 'sender display name replaces the admin real name' in admin
     assert 'on opt-out remove them' in admin
     assert 'Omit /ledger-admin & related help for ineligible callers' in root.find('response').text
