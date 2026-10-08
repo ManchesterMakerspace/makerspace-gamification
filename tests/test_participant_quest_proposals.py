@@ -142,6 +142,24 @@ def test_cooperative_finalization_rechecks_member_minimum_rank(joined):
     assert ledger.participant(member(2))["xp"] == "0"
 
 
+def test_legacy_cooperative_quest_uses_exact_rank_at_finalization(joined):
+    ledger, store, source, *_ = joined
+    quest = proposal(ledger, store, source, quest_type="cooperative", reward=100)
+    rank(ledger, store, 1, 3)  # Legacy author eligibility required two ranks above the target.
+    quest = store.get("ledger_quests", quest["_id"])
+    quest.pop("rank_mode", None)
+    store.put("ledger_quests", quest)
+    service = LedgerQuests(ledger)
+    for person, discipline, checkout_key in ((2, "Design", 1932), (3, "Fabrication", 1933)):
+        rank(ledger, store, person, 1)
+        checkout(source, person, 311, checkout_key)
+        service.contribute(member(person), quest["_id"], "join", role=discipline)
+        service.contribute(member(person), quest["_id"], "submit", description="Legacy exact-rank contribution")
+        service.contribute(member(10), quest["_id"], "verify", member=member(person))
+
+    assert service.finalize(member(10), quest["_id"], "Observed legacy shared outcome")["status"] == "completed"
+
+
 def test_proposal_modal_uses_external_tools_and_file_input(joined):
     ledger, store, source, composer, _, slack = joined
     checkout(source, 1, 311, 931)

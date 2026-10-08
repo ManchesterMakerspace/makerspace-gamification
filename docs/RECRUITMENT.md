@@ -8,7 +8,7 @@ An opted-in participant can invite an eligible linked member with `/ledger spons
 
 Use `/ledger sponsor` with no options to view your own invitations, newest first, with each invitee's invitation date, current opt-in state, and latest opt-in/out dates. The report is private and does not disclose another sponsor's history.
 
-When an invitation DM is delivered, a participant with a reminder from the previous seven days receives an updated reminder DM thanking them for growing The Ledger. When their invitee accepts, that same recent reminder is updated with a Qwen-generated thank-you naming the new participant and suggesting a personal welcome in Ledge Chat. The reminder timestamp and original sent date remain attached to the reminder. These follow-ups do not create additional XP.
+When an invitation DM is delivered, a participant with a reminder from the previous seven days receives an updated reminder DM thanking them for growing The Ledger. When their invitee accepts, that same recent reminder is updated with a Qwen-generated thank-you naming the new participant and suggesting a personal welcome in Ledge Chat. Acceptance takes precedence over delayed invitation-sent updates. Reminder receipts are bound to the Slack identity and consent generation that received them; a relink opens a new DM instead of editing the former account's channel. The reminder timestamp and original sent date remain attached to the reminder. These follow-ups do not create additional XP.
 
 ## Operator reminders
 
@@ -23,7 +23,7 @@ python -m ledger.sponsorship_reminder --days 30 --limit 25 --verbose
 
 Useful options:
 
-- `--variants path.json` selects a JSON variants file. The default sample is `ledger/sponsorship_reminder_variants.json`; it includes never-inviter reminders, previous-inviter reminders, and accepted-invitation thank-you prompts. The accepted-invitation template is saved with the participant's latest reminder receipt so the follow-up uses that run's selected file.
+- `--variants path.json` selects a JSON variants file. The default sample is `ledger/sponsorship_reminder_variants.json`; it includes never-inviter reminders, previous-inviter reminders, and accepted-invitation thank-you prompts. Initial reminders use the composer's saved prompt selection and never repeat the same variant index twice consecutively for one member; the selected index and timestamp are saved after delivery. The accepted-invitation template is saved with the participant's latest reminder receipt so the follow-up uses that run's selected file.
 - `--dry-run` lists eligible members, planned send/update actions, and the prompt intended for Qwen without sending messages or writing to MongoDB.
 - `--dry-run --generate` generates and displays proposed text instead of the prompt, still without sending or writing.
 - `--limit N` caps the number of participants processed; `--member ID` limits the run to one internal member ID or linked Slack user ID.

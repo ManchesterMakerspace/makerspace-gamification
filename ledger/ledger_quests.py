@@ -26,8 +26,9 @@ class LedgerQuests:
                 or not state or state["quest_revision"] != q["_id"] or state["status"] != "open"
                 or not Quests(self.l).prerequisites(q, member)):
             raise Denied("This cooperative quest is unavailable or its prerequisites are not met.")
-        if not generated(q) and (not minimum_rank(q) or participant["rank"] < q["target_rank"]
-                                 or not Quests(self.l).author_available(q)):
+        rank_ineligible = (participant["rank"] < q["target_rank"] if minimum_rank(q)
+                           else participant["rank"] != q["target_rank"])
+        if not generated(q) and (rank_ineligible or not Quests(self.l).author_available(q)):
             raise Denied("This cooperative quest's minimum rank or proposer eligibility is not met.")
         return q
 
@@ -140,8 +141,9 @@ class LedgerQuests:
         def eligible(member):
             participant = self.l.participant(member)
             return bool(self.l.active(member) and service.prerequisites(q, member)
-                and (generated(q) or (minimum_rank(q) and participant
-                    and participant["rank"] >= q["target_rank"] and service.author_available(q))))
+                and (generated(q) or (participant and service.author_available(q)
+                    and (participant["rank"] >= q["target_rank"] if minimum_rank(q)
+                         else participant["rank"] == q["target_rank"]))))
 
         return {m: c for m, c in state["contributions"].items()
                 if c["status"] == "verified" and eligible(m)}

@@ -4,9 +4,11 @@ from datetime import timedelta
 import io
 from unittest.mock import patch
 
+import pytest
 from pymongo.errors import PyMongoError
 from slack_sdk.errors import SlackApiError
 
+from ledger.domain import Denied
 from ledger.sponsorship_reminder import (eligible_participants, load_variants, parse_days, run)
 from ledger.storage import now
 from ledger.worker import Worker
@@ -18,6 +20,15 @@ def options(days, **kwargs):
     return argparse.Namespace(days=days, variants=None, dry_run=kwargs.get("dry_run", False),
         generate=kwargs.get("generate", False), verbose=kwargs.get("verbose", False),
         debug=kwargs.get("debug", False), limit=kwargs.get("limit"), member=kwargs.get("member"))
+
+
+def save_receipt(ledger, store, member_id, **values):
+    participant = ledger.participant(member_id)
+    participant.update(reminder_ts="123.456", reminder_sent_at=now(), reminder_channel="D" + ledger.sources.slack_id(member_id),
+        reminder_slack_id=ledger.sources.slack_id(member_id),
+        reminder_consent_generation=participant.get("consent_generation"), **values)
+    store.put("ledger_participants", participant)
+    return participant
 
 
 def test_days_select_never_and_stale_inviters(joined):
@@ -86,6 +97,84 @@ def test_new_reminder_saves_receipt_then_recent_run_updates_same_dm(joined):
     assert slack.chat_update.call_args.kwargs["ts"] == "123.456"
 
 
+def test_initial_reminders_rotate_variant_indexes_and_save_usage_time(joined):
+    ledger, _, _, composer, _, slack = joined
+    member_id = str(oid(1))
+    composer.choose = lambda choices: choices[0]
+    run(ledger, composer, slack, options("never", member=member_id), stdout=io.StringIO(), stderr=io.StringIO())
+    first = ledger.participant(member_id)
+    first_index, first_at = first["reminder_variant_index"], first["reminder_variant_used_at"]
+
+    run(ledger, composer, slack, options("never", member=member_id), stdout=io.StringIO(), stderr=io.StringIO())
+    second = ledger.participant(member_id)
+    assert second["reminder_variant_index"] != first_index
+    assert second["reminder_variant_used_at"] >= first_at
+
+
+def test_receipt_merge_preserves_concurrent_progress_and_opt_out(joined):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+
+    def post_message(**kwargs):
+        participant = ledger.participant(member_id)
+        participant.update(xp="77", opted_in=False, revision=participant["revision"] + 1,
+                           consent_generation=participant["consent_generation"] + 1)
+        store.put("ledger_participants", participant)
+        return {"ts": "concurrent.1", "channel": kwargs["channel"]}
+
+    slack.chat_postMessage.side_effect = post_message
+    totals = run(ledger, composer, slack, options("never", member=member_id),
+                 stdout=io.StringIO(), stderr=io.StringIO())
+    current = ledger.participant(member_id)
+    assert current["xp"] == "77" and current["opted_in"] is False
+    assert "reminder_ts" not in current
+    assert totals["sent"] == 1 and totals["mongo_updated"] == 0
+
+
+def test_receipt_merge_preserves_concurrent_progress_for_active_member(joined):
+    ledger, store, _, composer, _, slack = joined
+    member_id = str(oid(1))
+
+    def post_message(**kwargs):
+        participant = ledger.participant(member_id)
+        participant.update(xp="77", revision=participant["revision"] + 1)
+        store.put("ledger_participants", participant)
+        return {"ts": "concurrent.2", "channel": kwargs["channel"]}
+
+    slack.chat_postMessage.side_effect = post_message
+    totals = run(ledger, composer, slack, options("never", member=member_id),
+                 stdout=io.StringIO(), stderr=io.StringIO())
+    current = ledger.participant(member_id)
+    assert current["xp"] == "77" and current["reminder_ts"] == "concurrent.2"
+    assert totals["sent"] == 1 and totals["mongo_updated"] == 1
+
+
+def test_relinked_identity_gets_a_new_bound_dm_receipt(joined):
+    ledger, store, source, composer, _, slack = joined
+    member_id = str(oid(1))
+    run(ledger, composer, slack, options("never", member=member_id), stdout=io.StringIO(), stderr=io.StringIO())
+    assert ledger.participant(member_id)["reminder_slack_id"] == "U1"
+    worker = Worker(ledger, composer, slack)
+    assert worker.queue_sponsorship_reminder_followup(member_id, "invitation_sent", str(oid(3)))
+    old_job = store.get("ledger_outbox", f"sponsorship-reminder-invited:{member_id}:{oid(3)}")
+
+    source.data["slack_users"] = [
+        {**row, "slack_id": "UNEW1"} if row["member_id"] == oid(1) else row
+        for row in source.data["slack_users"]]
+    slack.chat_update.reset_mock()
+    slack.chat_postMessage.reset_mock()
+    old_job.update(status="working", lease="old-identity")
+    store.put("ledger_outbox", old_job)
+    with pytest.raises(Denied, match="no longer current"):
+        worker.deliver_sponsorship_reminder_followup(old_job)
+    run(ledger, composer, slack, options("never", member=member_id), stdout=io.StringIO(), stderr=io.StringIO())
+
+    current = ledger.participant(member_id)
+    assert current["reminder_slack_id"] == "UNEW1" and current["reminder_channel"] == "DUNEW1"
+    slack.chat_update.assert_not_called()
+    assert slack.chat_postMessage.call_args.kwargs["channel"] == "DUNEW1"
+
+
 def test_custom_variant_file_has_all_required_categories():
     assert set(load_variants()) == {"reminder_never", "reminder_previous", "invitation_accepted"}
 
@@ -93,9 +182,7 @@ def test_custom_variant_file_has_all_required_categories():
 def test_invitation_acceptance_queues_and_delivers_recent_followup(joined):
     ledger, store, _, composer, _, slack = joined
     inviter, accepted = str(oid(1)), str(oid(3))
-    participant = ledger.participant(inviter)
-    participant.update(reminder_ts="123.456", reminder_sent_at=now(), reminder_channel="DU1")
-    store.put("ledger_participants", participant)
+    save_receipt(ledger, store, inviter)
     ledger.sponsor(inviter, accepted)
     ledger.join(accepted, sponsor=inviter)
 
@@ -110,14 +197,35 @@ def test_invitation_acceptance_queues_and_delivers_recent_followup(joined):
     assert store.get("ledger_outbox", job["_id"])["status"] == "done"
 
 
+def test_delayed_invitation_followup_cannot_overwrite_acceptance(joined):
+    ledger, store, _, composer, _, slack = joined
+    inviter, accepted = str(oid(1)), str(oid(3))
+    save_receipt(ledger, store, inviter)
+    ledger.sponsor(inviter, accepted)
+    worker = Worker(ledger, composer, slack)
+    assert worker.queue_sponsorship_reminder_followup(inviter, "invitation_sent", accepted)
+    invited_job = store.get("ledger_outbox", f"sponsorship-reminder-invited:{inviter}:{accepted}")
+
+    ledger.join(accepted, sponsor=inviter)
+    accepted_job = store.get("ledger_outbox", f"sponsorship-reminder-accepted:{accepted}")
+    accepted_job.update(status="working", lease="accepted-lease")
+    store.put("ledger_outbox", accepted_job)
+    worker.deliver_sponsorship_reminder_followup(accepted_job)
+    assert ledger.participant(inviter)["reminder_followup_event"] == "invitation_accepted"
+
+    invited_job.update(status="working", lease="invited-lease")
+    store.put("ledger_outbox", invited_job)
+    with pytest.raises(Denied, match="superseded"):
+        worker.deliver_sponsorship_reminder_followup(invited_job)
+    assert slack.chat_update.call_count == 1
+
+
 def test_invitation_delivery_followup_is_only_queued_for_recent_receipt(joined):
     ledger, store, _, composer, _, slack = joined
     worker = Worker(ledger, composer, slack)
     inviter, recipient = str(oid(1)), str(oid(3))
     assert not worker.queue_sponsorship_reminder_followup(inviter, "invitation_sent", recipient)
-    participant = ledger.participant(inviter)
-    participant.update(reminder_ts="123.456", reminder_sent_at=now(), reminder_channel="DU1")
-    store.put("ledger_participants", participant)
+    save_receipt(ledger, store, inviter)
     assert worker.queue_sponsorship_reminder_followup(inviter, "invitation_sent", recipient)
     assert store.get("ledger_outbox", f"sponsorship-reminder-invited:{inviter}:{recipient}")
 
@@ -125,9 +233,7 @@ def test_invitation_delivery_followup_is_only_queued_for_recent_receipt(joined):
 def test_successful_sponsor_invitation_delivery_queues_followup(joined):
     ledger, store, _, composer, _, slack = joined
     inviter, recipient = str(oid(1)), str(oid(3))
-    participant = ledger.participant(inviter)
-    participant.update(reminder_ts="123.456", reminder_sent_at=now(), reminder_channel="DU1")
-    store.put("ledger_participants", participant)
+    save_receipt(ledger, store, inviter)
     ledger.sponsor(inviter, recipient)
     invitation_job = store.select("ledger_outbox", {"kind": "message", "payload.type": "invitation"})[0]
     invitation_job.update(status="working", lease="test-lease")

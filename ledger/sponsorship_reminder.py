@@ -14,7 +14,7 @@ from pymongo.errors import PyMongoError
 from .cli import dependencies
 from .messages import PERSONA
 from .prompt_library import validate_template
-from .storage import now
+from .storage import enqueue, now
 
 DEFAULT_VARIANTS = Path(__file__).parent / "sponsorship_reminder_variants.json"
 CATEGORIES = ("reminder_never", "reminder_previous", "invitation_accepted")
@@ -138,11 +138,35 @@ def _facts(ledger, candidate):
             "summary": "An optional reminder to invite a maker to opt in to The Ledger."}
 
 
-def _selection(composer, template, member_id, *, category):
-    selected = deepcopy(template)
-    selected["variations"] = [selected["variations"][0]]
-    return {"template": selected, "matrix": composer.matrix.snapshot(),
-            "scope": f"sponsorship-reminder:{member_id}:{category}"}
+def _selection(composer, template, member_id, *, category, participant, persist):
+    """Use Composer selection while excluding the member's last variant index."""
+    variations = template["variations"]
+    previous = participant.get("reminder_variant_index")
+    allowed = [deepcopy(value) for index, value in enumerate(variations)
+               if len(variations) == 1 or index != previous]
+    scope = f"sponsorship-reminder:{member_id}:{category}"
+
+    def reserve(store):
+        selected = deepcopy(template)
+        selected["variations"] = deepcopy(allowed)
+        return composer.reserve(store, "recruitment", "member", scope, template_override=selected)
+
+    if persist:
+        selection = composer.store.atomic(reserve)
+    else:
+        class ReadOnlySelectionStore:
+            def get(self, collection, key):
+                return composer.store.get(collection, key)
+
+            def put(self, collection, document):
+                return None
+
+        selection = reserve(ReadOnlySelectionStore())
+    selected_id = selection["template"]["variations"][0]["id"]
+    selection["reminder_variant_index"] = next(
+        index for index, variation in enumerate(variations) if variation["id"] == selected_id)
+    selection["reminder_variant_category"] = category
+    return selection
 
 
 def prompt_preview(composer, template, facts):
@@ -156,25 +180,78 @@ def prompt_preview(composer, template, facts):
             {"role": "user", "content": rendered["user"]}]
 
 
-def reminder_text(composer, template, facts, member_id, *, generate):
+def reminder_text(composer, template, facts, member_id, *, category, participant, generate, persist_selection):
     if not generate:
-        return None, prompt_preview(composer, template, facts)
-    selection = _selection(composer, template, member_id, category="reminder")
+        return None, prompt_preview(composer, template, facts), None
+    selection = _selection(composer, template, member_id, category=category,
+                           participant=participant, persist=persist_selection)
     composed = composer.compose("recruitment", "member", facts, selection=selection)
     text = composed.get("text") or template["fallback"]
     if not isinstance(text, str) or not text.strip() or len(text) > 1000 or re.search(r"<!?(?:channel|here|everyone)\b", text, re.I):
         text = template["fallback"]
-    return text, None
+    return text, None, selection["reminder_variant_index"]
 
 
-def _within_window(participant, at):
+def _within_window(participant, at, slack_id=None):
     sent_at = participant.get("reminder_sent_at")
     return isinstance(participant.get("reminder_ts"), str) and bool(participant.get("reminder_channel")) \
-        and isinstance(sent_at, datetime) and at - sent_at.replace(tzinfo=sent_at.tzinfo or timezone.utc) < REMINDER_WINDOW
+        and isinstance(sent_at, datetime) and at - sent_at.replace(tzinfo=sent_at.tzinfo or timezone.utc) < REMINDER_WINDOW \
+        and (slack_id is None or participant.get("reminder_slack_id") == slack_id) \
+        and (participant.get("reminder_consent_generation") is None
+             or participant.get("reminder_consent_generation") == participant.get("consent_generation"))
 
 
-def has_recent_reminder(participant, at=None):
-    return _within_window(participant or {}, at or now())
+def has_recent_reminder(participant, at=None, slack_id=None):
+    return _within_window(participant or {}, at or now(), slack_id)
+
+
+REMINDER_FIELDS = {"reminder_ts", "reminder_sent_at", "reminder_channel", "reminder_slack_id",
+    "reminder_consent_generation", "reminder_accepted_template", "reminder_variant_index",
+    "reminder_variant_category", "reminder_variant_used_at", "reminder_followup_event",
+    "reminder_followup_member_id", "reminder_followup_text", "reminder_followup_at"}
+
+
+def merge_reminder_receipt(ledger, member_id, values, *, expected_generation=None, expected_ts=None):
+    """Merge only reminder receipt fields into the latest participant document."""
+    if set(values) - REMINDER_FIELDS:
+        raise ValueError("Only reminder receipt fields may be merged.")
+    def merge(store):
+        participant = store.get("ledger_participants", member_id)
+        if not participant or participant.get("opted_in") is not True:
+            return False
+        if expected_generation is not None and participant.get("consent_generation") != expected_generation:
+            return False
+        if expected_ts is not None and participant.get("reminder_ts") != expected_ts:
+            return False
+        participant.update(deepcopy(values))
+        store.put("ledger_participants", participant)
+        return True
+    return ledger.store.atomic(merge)
+
+
+def queue_reminder_followup(store, member_id, event, accepted_member_id, slack_id):
+    """Reserve a bound follow-up, with acceptance taking precedence over invitation delivery."""
+    if event not in ("invitation_sent", "invitation_accepted"):
+        return False
+    key = (f"sponsorship-reminder-accepted:{accepted_member_id}" if event == "invitation_accepted"
+           else f"sponsorship-reminder-invited:{member_id}:{accepted_member_id}")
+    def reserve(current_store):
+        participant = current_store.get("ledger_participants", member_id)
+        if (not participant or participant.get("opted_in") is not True
+                or not has_recent_reminder(participant, slack_id=slack_id)):
+            return False
+        precedence = participant.get("reminder_followup_event")
+        if event == "invitation_sent" and precedence in ("invitation_accepted_pending", "invitation_accepted"):
+            return False
+        if event == "invitation_accepted":
+            participant.update(reminder_followup_event="invitation_accepted_pending",
+                               reminder_followup_member_id=accepted_member_id, reminder_followup_at=now())
+            current_store.put("ledger_participants", participant)
+        payload = {"member_id": member_id, "event": event, "accepted_member_id": accepted_member_id,
+                   "slack_id": slack_id}
+        enqueue(current_store, "ledger_outbox", key, "sponsorship_reminder_followup", payload)
+        return True
+    return store.atomic(reserve)
 
 
 def build_followup_template(category):
@@ -202,9 +279,10 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
             category = candidate["category"]
             facts = _facts(ledger, candidate)
             template = variants[category]
-            message, prompt = reminder_text(composer, template, facts, member_id,
-                                            generate=args.generate or not args.dry_run)
-            recent = _within_window(participant, now())
+            message, prompt, variant_index = reminder_text(composer, template, facts, member_id,
+                category=category, participant=participant, generate=args.generate or not args.dry_run,
+                persist_selection=not args.dry_run)
+            recent = _within_window(participant, now(), candidate["slack_id"])
             action = "update" if recent else "send"
             if args.dry_run:
                 record = {"member_id": member_id, "action": action, "category": category}
@@ -230,6 +308,11 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
             slack_user = slack.users_info(user=candidate["slack_id"]).get("user", {})
             if slack_user.get("deleted") or slack_user.get("is_bot") or candidate["slack_id"] == "USLACKBOT":
                 continue
+            participant = ledger.participant(member_id) or {}
+            if not ledger.active(member_id) or ledger.sources.slack_id(member_id) != candidate["slack_id"]:
+                continue
+            generation = participant.get("consent_generation")
+            recent = _within_window(participant, now(), candidate["slack_id"])
             dm = participant.get("reminder_channel") if recent else None
             if not dm:
                 operation_stage = "Slack conversations.open"
@@ -248,39 +331,54 @@ def run(ledger, composer, slack, args, *, stdout=None, stderr=None):
                     operation_stage = "Slack chat.postMessage"
                     response = slack.chat_postMessage(channel=new_dm,
                         text=message, blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": message}}],
-                        client_msg_id=f"sponsorship-reminder:{member_id}:{now().date().isoformat()}",
+                        client_msg_id=f"sponsorship-reminder:{member_id}:{candidate['slack_id']}:{now().date().isoformat()}",
                         unfurl_links=False, unfurl_media=False)
                     message_succeeded = True
                     totals["sent"] += 1
                     dm = response.get("channel") or new_dm
-                    participant["reminder_ts"] = response["ts"]
-                    participant["reminder_sent_at"] = now()
-                    participant["reminder_channel"] = dm
-                    participant["reminder_accepted_template"] = deepcopy(variants["invitation_accepted"])
                     operation_stage = "Mongo ledger_participants write"
-                    ledger.store.put("ledger_participants", participant)
-                    totals["mongo_updated"] += 1
+                    stamp = now()
+                    saved = merge_reminder_receipt(ledger, member_id, {
+                        "reminder_ts": response["ts"], "reminder_sent_at": stamp, "reminder_channel": dm,
+                        "reminder_slack_id": candidate["slack_id"], "reminder_consent_generation": generation,
+                        "reminder_accepted_template": deepcopy(variants["invitation_accepted"]),
+                        "reminder_variant_index": variant_index, "reminder_variant_category": category,
+                        "reminder_variant_used_at": stamp, "reminder_followup_event": None,
+                        "reminder_followup_member_id": None, "reminder_followup_text": None,
+                        "reminder_followup_at": None}, expected_generation=generation)
+                    totals["mongo_updated"] += int(saved)
                     continue
                 totals["updated"] += 1
-                participant["reminder_accepted_template"] = deepcopy(variants["invitation_accepted"])
                 operation_stage = "Mongo ledger_participants write"
-                ledger.store.put("ledger_participants", participant)
-                totals["mongo_updated"] += 1
+                stamp = now()
+                saved = merge_reminder_receipt(ledger, member_id, {
+                    "reminder_slack_id": candidate["slack_id"], "reminder_consent_generation": generation,
+                    "reminder_accepted_template": deepcopy(variants["invitation_accepted"]),
+                    "reminder_variant_index": variant_index, "reminder_variant_category": category,
+                    "reminder_variant_used_at": stamp, "reminder_followup_event": None,
+                    "reminder_followup_member_id": None, "reminder_followup_text": None,
+                    "reminder_followup_at": None}, expected_generation=generation,
+                    expected_ts=participant["reminder_ts"])
+                totals["mongo_updated"] += int(saved)
                 continue
             operation_stage = "Slack chat.postMessage"
             response = slack.chat_postMessage(channel=dm, text=message,
                 blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": message}}],
-                client_msg_id=f"sponsorship-reminder:{member_id}:{now().date().isoformat()}",
+                client_msg_id=f"sponsorship-reminder:{member_id}:{candidate['slack_id']}:{now().date().isoformat()}",
                 unfurl_links=False, unfurl_media=False)
             message_succeeded = True
             totals["sent"] += 1
-            participant["reminder_ts"] = response["ts"]
-            participant["reminder_sent_at"] = now()
-            participant["reminder_channel"] = dm
-            participant["reminder_accepted_template"] = deepcopy(variants["invitation_accepted"])
             operation_stage = "Mongo ledger_participants write"
-            ledger.store.put("ledger_participants", participant)
-            totals["mongo_updated"] += 1
+            stamp = now()
+            saved = merge_reminder_receipt(ledger, member_id, {
+                "reminder_ts": response["ts"], "reminder_sent_at": stamp, "reminder_channel": dm,
+                "reminder_slack_id": candidate["slack_id"], "reminder_consent_generation": generation,
+                "reminder_accepted_template": deepcopy(variants["invitation_accepted"]),
+                "reminder_variant_index": variant_index, "reminder_variant_category": category,
+                "reminder_variant_used_at": stamp, "reminder_followup_event": None,
+                "reminder_followup_member_id": None, "reminder_followup_text": None,
+                "reminder_followup_at": None}, expected_generation=generation)
+            totals["mongo_updated"] += int(saved)
         except Exception as exc:
             if not message_succeeded and not isinstance(exc, PyMongoError):
                 totals["failed"] += 1
