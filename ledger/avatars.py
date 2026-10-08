@@ -27,7 +27,7 @@ from .storage import enqueue, now
 
 COLLECTION = "ledger_avatars"
 GENERATION = ["avatar_generate", "avatar_reference"]
-DELIVERY = ["avatar_notice", "avatar_cleanup"]
+DELIVERY = ["avatar_notice", "avatar_cleanup", "avatar_runtime_ack"]
 MAX_REFERENCE_BYTES = 2_000_000
 RUNTIME_LEASE = "avatar-runtime-lease"
 
@@ -663,8 +663,11 @@ def deliver(worker, job):
             prefix = Path(os.environ.get("LEDGER_AVATAR_SPOOL", "/var/lib/ledger-avatars")) / hashlib.sha256(artifact_job.encode()).hexdigest()
             for suffix in (".refs.json", ".avatar.jpg", ".avatar512.jpg"):
                 Path(str(prefix) + suffix).unlink(missing_ok=True)
-            if os.environ.get("LEDGER_AVATAR_RUNTIME_KEY"):
-                RuntimeClient().ack(artifact_job)
+            # Receipt deletion has its own durable retry lifecycle. Slack/file
+            # cleanup can finish even while the inference supervisor is offline.
+            worker.assert_live_job(job)
+            worker.store.atomic(lambda s: enqueue(s, "ledger_outbox",
+                "avatar-runtime-ack:" + artifact_job, "avatar_runtime_ack", {"artifact_job": artifact_job}))
         return
     if not row or row["revision"] != job["payload"]["revision"]:
         raise Denied("Avatar notification is stale")
@@ -690,6 +693,11 @@ def deliver(worker, job):
         latest.update(revision=row["revision"], channel=dm, ts=response["ts"], first_notice_at=latest.get("first_notice_at") or now())
         s.put(COLLECTION, latest)
     worker.store.atomic(save)
+
+
+def acknowledge(worker, job):
+    worker.assert_live_job(job)
+    RuntimeClient().ack(job["payload"]["artifact_job"])
 
 
 def save_reference(worker, job):

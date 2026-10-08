@@ -68,7 +68,7 @@ class Worker:
             retry = min(300, 2 ** min(job["attempts"], 8))
             if isinstance(exc, SlackApiError) and exc.response.status_code == 429:
                 retry = max(retry, retry_after_seconds(exc.response))
-            status = "pending" if job["attempts"] < 10 or job["kind"] == "remove" else "failed"
+            status = "pending" if job["attempts"] < 10 or job["kind"] in ("remove", "avatar_runtime_ack") else "failed"
             self.finish(collection, job, status, retry, type(exc).__name__)
         return True
 
@@ -1708,6 +1708,9 @@ class Worker:
         if kind == "avatar_reference":
             from .avatars import save_reference
             return save_reference(self, job)
+        if kind == "avatar_runtime_ack":
+            from .avatars import acknowledge
+            return acknowledge(self, job)
         if kind in ("avatar_notice", "avatar_cleanup"):
             from .avatars import deliver
             return deliver(self, job)

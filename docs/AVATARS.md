@@ -15,7 +15,9 @@ individual/cooperative/catalog quest completions reserve jobs in the existing
 Mongo transactions. Duplicate events do not reserve duplicate jobs. Pending
 requests coalesce for sixty seconds; milestones during generation reserve a
 follow-up. Join jobs wait for history import. The avatar worker reserves a New
-York calendar-day backfill after midnight and catches up on startup. Backfill
+York calendar-day backfill on startup and checks for a new day at most once every
+five minutes while its loop is available. Reservation checks are throttled even
+after database failures, in both avatar-only and combined workers. Backfill
 pages at most 100 participants, skips active jobs/opt-outs, and repairs missing,
 deleted or wrong-rank avatars.
 
@@ -60,6 +62,10 @@ Missing, wrong-rank or opted-out avatars use the rank artwork. After confirmed
 Home replacement, retryable cleanup deletes superseded bot-generated files and
 temporary generation artifacts, never the current pair or user-owned reference.
 Old DM links disappear after obsolete files are deleted.
+Runtime receipt deletion uses a separate durable `avatar_runtime_ack` delivery
+job. It retries with capped backoff until the supervisor recovers, independently
+of Slack and local-file cleanup, without consuming their retry budget. Keep the
+runtime URL/key configured until pending acknowledgment jobs have drained.
 
 ## Storage and metrics
 

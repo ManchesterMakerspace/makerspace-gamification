@@ -30,6 +30,7 @@ INTERACTIVE_KINDS = ["conversation", "guidance", "community_count_reply", "spons
 HOME_KINDS = ["home_publish", "home_profile_photo"]
 AVATAR_KINDS = ["avatar_generate", "avatar_reference"]
 RECONCILE_INTERVAL_SECONDS = 13 * 60
+AVATAR_BACKFILL_INTERVAL_SECONDS = 5 * 60
 
 
 def periodic_reconcile_key(timestamp):
@@ -204,6 +205,7 @@ def main():
             last = 0
             last_ticket_scan = 0
             last_home_scan = 0
+            last_avatar_scan = None
             last_metrics = 0
             while not stop.is_set():
                 try:
@@ -217,7 +219,12 @@ def main():
                             ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"ticket-quest-reconcile:{int(time.time() // 3600)}", "ticket_quest_reconcile", {}))
                             last_ticket_scan = time.monotonic()
                         last = time.monotonic()
-                    if queue == "avatars":
+                    if queue == "avatars" and (last_avatar_scan is None or
+                            time.monotonic() - last_avatar_scan >= AVATAR_BACKFILL_INTERVAL_SECONDS):
+                        # Stamp before the call so a database failure is also
+                        # throttled. Startup reserves immediately; later checks
+                        # catch a New York day rollover within five minutes.
+                        last_avatar_scan = time.monotonic()
                         from .avatars import backfill
                         backfill(ledger)
                     if queue == "inbox" and time.monotonic() - last_home_scan >= 86400:

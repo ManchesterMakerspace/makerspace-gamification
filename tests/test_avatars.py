@@ -2,6 +2,7 @@ import base64
 import json
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from pathlib import Path
 from threading import Event, Thread
 from unittest.mock import MagicMock
 
@@ -341,6 +342,40 @@ def test_cleanup_waits_for_home_and_never_deletes_current(setup):
     store.put("ledger_homes", {"_id": member, "published_avatar_revision": "new"})
     avatars.deliver(worker, cleanup)
     slack.files_delete.assert_called_once_with(file="F_OLD")
+
+
+def test_cleanup_finishes_offline_and_receipt_ack_retries_independently(setup, monkeypatch):
+    _, store, _, slack, _, worker, pipeline, generation, member = setup
+    from ledger.storage import enqueue
+    import hashlib
+    spool = pipeline.directory
+    monkeypatch.setenv("LEDGER_AVATAR_SPOOL", str(spool))
+    prefix = spool / hashlib.sha256(generation["_id"].encode()).hexdigest()
+    for suffix in (".refs.json", ".avatar.jpg", ".avatar512.jpg"):
+        Path(str(prefix) + suffix).write_bytes(b"temporary")
+    store.put("ledger_homes", {"_id": member, "published_avatar_revision": "default"})
+    enqueue(store, "ledger_outbox", "cleanup-offline", "avatar_cleanup", {
+        "member_id": member, "artifact_job": generation["_id"], "files": ["F_OBSOLETE"]})
+    client = MagicMock()
+    client.ack.side_effect = OSError("Supervisor offline")
+    monkeypatch.setattr(avatars, "RuntimeClient", lambda: client)
+    assert worker.step("ledger_outbox", kinds=["avatar_cleanup"])
+    assert store.get("ledger_outbox", "cleanup-offline")["status"] == "done"
+    slack.files_delete.assert_called_once_with(file="F_OBSOLETE")
+    assert not list(spool.iterdir())
+    client.ack.assert_not_called()
+    ack_id = "avatar-runtime-ack:" + generation["_id"]
+    for _ in range(11):
+        assert worker.step("ledger_outbox", kinds=["avatar_runtime_ack"])
+        ack = store.get("ledger_outbox", ack_id)
+        assert ack["status"] == "pending"
+        ack["available_at"] = now()
+        store.put("ledger_outbox", ack)
+    client.ack.side_effect = None
+    assert worker.step("ledger_outbox", kinds=["avatar_runtime_ack"])
+    assert store.get("ledger_outbox", ack_id)["status"] == "done"
+    client.ack.assert_called_with(generation["_id"])
+    slack.files_delete.assert_called_once()
 
 
 def test_avatar_queue_is_disjoint():
