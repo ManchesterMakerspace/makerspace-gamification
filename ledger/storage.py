@@ -134,6 +134,7 @@ class MongoStore:
 
     def indexes(self):
         self.db.ledger_participants.create_index("member_id", unique=True)
+        self.db.ledger_avatars.create_index([("kind", 1), ("member_id", 1), ("status", 1)])
         self.db.ledger_inbox.create_index([("status", 1), ("available_at", 1)])
         self.db.ledger_outbox.create_index([("status", 1), ("available_at", 1)])
         self.db.ledger_outbox.create_index([("kind", 1), ("status", 1), ("review_reconcile_resolved", 1)])

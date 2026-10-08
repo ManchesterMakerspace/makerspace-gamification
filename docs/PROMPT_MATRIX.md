@@ -1,5 +1,12 @@
 # Prompt Matrix Template: design and operation
 
+Version 46 adds descriptive fantasy-avatar composition, independent avatar
+preferences, reference-image replacement and private notification behavior.
+Equivalent policy wording and XML whitespace are compacted to preserve the
+30-KiB CRLF budget. The `avatar` JSON prompt set remains separate. A Google Doc
+override needs the same complete update and explicit reload; reserved jobs keep
+their saved policy. See [avatars](AVATARS.md).
+
 The [canonical matrix](../ledger/prompts/prompt_matrix.xml.md) is the shared behavioral policy for The Ledger, served through vLLM with `nvidia/Qwen3.8-27B-NVFP4`. It combines XML section/role identifiers with readable Markdown headings, tables, and examples inside CDATA. The packaged [JSON message types](PROMPTS.md) remain the source of audience-specific tasks and rotating voices; their inventory may grow independently of the matrix.
 
 The matrix is an application system prompt, not a replacement tokenizer chat template or a model fine-tune. The application sends it in the Chat Completions `system` message. vLLM applies the model's own chat template; requests continue using `enable_thinking: false`, non-streaming output, bounded generation, and canned fallbacks. See the [NVIDIA model card](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4) and [vLLM serving documentation](https://docs.vllm.ai/en/latest/serving/online_serving/).

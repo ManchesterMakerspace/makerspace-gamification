@@ -180,6 +180,8 @@ class LedgerQuests:
                     s.put("ledger_evidence", {"_id": completion, "kind": "quest_completion", "member_id": member,
                         "quest_revision": key, "logical_id": q["logical_id"], "description": contribution["description"],
                         "reviewer": actor, "review_authority": audit, "activity_at": contribution.get("submitted_at"), "at": now()})
+                    from .avatars import request
+                    request(d, member, "quest:" + completion)
                     before_xp = amount(d.participant(member)["xp"])
                     d.award(member, completion, str(contribution["reward"]), "quest", facts={
                         "quest_title": q["title"], "summary": "Independently verified shared quest completion."}, action_id=action_id)

@@ -28,6 +28,12 @@ x-ledger-environment: &ledger-environment
   LEDGER_NOVEL_ANNOUNCEMENTS: ${LEDGER_NOVEL_ANNOUNCEMENTS:-false}
   LEDGER_WELCOMES: ${LEDGER_WELCOMES:-false}
   LEDGER_WELCOME_PROBABILITY: ${LEDGER_WELCOME_PROBABILITY:-0.2}
+  LEDGER_AVATAR_RUNTIME_URL: ${LEDGER_AVATAR_RUNTIME_URL:-http://ledger-image:8090}
+  LEDGER_AVATAR_RUNTIME_KEY: ${LEDGER_AVATAR_RUNTIME_KEY:-}
+  LEDGER_AVATAR_MODEL_REVISION: ${LEDGER_AVATAR_MODEL_REVISION:-deployment-pinned}
+  LEDGER_AVATAR_BIO_FIELD_ID: ${LEDGER_AVATAR_BIO_FIELD_ID:-}
+  LEDGER_AVATAR_INTERESTS_FIELD_ID: ${LEDGER_AVATAR_INTERESTS_FIELD_ID:-}
+  LEDGER_AVATAR_CONTEXT_LIMIT: ${LEDGER_AVATAR_CONTEXT_LIMIT:-8192}
   MQTT_HOST: ${MQTT_HOST:-localhost}
   MQTT_PORT: ${MQTT_PORT:-1883}
   MQTT_USER: ${MQTT_USER:-}
@@ -36,6 +42,43 @@ x-ledger-environment: &ledger-environment
   MQTT_CLIENT_ID: ${MQTT_CLIENT_ID:-makerspace-ledger}
 
 services:
+  ledger-avatars:
+    profiles: [avatars]
+    build: .
+    environment: *ledger-environment
+    command: ["ledger", "worker", "--queue", "avatars"]
+    volumes:
+      - avatar-spool:/var/lib/ledger-avatars
+    restart: unless-stopped
+
+  ledger-image:
+    profiles: [avatars]
+    build:
+      context: .
+      dockerfile: Dockerfile.image
+      args:
+        VLLM_OMNI_IMAGE: ${VLLM_OMNI_IMAGE:-vllm/vllm-omni:latest}
+    platform: linux/arm64
+    ipc: host
+    init: true
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      LEDGER_AVATAR_RUNTIME_KEY: ${LEDGER_AVATAR_RUNTIME_KEY:-}
+      LEDGER_AVATAR_RUNTIME_COMMAND: ${LEDGER_AVATAR_RUNTIME_COMMAND:-}
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+      - image-spool:/var/lib/ledger-image
+    expose: ["8090"]
+    restart: unless-stopped
+
   ledger-web:
     build: .
     environment: *ledger-environment
@@ -62,6 +105,8 @@ services:
       LEDGER_TICKET_GOOGLE_ACCESS_TOKEN: ${LEDGER_TICKET_GOOGLE_ACCESS_TOKEN:-}
       LEDGER_TICKET_GOOGLE_FOLDER_ID: ${LEDGER_TICKET_GOOGLE_FOLDER_ID:-}
     command: ["ledger", "worker", "--queue", "outbox"]
+    volumes:
+      - avatar-spool:/var/lib/ledger-avatars
     # AI startup/outages must not block delivery via canned fallbacks.
     restart: unless-stopped
   ledger-channels:
@@ -157,3 +202,5 @@ services:
 
 volumes:
   huggingface-cache:
+  avatar-spool:
+  image-spool:

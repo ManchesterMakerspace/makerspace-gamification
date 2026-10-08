@@ -6,6 +6,10 @@ The implementation is a Python Slack Bolt application with durable Mongo inbox/o
 
 ## Run locally
 
+Personalized participant avatars use an optional sequential Qwen-Image-2.1
+vLLM-Omni service, with Slack references, opt-out preferences and automatic Home
+replacement. See [avatar deployment and lifecycle](docs/AVATARS.md).
+
 The Ledger can also author an individual or cooperative quest for human review with `python -m ledger.generate_quest`. Use `--rank N` to select an enabled rank, or omit it for weighted demand-based selection; `--dry-run --seed 42` previews without writes. See [quest generation, review and rollout](docs/QUEST_GENERATION.md) for required channel-use notices, configuration, resumable requests and shared project completion.
 
 Opted-in participants can receive targeted recruitment reminders with `python -m ledger.sponsorship_reminder --days never` or `--days N`. See [recruitment and opt-in](docs/RECRUITMENT.md) for options, dry runs and invitation follow-ups.

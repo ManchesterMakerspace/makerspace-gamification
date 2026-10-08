@@ -307,7 +307,16 @@ class SlackUI:
         else:
             self.ledger.require(actor)
         if callback == "preferences_save":
-            self.ledger.preferences(actor, data.get("observation", False), data.get("arrival_mentions", False))
+            files = data.get("avatar_reference") or []
+            if len(files) > 1 or (files and data.get("remove_avatar_reference")):
+                raise ValueError("Choose one reference image or remove the current reference.")
+            if files:
+                file = client.files_info(file=files[0])["file"]
+                if file.get("user") != body["user"]["id"] or not 0 < file.get("size", 0) < 2_000_000:
+                    raise ValueError("Choose your own reference image smaller than 2 MB.")
+            self.ledger.preferences(actor, data.get("observation", False), data.get("arrival_mentions", False),
+                avatars=data.get("avatars", True), reference_file=files[0] if files else None,
+                remove_reference=data.get("remove_avatar_reference", False))
             return {}
         if callback == "member_quest_submit":
             from .quests import Quests

@@ -201,6 +201,8 @@ class Ledger:
         self.notify(member_id, "onboarding" if first else "return", {"summary": "Your skills and XP are retained and continue accruing silently if you opt out."}, f"join:{member_id}:{p['revision']}")
         from .engagement import Engagement
         Engagement(self).notice(member_id)
+        from .avatars import request
+        request(self, member_id, f"join:{p['consent_generation']}")
         return p
 
     def leave(self, member_id):
@@ -212,6 +214,8 @@ class Ledger:
             return
         p.update(opted_in=False, revision=p["revision"] + 1)
         self.store.put("ledger_participants", p)
+        from .avatars import cancel
+        cancel(self, member_id)
         from .authority import Authority
         Authority(self).cleanup(member_id, "Consent withdrawn; a new grant is required after rejoining")
         from .admin_access import sync_review_membership
@@ -504,6 +508,9 @@ class Ledger:
         if not historical and self.active(member_id) and rank <= 6:
             enqueue(self.store, "ledger_outbox", f"art:{member_id}:{rank}:{p['revision']}", "rank_art", {"member_id": member_id, "slot": rank,
                     "summary_id": summary_id, "consent_generation": p.get("consent_generation", 0)})
+        if not historical:
+            from .avatars import request
+            request(self, member_id, f"rank:{rank}:{p['revision']}")
         return summary_id
 
     def correct_rank(self, actor, member_id, slot, reason):
@@ -656,6 +663,9 @@ class Ledger:
         doc.update(status="approved" if approve else "rejected", reviewer=actor, reviewed_at=now(), reason=reason)
         self.store.put("ledger_evidence", doc)
         self._reconcile(doc["member_id"], action_id=action_id)
+        if new_verification and doc["achievement"] in CHALLENGES:
+            from .avatars import request
+            request(self, doc["member_id"], "verified:" + evidence_id)
         if action_id and new_verification and doc["achievement"] in CHALLENGES:
             catalog = self.store.get("ledger_catalog", doc["catalog_id"]) or {}
             reviewed_result = {"verified_milestone": True, "milestone_id": evidence_id, "xp_outcome_known": True,
@@ -786,6 +796,9 @@ class Ledger:
             if catalog.get("tool_ids") and set(catalog["tool_ids"]).issubset(active) and not self.store.get("ledger_awards", achievement_id):
                 self.store.put("ledger_awards", {"_id": achievement_id, "kind": "shop_completion", "member_id": member_id,
                     "catalog_id": catalog["_id"], "shop_id": catalog["shop_id"], "at": now()})
+                if not historical:
+                    from .avatars import request
+                    request(self, member_id, "shop:" + achievement_id)
                 self.major(member_id, "shop_complete", {"shop": (self.sources.shop(catalog["shop_id"]) or {}).get("name", "Shop")}, achievement_id, historical, action_id=action_id)
         metrics["completed_shops"] = len(self.store.select("ledger_awards", {"kind": "shop_completion", "member_id": member_id}))
         for source, (value, kind) in desired.items():
@@ -804,7 +817,7 @@ class Ledger:
         self._advance(member_id, historical, action_id=action_id)
         Quests(self).unlock_notice(member_id, action_id=action_id if not historical else None)
 
-    def preferences(self, member_id, observation, arrival_mentions):
+    def preferences(self, member_id, observation, arrival_mentions, *, avatars=None, reference_file=None, remove_reference=False):
         def run(s):
             d = Ledger(s, self.sources)
             if not d.member_eligible(member_id):
@@ -812,9 +825,33 @@ class Ledger:
             p = d.preference_profile(member_id)
             if type(observation) is not bool or type(arrival_mentions) is not bool:
                 raise ValueError("Choose both preferences explicitly.")
-            p.update(preferences={"observation": observation, "arrival_mentions": arrival_mentions}, revision=p["revision"] + 1,
+            preferences = {**p.get("preferences", {}), "observation": observation, "arrival_mentions": arrival_mentions}
+            previous_avatars = preferences.get("avatars", True)
+            observation_changed = observation != p.get("preferences", {}).get("observation", True)
+            if avatars is not None:
+                if type(avatars) is not bool:
+                    raise ValueError("Choose the avatar preference explicitly.")
+                preferences["avatars"] = avatars
+            if previous_avatars != preferences.get("avatars", True) or remove_reference or observation_changed:
+                p["avatar_generation"] = p.get("avatar_generation", 0) + 1
+            if reference_file or remove_reference:
+                p["avatar_reference_revision"] = p.get("avatar_reference_revision", 0) + 1
+            p.update(preferences=preferences, revision=p["revision"] + 1,
                      observation_generation=p.get("observation_generation", 0) + 1)
             d.save_preference_profile(p)
+            from .avatars import cancel, request
+            if not preferences.get("avatars", True) or remove_reference or observation_changed:
+                cancel(d, member_id)
+            if remove_reference:
+                # Keep the user-owned Slack file; clear only the active reference.
+                s.put("ledger_avatars", {"_id": "reference:" + member_id, "kind": "reference_removed", "member_id": member_id})
+            if previous_avatars != preferences.get("avatars", True) or remove_reference or observation_changed:
+                enqueue_home_refresh(s, member_id, f"avatar-preferences:{p['revision']}")
+                request(d, member_id, f"preferences:{p['revision']}")
+            if reference_file and preferences.get("avatars", True) and d.active(member_id):
+                enqueue(s, "ledger_outbox", f"avatar-reference:{member_id}:{p['revision']}", "avatar_reference",
+                        {"member_id": member_id, "file_id": reference_file, "consent_generation": p.get("consent_generation", 0),
+                         "avatar_generation": p.get("avatar_generation", 0), "reference_revision": p["avatar_reference_revision"]})
             s.put("ledger_evidence", {"_id": "preferences:" + str(uuid4()), "kind": "preferences", "member_id": member_id,
                 "preferences": p["preferences"], "at": now()})
             if observation:

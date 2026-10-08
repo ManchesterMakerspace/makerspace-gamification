@@ -149,6 +149,11 @@ class ChatAPI:
     def complete(self, messages, temperature=0.7, max_tokens=384, *, deadline=None):
         return self._request(messages, temperature, max_tokens, deadline=deadline)
 
+    def complete_with_usage(self, messages, temperature=0.7, max_tokens=384, *, deadline=None, content_limit=4000):
+        """Return request-local usage without mutable last-response state."""
+        return self._request(messages, temperature, max_tokens, deadline=deadline,
+                             content_limit=content_limit, with_usage=True)
+
     def tool_response(self, messages, tools, deadline=15):
         # A separate transport entry point; narration never accepts tool calls.
         return self._request(messages, 0.3, 700, tools, deadline)
@@ -171,7 +176,7 @@ class ChatAPI:
         return count
 
     def _request(self, messages, temperature, max_tokens, tools=None, deadline=None,
-                 content_limit=2400, response_format=None):
+                 content_limit=2400, response_format=None, with_usage=False):
         payload = {"model": self.model, "messages": messages, "stream": False,
                    "temperature": temperature, "max_tokens": max_tokens,
                    "chat_template_kwargs": {"enable_thinking": False}}
@@ -191,6 +196,10 @@ class ChatAPI:
             raise ValueError("Incomplete or invalid chat response")
         if any(s in content.lower() for s in ("<think>", "</think>", "<tool_call>", "<!channel>", "<!here>", "<!everyone>")):
             raise ValueError("Invalid narration")
+        if with_usage:
+            usage = data.get("usage") or {}
+            return {"content": content.strip(), "usage": {k: usage.get(k) if type(usage.get(k)) is int else None
+                    for k in ("prompt_tokens", "completion_tokens", "total_tokens")}}
         return {"role": "assistant", "content": content.strip()} if tools is not None else content.strip()
 
     def _exchange(self, endpoint, payload, deadline=None):

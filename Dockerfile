@@ -3,7 +3,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY ledger ./ledger
 COPY THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md
-RUN pip install --no-cache-dir '.[server]' && useradd --uid 10001 --create-home ledger
+RUN pip install --no-cache-dir '.[server]' && useradd --uid 10001 --create-home ledger && mkdir -p /var/lib/ledger-avatars && chown ledger:ledger /var/lib/ledger-avatars
 USER ledger
 EXPOSE 3000
 CMD ["gunicorn", "--bind", "0.0.0.0:3000", "--workers", "2", "--timeout", "30", "--access-logfile", "-", "--access-logformat", "%(m)s %(U)s status=%(s)s duration_s=%(L)s", "ledger.cli:make_app()"]

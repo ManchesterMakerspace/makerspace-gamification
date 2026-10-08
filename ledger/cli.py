@@ -28,6 +28,7 @@ CHANNEL_KINDS = ["remove", "invite", "provision_slot", "review_channel_invite"]
 RESULT_KINDS = ["summary_flush", "summary_delivery"]
 INTERACTIVE_KINDS = ["conversation", "guidance", "community_count_reply", "sponsor_report"]
 HOME_KINDS = ["home_publish", "home_profile_photo"]
+AVATAR_KINDS = ["avatar_generate", "avatar_reference"]
 RECONCILE_INTERVAL_SECONDS = 13 * 60
 
 
@@ -37,6 +38,8 @@ def periodic_reconcile_key(timestamp):
 
 def outbox_filters(queue):
     """Disjoint lanes: slow routine delivery cannot claim interactive/results work."""
+    if queue == "avatars":
+        return {"kinds": AVATAR_KINDS}
     if queue == "homes":
         return {"kinds": HOME_KINDS}
     if queue == "channels":
@@ -45,7 +48,7 @@ def outbox_filters(queue):
         return {"kinds": RESULT_KINDS}
     if queue == "interactive":
         return {"kinds": INTERACTIVE_KINDS}
-    return {"exclude": CHANNEL_KINDS + RESULT_KINDS + INTERACTIVE_KINDS + HOME_KINDS}
+    return {"exclude": CHANNEL_KINDS + RESULT_KINDS + INTERACTIVE_KINDS + HOME_KINDS + AVATAR_KINDS}
 
 
 def database_ledger():
@@ -144,7 +147,7 @@ def main():
     parser.add_argument("action", choices=["init", "bootstrap", "serve", "worker", "reconcile", "dry-run", "prompt-matrix", "prepare-reads"])
     parser.add_argument("--verify", action="store_true", help="Compare prepared optimized reads with legacy reads without sending messages")
     parser.add_argument("--port", type=int, default=3000)
-    parser.add_argument("--queue", choices=["all", "inbox", "outbox", "channels", "engagement", "results", "interactive"], default="all")
+    parser.add_argument("--queue", choices=["all", "inbox", "outbox", "channels", "engagement", "results", "interactive", "avatars"], default="all")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if args.action == "prompt-matrix":
@@ -214,6 +217,9 @@ def main():
                             ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox", f"ticket-quest-reconcile:{int(time.time() // 3600)}", "ticket_quest_reconcile", {}))
                             last_ticket_scan = time.monotonic()
                         last = time.monotonic()
+                    if queue == "avatars":
+                        from .avatars import backfill
+                        backfill(ledger)
                     if queue == "inbox" and time.monotonic() - last_home_scan >= 86400:
                         ledger.store.atomic(lambda s: enqueue(s, "ledger_inbox",
                             f"home-reconcile:daily:{int(time.time() // 86400)}", "home_reconcile", {"source": "daily"}))
@@ -225,11 +231,13 @@ def main():
                     worked = worker.step("ledger_inbox", exclude=["engagement"]) if queue == "inbox" else worker.step("ledger_inbox", kinds=["engagement"]) if queue == "engagement" else worker.step(
                         "ledger_outbox", **outbox_filters(queue))
                     if not worked:
+                        if queue == "avatars" and hasattr(worker, "avatar_pipeline"):
+                            worker.avatar_pipeline.idle()
                         stop.wait(0.25)
                 except Exception as exc:
                     logging.warning("Worker queue %s unavailable: %s", queue, type(exc).__name__)
                     stop.wait(2)
-        queues = ["inbox", "outbox", "channels", "engagement", "results", "interactive", "homes"] if args.queue == "all" else [args.queue, "homes"] if args.queue == "outbox" else [args.queue]
+        queues = ["inbox", "outbox", "channels", "engagement", "results", "interactive", "homes", "avatars"] if args.queue == "all" else [args.queue, "homes"] if args.queue == "outbox" else [args.queue]
         threads = [Thread(target=run, args=(q,), name=q, daemon=True) for q in queues]
         for thread in threads:
             thread.start()
@@ -246,6 +254,8 @@ def main():
             stop.set()
             for thread in threads:
                 thread.join(timeout=20)
+            if hasattr(worker, "avatar_pipeline"):
+                worker.avatar_pipeline.idle(force=True)
             if connection:
                 connection.disconnect()
                 connection.loop_stop()

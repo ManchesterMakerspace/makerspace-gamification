@@ -1,5 +1,11 @@
 # Separate Mongo connections and restricted roles
 
+Participant avatars add the owned `ledger_avatars` collection with
+`find`, `insert`, `update`, and `createIndex` privileges. Both role examples and
+their collection/index inventory tests cover it. Requests, current image pairs,
+references and metrics use `LEDGER_URI`; source reads remain on `MLAB_URI`.
+See [avatar storage and lifecycle](AVATARS.md).
+
 The service creates independent PyMongo clients for its two data sources:
 
 | Setting | Purpose |

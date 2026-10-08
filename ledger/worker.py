@@ -86,7 +86,10 @@ class Worker:
 
     def inbox(self, job):
         payload = job["payload"]
-        if job["kind"] == "catalog_refresh":
+        if job["kind"] == "avatar_backfill":
+            from .avatars import backfill_page
+            backfill_page(self, job)
+        elif job["kind"] == "catalog_refresh":
             from .catalog_cache import refresh
             refresh(self.ledger, job)
         elif job["kind"] == "reconcile_member":
@@ -441,6 +444,9 @@ class Worker:
             slack_file = block.get("slack_file") if isinstance(block, dict) else None
             file_id = slack_file.get("id") if isinstance(slack_file, dict) else None
             alt_text = block.get("alt_text") if isinstance(block, dict) else None
+            if alt_text == "Your fantasy maker avatar" and file_id:
+                from .avatars import invalidate
+                invalidate(self.ledger, member_id, file_id)
             expected_asset_key = None
             if isinstance(alt_text, str) and alt_text.startswith("Rank icon for "):
                 participant = self.ledger.participant(member_id) or {}
@@ -520,6 +526,15 @@ class Worker:
         self.assert_live_job(job)
         rendered_participant = self.ledger.participant(member_id)
         rendered_rank = rendered_participant.get("rank") if rendered_participant else None
+        from .avatars import revision as avatar_revision
+        from .avatars import invalidate, visible
+        avatar = visible(self.ledger, member_id)
+        if avatar:
+            for name in ("avatar", "avatar512"):
+                file_id = avatar[name]["file_id"]
+                if not self._slack_file_exists(file_id):
+                    invalidate(self.ledger, member_id, file_id)
+        rendered_avatar_revision = avatar_revision(self.ledger, member_id)
         view = home(self.ledger, member_id, rank_icon_file_id=rank_icon_file_id,
                     skill_tree_file_id=skill_tree_file_id)
         try:
@@ -529,6 +544,13 @@ class Worker:
             raise
         if not self._home_publish_confirmed(result, view):
             raise RuntimeError("Slack did not confirm the published Home view")
+
+        if view.get("callback_id") == "ledger_home_public":
+            self.store.atomic(lambda s: s.put("ledger_homes", {
+                **(s.get("ledger_homes", member_id) or {"_id": member_id}),
+                "kind": "home", "published_home": view, "published_avatar_revision": "default",
+                "published_at": now(), "slack_id": slack_id, "needs_replacement": False,
+            }))
 
         # Persist placeholder intent immediately after Slack confirms the placeholder.
         if view.get("callback_id") == "ledger_home_processing":
@@ -547,7 +569,10 @@ class Worker:
                 **(s.get("ledger_homes", member_id) or {"_id": member_id}),
                 "kind": "home", "published_home": view, "published_rank": rendered_rank,
                 "published_at": now(), "slack_id": slack_id, "needs_replacement": False,
+                "published_avatar_revision": rendered_avatar_revision,
             }))
+            if avatar_revision(self.ledger, member_id) != rendered_avatar_revision:
+                self.store.atomic(lambda s: enqueue_home_refresh(s, member_id, "avatar-race:" + str(uuid4()), slack_id))
             self._describe_home_profile_photo(member_id, slack_id)
 
     def reconcile_homes(self, job):
@@ -772,6 +797,9 @@ class Worker:
             current = event.get("view") or {}
             callback_id = current.get("callback_id")
             binding_matches = current.get("private_metadata") == home_private_metadata(self.ledger, member_id)
+            from .avatars import revision as avatar_revision
+            cached_home = self.store.get("ledger_homes", member_id) or {}
+            binding_matches = binding_matches and cached_home.get("published_avatar_revision", "default") == avatar_revision(self.ledger, member_id)
             latest_home = self.store.select("ledger_outbox", {"kind": "home_publish",
                 "payload.member_id": member_id}, sort=[("created_at", -1), ("_id", -1)], limit=1)
             latest_home_failed = bool(latest_home and latest_home[0].get("status") in ("failed", "cancelled"))
@@ -1669,6 +1697,20 @@ class Worker:
     def outbox(self, job):
         p = job["payload"]
         kind = job["kind"]
+        if kind == "avatar_generate":
+            from .avatars import AvatarPipeline
+            if not hasattr(self, "avatar_pipeline"):
+                self.avatar_pipeline = AvatarPipeline(self)
+            try:
+                return self.avatar_pipeline.generate(job)
+            finally:
+                self.avatar_pipeline.idle()
+        if kind == "avatar_reference":
+            from .avatars import save_reference
+            return save_reference(self, job)
+        if kind in ("avatar_notice", "avatar_cleanup"):
+            from .avatars import deliver
+            return deliver(self, job)
         member_id = p.get("member_id")
         if kind.startswith("ticket_quest_"):
             if (self.store.get("ledger_catalog", "control") or {}).get("paused"):

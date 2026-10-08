@@ -558,6 +558,8 @@ class Quests:
                     d.touch(q["creator"])
                     q["completion_count"] = q.get("completion_count", 0) + 1
                     s.put("ledger_quests", q)
+                    from .avatars import request
+                    request(d, doc["member_id"], "quest:" + completion)
                     before_xp = amount(d.participant(doc["member_id"])["xp"])
                     d.award(doc["member_id"], completion, str(accepted["reward"]), "quest", facts={"quest_title": q["title"], "summary": "Independently verified quest completion."}, action_id=action_id)
                     credited = amount(d.participant(doc["member_id"])["xp"]) - before_xp
