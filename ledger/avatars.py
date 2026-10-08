@@ -424,10 +424,7 @@ class AvatarPipeline:
         member, participant, uid = self.live(job)
         if participant.get("import_pending"):
             raise HistoryImportPending()
-        if self.w.valid_identity(member) != uid:
-            raise Denied("Slack identity is unavailable")
         self.acquire(job)
-        self.directory.mkdir(parents=True, exist_ok=True)
         prefix = self.directory / hashlib.sha256(job["_id"].encode()).hexdigest()
         started = time.monotonic()
         stop, lost = Event(), Event()
@@ -449,16 +446,21 @@ class AvatarPipeline:
                     lost.set()
                     return
         thread = Thread(target=heartbeat, daemon=True)
-        thread.start()
         outcome = "failed"
-        row = self.store.get(COLLECTION, "job:" + job["_id"])
+        row = completed
         try:
-            if not row or not row.get("selection"):
-                if not row:
-                    row = {"_id": "job:" + job["_id"], "kind": "job", "job_id": job["_id"],
-                           "member_id": member, "slack_id": uid, "slack_username": uid, "rank": participant["rank"],
-                           "status": "preparing", "attempt_metrics": [], "created_at": now()}
-                    self.store.atomic(lambda s: s.put(COLLECTION, row))
+            if not row:
+                row = {"_id": "job:" + job["_id"], "kind": "job", "job_id": job["_id"],
+                       "member_id": member, "slack_id": uid, "slack_username": uid, "rank": participant["rank"],
+                       "status": "preparing", "attempt_metrics": [], "created_at": now()}
+                self.store.atomic(lambda s: s.put(COLLECTION, row))
+            thread.start()
+            # Slack identity reads can fail transiently. Finalize and audit
+            # these attempts exactly like inference/upload failures.
+            if self.w.valid_identity(member) != uid:
+                raise Denied("Slack identity is unavailable")
+            self.directory.mkdir(parents=True, exist_ok=True)
+            if not row.get("selection"):
                 user = self.w.slack.users_info(user=uid)["user"]
                 # users.info may omit custom fields; request only this user's profile.
                 response = self.w.slack.users_profile_get(user=uid)
@@ -596,7 +598,8 @@ class AvatarPipeline:
             raise
         finally:
             stop.set()
-            thread.join(timeout=2)
+            if thread.ident is not None:
+                thread.join(timeout=2)
             metric = {"job_id": job["_id"], "slack_username": (row or {}).get("slack_username", uid),
                 "token_usage": (row or {}).get("token_usage", {}), "duration_seconds": round(time.monotonic() - started, 3),
                 "job_end_time": now(), "outcome": outcome, "attempt": job.get("attempts", 1)}

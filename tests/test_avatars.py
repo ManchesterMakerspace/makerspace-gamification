@@ -1,4 +1,5 @@
 import base64
+import json
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from threading import Event, Thread
@@ -99,6 +100,39 @@ def test_file_info_failure_keeps_confirmed_upload_id(setup):
     pipeline.generate(store.claim("ledger_outbox", kinds=["avatar_generate"]))
     assert slack.files_upload_v2.call_count == 2
     assert runtime.generate.call_count == api.complete_with_usage.call_count == 1
+
+
+def test_identity_preflight_failures_record_every_attempt_and_terminal_end(setup, capsys):
+    _, store, api, slack, runtime, worker, pipeline, job, _ = setup
+    job.update(status="pending", attempts=0, available_at=now())
+    store.put("ledger_outbox", job)
+    worker.avatar_pipeline = pipeline
+    slack.users_info.side_effect = OSError("Transient users.info transport failure")
+    for attempt in range(1, 11):
+        assert worker.step("ledger_outbox", kinds=["avatar_generate"])
+        stored_job = store.get("ledger_outbox", job["_id"])
+        row = store.get("ledger_avatars", "job:" + job["_id"])
+        assert stored_job["attempts"] == attempt
+        assert len(row["attempt_metrics"]) == attempt
+        metric = row["attempt_metrics"][-1]
+        assert metric["attempt"] == attempt and metric["outcome"] == "failed"
+        assert metric["job_end_time"] and metric["duration_seconds"] >= 0
+        assert metric["token_usage"] == {}
+        if attempt < 10:
+            assert stored_job["status"] == "pending"
+            stored_job["available_at"] = now()
+            store.put("ledger_outbox", stored_job)
+    assert stored_job["status"] == row["status"] == "failed"
+    assert row["job_end_time"] == row["attempt_metrics"][-1]["job_end_time"]
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(events) == 10
+    assert [event["attempt"] for event in events] == list(range(1, 11))
+    assert all(event["event"] == "avatar_job" and event["slack_username"] == "U1"
+               and event["job_end_time"] for event in events)
+    assert store.get("ledger_catalog", avatars.RUNTIME_LEASE)["until"] <= now()
+    runtime.generate.assert_not_called()
+    api.complete_with_usage.assert_not_called()
+    slack.files_upload_v2.assert_not_called()
 
 
 def test_invalid_cached_avatar_restores_default_and_queues_repair(setup):
