@@ -54,6 +54,8 @@ notification; that notification follows activation and displays the 512 JPG
 with a link to the full-resolution file.
 Confirmed upload receipts survive an opt-out during upload and reserve cleanup.
 Cleanup waits for the generation to finish or cancel, and protects current files.
+Failed candidates that never activated bypass Home replacement confirmation;
+activated candidates still require it, including their upload-receipt cleanup.
 Activated jobs never regenerate when their original worker lease is reclaimed.
 
 Home and character-sheet rendering resolve the current avatar from Mongo. Home

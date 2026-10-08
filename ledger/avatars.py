@@ -638,14 +638,18 @@ def deliver(worker, job):
     member = job["payload"]["member_id"]
     row = visible(worker.ledger, member)
     if job["kind"] == "avatar_cleanup":
+        artifact = worker.store.get(COLLECTION, "job:" + job["payload"].get("artifact_job", "")) or {}
         if job["payload"].get("candidate_receipt"):
-            artifact = worker.store.get(COLLECTION, "job:" + job["payload"]["artifact_job"]) or {}
             generation = worker.store.get("ledger_outbox", job["payload"]["artifact_job"]) or {}
             if artifact.get("status") not in ("activated", "cancelled", "failed") and generation.get("status") != "cancelled":
                 from .worker import HistoryImportPending
                 raise HistoryImportPending()
         home = worker.store.get("ledger_homes", member) or {}
-        if home.get("published_avatar_revision") != revision(worker.ledger, member):
+        # Upload receipts also exist for candidates that eventually activate.
+        # Only never-activated failed candidates can bypass Home replacement.
+        unpublished_candidate = (job["payload"].get("failed_candidate")
+                                 and artifact.get("status") != "activated")
+        if not unpublished_candidate and home.get("published_avatar_revision") != revision(worker.ledger, member):
             from .worker import HistoryImportPending
             raise HistoryImportPending()
         protected = {r.get(k, {}).get("file_id") for r in worker.store.select(COLLECTION, {"kind": "current"}) for k in ("avatar", "avatar512")}

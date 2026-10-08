@@ -344,6 +344,47 @@ def test_cleanup_waits_for_home_and_never_deletes_current(setup):
     slack.files_delete.assert_called_once_with(file="F_OLD")
 
 
+
+def test_failed_unpublished_candidate_cleans_up_with_legacy_home(setup, monkeypatch):
+    ledger, store, _, slack, _, worker, pipeline, generation, member = setup
+    monkeypatch.setenv("LEDGER_AVATAR_SPOOL", str(pipeline.directory))
+    store.put("ledger_homes", {"_id": member, "rank": ledger.participant(member)["rank"]})
+    generation["attempts"] = 10
+    store.put("ledger_outbox", generation)
+    slack.files_info.side_effect = OSError("Slack unavailable")
+    with pytest.raises(OSError):
+        pipeline.generate(generation)
+    worker.finish("ledger_outbox", generation, "failed")
+    assert avatars.current(store, member) is None
+    assert store.get("ledger_avatars", "job:" + generation["_id"])["status"] == "failed"
+    assert list(pipeline.directory.iterdir())
+    cleanups = store.select("ledger_outbox", {"kind": "avatar_cleanup"})
+    assert cleanups and all(row["payload"]["failed_candidate"] for row in cleanups)
+    while worker.step("ledger_outbox", kinds=["avatar_cleanup"]):
+        pass
+    assert all(store.get("ledger_outbox", row["_id"])["status"] == "done" for row in cleanups)
+    assert {call.kwargs["file"] for call in slack.files_delete.call_args_list} == {"F_FULL"}
+    assert not list(pipeline.directory.iterdir())
+    assert store.get("ledger_outbox", "avatar-runtime-ack:" + generation["_id"])["status"] == "pending"
+    assert "published_avatar_revision" not in store.get("ledger_homes", member)
+
+
+def test_activated_candidate_receipt_still_waits_for_home_and_protects_current(setup):
+    _, store, _, slack, _, worker, pipeline, generation, member = setup
+    pipeline.generate(generation)
+    store.put("ledger_homes", {"_id": member, "rank": 1})
+    cleanup = next(row for row in store.select("ledger_outbox", {"kind": "avatar_cleanup"})
+                   if row["payload"].get("candidate_receipt"))
+    cleanup.update(status="working", lease="candidate-cleanup")
+    store.put("ledger_outbox", cleanup)
+    with pytest.raises(HistoryImportPending):
+        avatars.deliver(worker, cleanup)
+    slack.files_delete.assert_not_called()
+    store.put("ledger_homes", {"_id": member, "published_avatar_revision": generation["_id"]})
+    avatars.deliver(worker, cleanup)
+    slack.files_delete.assert_not_called()
+
+
 def test_cleanup_finishes_offline_and_receipt_ack_retries_independently(setup, monkeypatch):
     _, store, _, slack, _, worker, pipeline, generation, member = setup
     from ledger.storage import enqueue
