@@ -16,6 +16,7 @@ from slack_sdk.errors import SlackApiError
 from . import views
 from .community import Community
 from .domain import ConsentChanged, Denied, CHALLENGES
+from .ineligible import is_ineligible_slack_id
 from .messages import AUDIENCES, TYPES, button, default_template, section
 from .prompt_library import EXAMPLE_FACTS, library_template
 from .rules import validate_rules
@@ -94,6 +95,10 @@ class SlackUI:
         return views.consent(sponsor)
 
     def command(self, body, client):
+        raw_actor = body.get("user_id") or body.get("user")
+        raw_actor = raw_actor.get("id") if isinstance(raw_actor, dict) else raw_actor
+        if is_ineligible_slack_id(raw_actor) and body.get("command") != "/kudos":
+            return
         actor = self.actor(body)
         command, text = body["command"], body.get("text", "").strip()
         if command == "/ledger" and text in ("join", "opt-in"):
@@ -264,8 +269,11 @@ class SlackUI:
         return doc["value"]
 
     def submission(self, body, client):
-        actor = self.actor(body)
+        raw_actor = (body.get("user") or {}).get("id") or body.get("user_id")
         callback = body["view"]["callback_id"]
+        if is_ineligible_slack_id(raw_actor) and callback not in ("dismiss", "kudos_recipient", "kudos_send"):
+            return {}
+        actor = self.actor(body)
         data, meta = views.values(body), json.loads(body["view"].get("private_metadata") or "{}")
         if callback == "dismiss":
             return {}
@@ -464,8 +472,11 @@ class SlackUI:
         return {}
 
     def action(self, body, client):
-        actor = self.actor(body)
+        raw_actor = (body.get("user") or {}).get("id") or body.get("user_id")
         action = body["actions"][0]
+        if is_ineligible_slack_id(raw_actor) and action.get("action_id") not in ("shop", "kudos_change"):
+            return
+        actor = self.actor(body)
         name, value = action["action_id"], action.get("value", "")
         if name == "join":
             return self.open(client, body, self.join_view(actor, value or None))
@@ -479,10 +490,12 @@ class SlackUI:
             return self.open(client, body, views.preferences(self.ledger, actor))
         if name == "review_ledger_quest":
             return self.admin_command(actor, "publish-quest " + value, body, client)
-        if name in ("shop", "kudos_change") and body.get("view", {}).get("callback_id") == "kudos_send":
-            self.ledger.require_member(actor)
-        else:
+        kudos_form_action = (name in ("shop", "kudos_change")
+            and body.get("view", {}).get("callback_id") == "kudos_send")
+        if not kudos_form_action:
             self.ledger.require(actor)
+        elif not is_ineligible_slack_id(raw_actor):
+            self.ledger.require_member(actor)
         if name == "guidance_next_step":
             participant = self.ledger.require(actor)
             if value:

@@ -8,6 +8,8 @@ The implementation is a Python Slack Bolt application with durable Mongo inbox/o
 
 The Ledger can also author an individual or cooperative quest for human review with `python -m ledger.generate_quest`. Use `--rank N` to select an enabled rank, or omit it for weighted demand-based selection; `--dry-run --seed 42` previews without writes. See [quest generation, review and rollout](docs/QUEST_GENERATION.md) for required channel-use notices, configuration, resumable requests and shared project completion.
 
+Opted-in participants can receive targeted recruitment reminders with `python -m ledger.sponsorship_reminder --days never` or `--days N`. See [recruitment and opt-in](docs/RECRUITMENT.md) for options, dry runs and invitation follow-ups.
+
 Requires Python 3.12+, an existing Mongo replica set, an MQTT broker, a Slack app, and a reachable vLLM endpoint. The supplied Compose deployment serves `nvidia/Qwen3.8-27B-NVFP4` using `vllm-gb10` on a Linux ARM64 NVIDIA DGX Spark/GB10 host. The Python bot can run separately on other hardware.
 
 ```powershell

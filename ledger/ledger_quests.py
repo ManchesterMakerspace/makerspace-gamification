@@ -22,12 +22,13 @@ class LedgerQuests:
         participant = self.l.require(member)
         state = self.project(q) if cooperative(q) else None
         if (not cooperative(q) or q["status"] != "published" or not enabled_rank(self.l, q["target_rank"])
-                or contains_rank_name(self.l, q)
+                or (generated(q) and contains_rank_name(self.l, q))
                 or not state or state["quest_revision"] != q["_id"] or state["status"] != "open"
                 or not Quests(self.l).prerequisites(q, member)):
             raise Denied("This cooperative quest is unavailable or its prerequisites are not met.")
-        if not generated(q) and (not minimum_rank(q) or participant["rank"] < q["target_rank"]
-                                 or not Quests(self.l).author_available(q)):
+        rank_ineligible = (participant["rank"] < q["target_rank"] if minimum_rank(q)
+                           else participant["rank"] != q["target_rank"])
+        if not generated(q) and (rank_ineligible or not Quests(self.l).author_available(q)):
             raise Denied("This cooperative quest's minimum rank or proposer eligibility is not met.")
         return q
 
@@ -136,8 +137,16 @@ class LedgerQuests:
 
     def verified_contributors(self, q, state):
         from .quests import Quests
+        service = Quests(self.l)
+        def eligible(member):
+            participant = self.l.participant(member)
+            return bool(self.l.active(member) and service.prerequisites(q, member)
+                and (generated(q) or (participant and service.author_available(q)
+                    and (participant["rank"] >= q["target_rank"] if minimum_rank(q)
+                         else participant["rank"] == q["target_rank"]))))
+
         return {m: c for m, c in state["contributions"].items()
-                if c["status"] == "verified" and self.l.active(m) and Quests(self.l).prerequisites(q, m)}
+                if c["status"] == "verified" and eligible(m)}
 
     def finalize(self, actor, key, description, *, action_id=None):
         action_id = action_id or "group-completion:" + str(uuid4())
@@ -155,7 +164,7 @@ class LedgerQuests:
             if state["status"] == "completed":
                 return state
             if (state["status"] != "open" or q["status"] != "published" or not enabled_rank(d, q["target_rank"])
-                    or contains_rank_name(d, q)):
+                    or (generated(q) and contains_rank_name(d, q))):
                 raise Denied("This shared project is closed or disabled.")
             if not isinstance(description, str) or not description.strip() or len(description) > 2000:
                 raise ValueError("Provide observable evidence of the shared outcome within 2,000 characters.")

@@ -121,6 +121,33 @@ def test_literal_casefold_search_and_limits_match_legacy(joined, monkeypatch):
     assert options[0][1] == "Build 000" and options[-1][1] == "Build 099"
 
 
+def test_optimized_discovery_matches_legacy_exact_rank_cooperative_eligibility(joined, monkeypatch):
+    ledger, store, *_ = joined
+    exact_rank = install(joined, title="Legacy exact-rank project", quest_type="cooperative", target_rank=2)
+    exact_rank.pop("rank_mode", None)
+    store.put("ledger_quests", exact_rank)
+    store.put("ledger_catalog", quest_head(exact_rank))
+    store.put("ledger_relationships", {"_id": "cooperative:" + exact_rank["logical_id"],
+        "kind": "quest_project", "logical_id": exact_rank["logical_id"],
+        "quest_revision": exact_rank["_id"], "status": "open", "contributions": {}})
+    exact_member = ledger.participant(member(1))
+    exact_member["rank"] = 2
+    store.put("ledger_participants", exact_member)
+    other_member = ledger.participant(member(2))
+    other_member["rank"] = 1
+    store.put("ledger_participants", other_member)
+
+    monkeypatch.setenv("LEDGER_OPTIMIZED_READS", "false")
+    legacy_exact = Quests(ledger).options(member(1))
+    legacy_other = Quests(ledger).options(member(2))
+    monkeypatch.setenv("LEDGER_OPTIMIZED_READS", "true")
+    optimized_exact = Quests(ledger).options(member(1))
+    optimized_other = Quests(ledger).options(member(2))
+    expected = ("g:" + exact_rank["_id"], exact_rank["title"])
+    assert optimized_exact == legacy_exact and expected in optimized_exact
+    assert optimized_other == legacy_other and expected not in optimized_other
+
+
 def test_opted_out_author_remains_valid_and_completed_quest_disappears(joined):
     ledger, store, *_ = joined
     q = install(joined)

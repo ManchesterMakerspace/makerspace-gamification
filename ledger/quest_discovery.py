@@ -177,8 +177,11 @@ class QuestDiscovery:
                 project = projects.get("cooperative:" + q["logical_id"], {})
                 if not cooperative(q) or project.get("status") != "open" or project.get("quest_revision") != q["_id"]:
                     continue
-                if not generated(q) and (not minimum_rank(q) or self.participant["rank"] < q["target_rank"]):
-                    continue
+                if not generated(q):
+                    rank_ineligible = (self.participant["rank"] < q["target_rank"] if minimum_rank(q)
+                                       else self.participant["rank"] != q["target_rank"])
+                    if rank_ineligible:
+                        continue
             elif (not individual(q) or (self.member == q["creator"] and not minimum_rank(q)) or
                   (not accepted and (q["logical_id"] in pinned or
                    (self.participant["rank"] < q["target_rank"] if minimum_rank(q)

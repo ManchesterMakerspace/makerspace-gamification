@@ -52,7 +52,8 @@ def help_text(ledger, actor):
 
 
 def invitation_eligible(ledger, target):
-    return ledger.member_eligible(target) and not (ledger.participant(target) or {}).get("opted_in", False)
+    return (not ledger.is_ineligible(target) and ledger.member_eligible(target)
+            and not (ledger.participant(target) or {}).get("opted_in", False))
 
 
 def delegate_candidates(ledger, actor, search):
@@ -73,6 +74,7 @@ def delegate_candidates(ledger, actor, search):
         for member in members:
             doc, flag = linked.get(member), flags.get("identity:" + member, {})
             if (not doc or doc.get("status") not in ("activeMember", "pending") or flag.get("bot") or flag.get("deactivated")
+                    or ledger.is_ineligible(member)
                     or search not in doc["slack_id"].casefold()):
                 continue
             result.append((member, doc["slack_id"]))
@@ -117,7 +119,9 @@ def invitation_candidates(ledger, search):
     for member in members:
         key = sid(member["_id"])
         identity = identities.get("identity:" + key, {})
-        if key not in linked or key in opted_in or identity.get("deactivated") or identity.get("bot"):
+        from .ineligible import is_ineligible_slack_id
+        if (key not in linked or key in opted_in or identity.get("deactivated") or identity.get("bot")
+                or is_ineligible_slack_id(linked.get(key))):
             continue
         title = " ".join(str(member.get(k) or "").strip() for k in ("firstname", "lastname")).strip() or linked[key]
         result.append((key, title))
@@ -129,6 +133,10 @@ def invite(ledger, actor, target, sender, message, key):
         d = Ledger(s, ledger.sources)
         require_command(d, actor)
         d.admin(actor)
+        # Treat excluded IDs like a silent no-op; the inviter learns nothing
+        # about the configuration from trying an invitation.
+        if d.is_ineligible(target):
+            return None
         if not invitation_eligible(d, target):
             raise Denied("Choose an eligible member who has not opted in.")
         chosen_sender, message_text = (sender or "").strip(), message or ""

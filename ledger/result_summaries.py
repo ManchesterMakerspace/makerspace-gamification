@@ -119,6 +119,8 @@ def _kudos_status(evidence):
 
 def track_kudos(ledger, evidence):
     """Collect the giver's receipt; never include authored text or recipient progress."""
+    if not ledger.member_eligible(evidence["giver"]):
+        return None
     identity = ledger.sources.slack_id(evidence["giver"])
     def write(store):
         current = Ledger(store, ledger.sources)
