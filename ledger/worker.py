@@ -68,7 +68,7 @@ class Worker:
             retry = min(300, 2 ** min(job["attempts"], 8))
             if isinstance(exc, SlackApiError) and exc.response.status_code == 429:
                 retry = max(retry, retry_after_seconds(exc.response))
-            status = "pending" if job["attempts"] < 10 or job["kind"] == "remove" else "failed"
+            status = "pending" if job["attempts"] < 10 or job["kind"] in ("remove", "avatar_runtime_ack") else "failed"
             self.finish(collection, job, status, retry, type(exc).__name__)
         return True
 
@@ -80,13 +80,19 @@ class Worker:
                 if deferred:
                     current["attempts"] = max(0, current.get("attempts", 1) - 1)
                 s.put(collection, current)
+                if collection == "ledger_outbox" and job["kind"] == "kudos_submit" and status == "failed":
+                    from .kudos_submission import failed
+                    failed(s, job)
                 if collection == "ledger_outbox" and job["kind"] == "kudos" and status in ("failed", "cancelled"):
                     self.kudos_receipt(s, job, {"status": status, "at": now()})
         self.store.atomic(write)
 
     def inbox(self, job):
         payload = job["payload"]
-        if job["kind"] == "catalog_refresh":
+        if job["kind"] == "avatar_backfill":
+            from .avatars import backfill_page
+            backfill_page(self, job)
+        elif job["kind"] == "catalog_refresh":
             from .catalog_cache import refresh
             refresh(self.ledger, job)
         elif job["kind"] == "reconcile_member":
@@ -441,6 +447,9 @@ class Worker:
             slack_file = block.get("slack_file") if isinstance(block, dict) else None
             file_id = slack_file.get("id") if isinstance(slack_file, dict) else None
             alt_text = block.get("alt_text") if isinstance(block, dict) else None
+            if alt_text == "Your fantasy maker avatar" and file_id:
+                from .avatars import invalidate
+                invalidate(self.ledger, member_id, file_id)
             expected_asset_key = None
             if isinstance(alt_text, str) and alt_text.startswith("Rank icon for "):
                 participant = self.ledger.participant(member_id) or {}
@@ -520,6 +529,15 @@ class Worker:
         self.assert_live_job(job)
         rendered_participant = self.ledger.participant(member_id)
         rendered_rank = rendered_participant.get("rank") if rendered_participant else None
+        from .avatars import revision as avatar_revision
+        from .avatars import invalidate, visible
+        avatar = visible(self.ledger, member_id)
+        if avatar:
+            for name in ("avatar", "avatar512"):
+                file_id = avatar[name]["file_id"]
+                if not self._slack_file_exists(file_id):
+                    invalidate(self.ledger, member_id, file_id)
+        rendered_avatar_revision = avatar_revision(self.ledger, member_id)
         view = home(self.ledger, member_id, rank_icon_file_id=rank_icon_file_id,
                     skill_tree_file_id=skill_tree_file_id)
         try:
@@ -529,6 +547,13 @@ class Worker:
             raise
         if not self._home_publish_confirmed(result, view):
             raise RuntimeError("Slack did not confirm the published Home view")
+
+        if view.get("callback_id") == "ledger_home_public":
+            self.store.atomic(lambda s: s.put("ledger_homes", {
+                **(s.get("ledger_homes", member_id) or {"_id": member_id}),
+                "kind": "home", "published_home": view, "published_avatar_revision": "default",
+                "published_at": now(), "slack_id": slack_id, "needs_replacement": False,
+            }))
 
         # Persist placeholder intent immediately after Slack confirms the placeholder.
         if view.get("callback_id") == "ledger_home_processing":
@@ -547,7 +572,10 @@ class Worker:
                 **(s.get("ledger_homes", member_id) or {"_id": member_id}),
                 "kind": "home", "published_home": view, "published_rank": rendered_rank,
                 "published_at": now(), "slack_id": slack_id, "needs_replacement": False,
+                "published_avatar_revision": rendered_avatar_revision,
             }))
+            if avatar_revision(self.ledger, member_id) != rendered_avatar_revision:
+                self.store.atomic(lambda s: enqueue_home_refresh(s, member_id, "avatar-race:" + str(uuid4()), slack_id))
             self._describe_home_profile_photo(member_id, slack_id)
 
     def reconcile_homes(self, job):
@@ -772,6 +800,9 @@ class Worker:
             current = event.get("view") or {}
             callback_id = current.get("callback_id")
             binding_matches = current.get("private_metadata") == home_private_metadata(self.ledger, member_id)
+            from .avatars import revision as avatar_revision
+            cached_home = self.store.get("ledger_homes", member_id) or {}
+            binding_matches = binding_matches and cached_home.get("published_avatar_revision", "default") == avatar_revision(self.ledger, member_id)
             latest_home = self.store.select("ledger_outbox", {"kind": "home_publish",
                 "payload.member_id": member_id}, sort=[("created_at", -1), ("_id", -1)], limit=1)
             latest_home_failed = bool(latest_home and latest_home[0].get("status") in ("failed", "cancelled"))
@@ -1669,6 +1700,26 @@ class Worker:
     def outbox(self, job):
         p = job["payload"]
         kind = job["kind"]
+        if kind in ("kudos_submit", "kudos_submission_reply"):
+            from .kudos_submission import process, reply
+            return process(self, job) if kind == "kudos_submit" else reply(self, job)
+        if kind == "avatar_generate":
+            from .avatars import AvatarPipeline
+            if not hasattr(self, "avatar_pipeline"):
+                self.avatar_pipeline = AvatarPipeline(self)
+            try:
+                return self.avatar_pipeline.generate(job)
+            finally:
+                self.avatar_pipeline.idle()
+        if kind == "avatar_reference":
+            from .avatars import save_reference
+            return save_reference(self, job)
+        if kind == "avatar_runtime_ack":
+            from .avatars import acknowledge
+            return acknowledge(self, job)
+        if kind in ("avatar_notice", "avatar_cleanup"):
+            from .avatars import deliver
+            return deliver(self, job)
         member_id = p.get("member_id")
         if kind.startswith("ticket_quest_"):
             if (self.store.get("ledger_catalog", "control") or {}).get("paused"):
@@ -2142,8 +2193,8 @@ class Worker:
                 self.queue_sponsorship_reminder_followup(e["giver"], "invitation_sent", e["recipient"])
             return
         recipient, giver = e["recipient"], e["giver"]
-        if not self.ledger.sources.good_standing(recipient):
-            raise Denied("Recipient no longer in good standing.")
+        from .kudos import require_recipient
+        require_recipient(self.ledger, recipient)
         uid = self.valid_identity(recipient, allow_ineligible=True)
         giver_uid = self.ledger.sources.slack_id(giver)
         if not uid or not giver_uid:
@@ -2156,8 +2207,7 @@ class Worker:
                     "shop": e.get("shop_name"), "tool": e.get("tool_name")})
         self.assert_live_job(job)
         self.ledger.require_member(giver)
-        if not self.ledger.sources.good_standing(recipient):
-            raise Denied("Kudos delivery is no longer permitted.")
+        require_recipient(self.ledger, recipient)
         identity = self.store.get("ledger_catalog", f"identity:{recipient}") or {}
         if identity.get("deactivated") or identity.get("bot"):
             raise Denied("Recipient identity is no longer active.")

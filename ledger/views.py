@@ -120,11 +120,11 @@ def admin_invitation():
 
 
 def kudos_form(ledger, recipient, key, draft=None):
+    from .kudos import require_recipient
+    require_recipient(ledger, recipient)
     draft = draft or {}
     participating = ledger.active(recipient)
     member = ledger.sources.member(recipient)
-    if not member or not ledger.sources.good_standing(recipient):
-        raise ValueError("Choose a member in good standing with a valid Slack identity.")
     name = " ".join([member.get("firstname", ""), member.get("lastname", "")]).strip()
     blocks = [section(f"Kudos for *{escape(name)}*"),
               {"type": "actions", "elements": [button("Change recipient", "kudos_change", key)]}]
@@ -182,6 +182,15 @@ def home_private_metadata(ledger, member_id):
     return f"{member_id}:{generation}"
 
 
+def avatar_block(ledger, member):
+    from .avatars import visible
+    row = visible(ledger, member)
+    if row and row.get("avatar", {}).get("file_id"):
+        return {"type": "image", "slack_file": {"id": row["avatar"]["file_id"]},
+                "alt_text": "Your fantasy maker avatar"}
+    return None
+
+
 def home(ledger, member_id, *, rank_icon_file_id=None, skill_tree_file_id=None):
     p = ledger.participant(member_id)
     if not ledger.active(member_id):
@@ -191,7 +200,10 @@ def home(ledger, member_id, *, rank_icon_file_id=None, skill_tree_file_id=None):
     display = ledger.presentation(p["rank"])
     blocks = [{"type": "header", "text": {"type": "plain_text", "text": "Character Sheet"}},
               section(f"{display['emoji']} *{escape(display['name'])}* · {p['xp']} XP")]
-    if rank_icon_file_id:
+    avatar = avatar_block(ledger, member_id)
+    if avatar:
+        blocks.append(avatar)
+    elif rank_icon_file_id:
         blocks.append({"type": "image", "title": {"type": "plain_text", "text": display["name"]},
                        "slack_file": {"id": rank_icon_file_id}, "alt_text": f"Rank icon for {display['name']}"})
     if skill_tree_file_id:
@@ -246,6 +258,9 @@ def character_sheet(ledger, member):
     from .progress import progress
     facts = progress(ledger, member)
     blocks = [section(f"*{escape(facts['rank'])}* · {facts['xp']} XP\n*Deepest cleared skill:* {escape(facts.get('highest_skill', 'No recorded clearance'))}")]
+    avatar = avatar_block(ledger, member)
+    if avatar:
+        blocks.append(avatar)
     if facts["metrics"]:
         blocks.append(section("\n".join(f"{k.replace('_', ' ').title()}: {escape(v)}" for k, v in facts["metrics"].items())))
     else:
@@ -272,7 +287,12 @@ def preferences(ledger, member):
     return modal("preferences_save", "Ledger preferences", [
         section("Observation is on by default for eligible members, whether or not you join The Ledger, after an explanatory notice. To opt out, uncheck Allow observation and save. The System observes only new eligible activity in configured Ledger channels, kudos issuance metadata, and verified volunteer activity. Original kudos text and DMs are excluded. Suggestions are audit-only and do not change XP or ranks or send recognition messages. Game participation and arrival mentions are separate. Ask staff about the audit process."),
         checkbox("observation", "Allow observation", pref.get("observation", True)),
-        checkbox("arrival_mentions", "Allow arrival mentions", pref.get("arrival_mentions", True))], submit="Save")
+        checkbox("arrival_mentions", "Allow arrival mentions", pref.get("arrival_mentions", True)),
+        section("Personalized fantasy avatars use your profile, verified progress, your observed Ledger posts and your conversations with The Ledger. Disable avatars to use the default character image. An optional reference image replaces your Slack profile photo; validation runs in the background."),
+        checkbox("avatars", "Allow personalized avatars", pref.get("avatars", True)),
+        {**file_input("avatar_reference", "Reference image (optional, smaller than 2 MB)"),
+         "element": {"type": "file_input", "action_id": "avatar_reference", "filetypes": ["jpg", "jpeg", "png", "webp"], "max_files": 1}},
+        checkbox("remove_avatar_reference", "Remove current avatar reference image")], submit="Save")
 
 
 def achievements(ledger, member):

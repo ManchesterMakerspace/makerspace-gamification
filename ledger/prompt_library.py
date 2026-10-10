@@ -9,7 +9,7 @@ from string import Formatter
 
 TYPES = ["onboarding", "return", "opt_out", "invitation", "checkout_earned", "checkout_granted", "volunteer_credit",
          "kudos", "recruitment", "rank_up", "shop_complete", "boss", "stewardship", "challenge", "first_build",
-         "develop_mentor", "mentoring", "correction", "conversation", "community_count", "status", "delivery", "project", "quest"]
+         "develop_mentor", "mentoring", "correction", "conversation", "community_count", "status", "delivery", "project", "quest", "avatar"]
 AUDIENCES = ["member", "shared", "recipient", "nonparticipant"]
 VARIABLES = {
     "member_full_name", "member_slack_id", "member_mention", "current_rank", "old_rank", "new_rank",

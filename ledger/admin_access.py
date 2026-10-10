@@ -33,7 +33,7 @@ def help_text(ledger, actor):
         return ""
     review = "review, approve <id>, reject <id> <reason>, publish-quest <id>, reject-quest <id>, verify-quest <quest> @member, complete-quest <quest>"
     if ledger.sources.role(actor) in ("admin", "board_member"):
-        return "Use /ledger-admin invite, ranks, history, rollback <version>, template <type> <audience>, template-library <type> <audience>, template-history, template-rollback <id>, template-test <type> <audience>, reload-prompts, catalog, quest, ticket-quests, delegates, disable-quest <id> <reason>, coverage @member <reason>, correct-rank @member <slot> <reason>, reconcile, metrics, pause, resume, " + review + "."
+        return "Use /ledger-admin invite, avatar [@member], ranks, history, rollback <version>, template <type> <audience>, template-library <type> <audience>, template-history, template-rollback <id>, template-test <type> <audience>, reload-prompts, catalog, quest, ticket-quests, delegates, disable-quest <id> <reason>, coverage @member <reason>, correct-rank @member <slot> <reason>, reconcile, metrics, pause, resume, " + review + "."
     if ledger.sources.role(actor) != "resource_manager":
         from .authority import Authority
         authority = Authority(ledger)

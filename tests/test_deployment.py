@@ -77,10 +77,10 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
         'conversations_members': {'groups:read'}, 'conversations_create': {'groups:write'},
         'conversations_invite': {'groups:write'}, 'conversations_kick': {'groups:write', 'channels:manage'},
         'conversations_open': {'im:write'}, 'conversations_replies': {'groups:history', 'channels:history'},
-        'files_upload_v2': {'files:write'}, 'files_info': {'files:read'},
+        'files_upload_v2': {'files:write'}, 'files_info': {'files:read'}, 'files_delete': {'files:write'},
         'chat_postMessage': {'chat:write'}, 'chat_getPermalink': set(),
         'chat_update': {'chat:write'},
-        'views_open': set(), 'views_update': set(), 'views_publish': set(),
+        'views_open': set(), 'views_push': set(), 'views_update': set(), 'views_publish': set(),
         # The debug WebClient subclass wraps this shared transport boundary;
         # endpoint-specific permissions remain covered by the methods above.
         'api_call': set(),

@@ -118,6 +118,45 @@ def test_quest_browser_hash_and_forged_selection_revalidation(joined):
         views.option(q['title'], 'q:' + q['_id'])]
 
 
+def test_create_quest_button_pushes_author_form_from_browser(joined):
+    l, s, _, composer, api, slack = joined
+    ui = SlackUI(l, composer)
+    ui.command({'user_id': 'U1', 'command': '/ledger-quests', 'text': '', 'trigger_id': 'browse'}, slack)
+    browser = slack.views_open.call_args.kwargs['view']
+    create = next(element for block in browser['blocks'] if block['type'] == 'actions'
+                  for element in block['elements'] if element['action_id'] == 'quest_author')
+    slack.reset_mock()
+    ui.action({'user': {'id': 'U1'}, 'trigger_id': 'create',
+               'view': {**browser, 'id': 'V', 'hash': 'h'}, 'actions': [create]}, slack)
+    sent = slack.views_push.call_args.kwargs
+    assert sent['trigger_id'] == 'create'
+    assert sent['view']['callback_id'] == 'member_quest_submit'
+    assert sent['view']['submit']['text'] == 'Submit for review'
+    slack.views_open.assert_not_called()
+    api.complete.assert_not_called()
+    assert s.select('ledger_quests', {'kind': 'member_quest'}) == []
+
+
+def test_create_quest_command_opens_author_form(joined):
+    l, _, _, composer, api, slack = joined
+    SlackUI(l, composer).command({'user_id': 'U1', 'command': '/ledger-quests',
+                                 'text': 'create', 'trigger_id': 'create'}, slack)
+    assert slack.views_open.call_args.kwargs['view']['callback_id'] == 'member_quest_submit'
+    slack.views_push.assert_not_called()
+    api.complete.assert_not_called()
+
+
+def test_create_quest_button_revalidates_participation(joined):
+    l, _, _, composer, _, slack = joined
+    browser = views.quest_browser(l, member(1))
+    l.leave(member(1))
+    with pytest.raises(Denied):
+        SlackUI(l, composer).action({'user': {'id': 'U1'}, 'trigger_id': 'create',
+                                    'view': browser, 'actions': [{'action_id': 'quest_author'}]}, slack)
+    slack.views_push.assert_not_called()
+    slack.views_open.assert_not_called()
+
+
 def test_minimum_rank_acceptance_retains_reward_and_rankup_completion(joined):
     l, s, *_ = joined
     q = published(joined)

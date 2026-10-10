@@ -50,6 +50,9 @@ coverage.xml
 *.lcov
 .hypothesis/
 .pytest_cache/
+.pytest*
+pytest-temp*
+.test-basetemp*
 cover/
 
 # Translations

@@ -1,5 +1,12 @@
 # Prompt Matrix Template: design and operation
 
+Version 46 adds descriptive fantasy-avatar composition, independent avatar
+preferences, reference-image replacement and private notification behavior.
+Equivalent policy wording and XML whitespace are compacted to preserve the
+30-KiB CRLF budget. The `avatar` JSON prompt set remains separate. A Google Doc
+override needs the same complete update and explicit reload; reserved jobs keep
+their saved policy. See [avatars](AVATARS.md).
+
 The [canonical matrix](../ledger/prompts/prompt_matrix.xml.md) is the shared behavioral policy for The Ledger, served through vLLM with `nvidia/Qwen3.8-27B-NVFP4`. It combines XML section/role identifiers with readable Markdown headings, tables, and examples inside CDATA. The packaged [JSON message types](PROMPTS.md) remain the source of audience-specific tasks and rotating voices; their inventory may grow independently of the matrix.
 
 The matrix is an application system prompt, not a replacement tokenizer chat template or a model fine-tune. The application sends it in the Chat Completions `system` message. vLLM applies the model's own chat template; requests continue using `enable_thinking: false`, non-streaming output, bounded generation, and canned fallbacks. See the [NVIDIA model card](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4) and [vLLM serving documentation](https://docs.vllm.ai/en/latest/serving/online_serving/).
@@ -179,3 +186,7 @@ Policy version 43 clarifies that recruitment reminders and invitation follow-ups
 Policy version 44 binds sponsorship reminder receipts and follow-ups to the current Slack identity and consent generation, merges only reminder receipt fields, rotates validated prompt variants without immediately repeating an index, and gives accepted-invitation updates precedence over delayed invitation-sent thanks. It also preserves exact-rank finalization for legacy member quests while rechecking current rank. Operators using a Google Doc override must copy the **complete version-44 canonical matrix** and explicitly run `/ledger-admin reload-prompts`. Existing reservations retain their snapshots; no external document was edited or published automatically.
 
 Policy version 45 documents the SLACKIDS_INELIGIBLE identity exclusion: listed accounts cannot opt in, receive invitations or unsolicited Ledger DMs, or join managed Ledger channels. Ordinary kudos remains available; invitations are silently suppressed and other Slack commands are ignored. Operators using a Google Doc override must copy the complete version-45 canonical matrix and explicitly run /ledger-admin reload-prompts. Existing reservations retain their snapshots; no external document was edited or published.
+
+Policy version 48 makes kudos modal acceptance durable before acknowledgment, with asynchronous Python validation, deterministic ineligibility feedback, and preserved review drafts. Pending and expired/lapsed members can receive kudos; suspended/revoked memberships and bot/deactivated Slack accounts remain ineligible. Recipient status rules and once-only XP remain enforced in Python. Operators using a Google Doc override must copy the complete version-48 matrix and explicitly reload it; existing reservations remain unchanged and no external document is edited automatically.
+
+Policy version 49 adds admin/board avatar inspection and consent-preserving manual regeneration. Picker selection opens the avatar and saved data/statistics without queuing generation; an explicit force-generate/regenerate button queues it. Python rechecks authority and participant consent for commands, picker options, submissions and buttons; raw DMs and policy snapshots remain private. Operators using a Google Doc override must copy the complete version-49 matrix and explicitly run `/ledger-admin reload-prompts`. Existing reservations retain their policy snapshots; no external document is edited automatically.

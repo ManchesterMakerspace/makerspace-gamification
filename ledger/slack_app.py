@@ -128,6 +128,8 @@ class SlackUI:
                 recipient = self.resolve(text)
                 if actor == recipient:
                     raise ValueError("You cannot give yourself kudos.")
+                from .kudos import require_recipient
+                require_recipient(self.ledger, recipient)
                 self.confirm_human(recipient, client)
                 view = views.kudos_form(self.ledger, recipient, str(uuid4()))
             else:
@@ -174,6 +176,14 @@ class SlackUI:
     def admin_command(self, actor, text, body, client):
         from .admin_access import require_command, help_text
         require_command(self.ledger, actor)
+        if text.split()[:1] == ["avatar"]:
+            from . import admin_avatars
+            admin_avatars.authorize(self.ledger, actor)
+            if text == "avatar":
+                return self.open(client, body, admin_avatars.picker())
+            if len(mentions(text)) != 1:
+                raise ValueError("Use /ledger-admin avatar @member.")
+            return self.open(client, body, admin_avatars.detail(self.ledger, actor, self.resolve(text)))
         if text == "invite":
             self.ledger.admin(actor)
             return self.open(client, body, views.admin_invitation())
@@ -277,6 +287,10 @@ class SlackUI:
         data, meta = views.values(body), json.loads(body["view"].get("private_metadata") or "{}")
         if callback == "dismiss":
             return {}
+        if callback == "admin_avatar_picker":
+            from . import admin_avatars
+            member = data.get("avatar_participant")
+            return {"response_action": "update", "view": admin_avatars.detail(self.ledger, actor, member)}
         if callback == "consent":
             if not data.get("agree"):
                 raise ValueError("Explicitly choose to participate to continue.")
@@ -307,7 +321,16 @@ class SlackUI:
         else:
             self.ledger.require(actor)
         if callback == "preferences_save":
-            self.ledger.preferences(actor, data.get("observation", False), data.get("arrival_mentions", False))
+            files = data.get("avatar_reference") or []
+            if len(files) > 1 or (files and data.get("remove_avatar_reference")):
+                raise ValueError("Choose one reference image or remove the current reference.")
+            if files:
+                file = client.files_info(file=files[0])["file"]
+                if file.get("user") != body["user"]["id"] or not 0 < file.get("size", 0) < 2_000_000:
+                    raise ValueError("Choose your own reference image smaller than 2 MB.")
+            self.ledger.preferences(actor, data.get("observation", False), data.get("arrival_mentions", False),
+                avatars=data.get("avatars", True), reference_file=files[0] if files else None,
+                remove_reference=data.get("remove_avatar_reference", False))
             return {}
         if callback == "member_quest_submit":
             from .quests import Quests
@@ -412,27 +435,14 @@ class SlackUI:
             recipient = data.get("recipient")
             if not recipient or recipient == actor:
                 raise ValueError("Choose another member first.")
+            from .kudos import require_recipient
+            require_recipient(self.ledger, recipient)
             self.confirm_human(recipient, client)
             draft = self.load_draft(actor, meta["draft"]) if meta.get("draft") else {}
             draft.pop("invitation", None)
             return {"response_action": "update", "view": views.kudos_form(self.ledger, recipient, meta["key"], draft)}
         if callback == "kudos_send":
-            self.confirm_human(meta["recipient"], client)
-            if not meta["participating"] and data.get("invitation") not in ("yes", "no"):
-                raise ValueError("Choose whether to send kudos only or also invite this member.")
-            try:
-                result = self.ledger.kudos(actor, meta["recipient"], data.get("message", ""), key=meta["key"],
-                    shop=data.get("shop"), tool=data.get("tool"), public=data.get("public", False),
-                    invite=data.get("invitation") == "yes", expected_participation=meta["participating"], emoji=data.get("emoji"))
-            except ConsentChanged:
-                data.pop("invitation", None)
-                return {"response_action": "update", "view": views.kudos_form(self.ledger, meta["recipient"], meta["key"], data)}
-            if not result.get("result_summary"):
-                # Previously accepted actions retain their original delivery flow.
-                from .kudos import delivery_facts
-                self.ledger.store.atomic(lambda s: enqueue(s, "ledger_outbox", f"ack:{result['_id']}", "message", {
-                    "member_id": actor, "type": "delivery", "audience": "member", "exception": True, "peer_kudos": True,
-                    "facts": delivery_facts(self.ledger, result, acknowledged=True)}))
+            return self.send_kudos(actor, meta, data, client)
         elif callback == "ranks_preview":
             ranks = []
             for i in range(1, 8):
@@ -471,13 +481,44 @@ class SlackUI:
             raise ValueError("Unknown form.")
         return {}
 
+    def send_kudos(self, actor, meta, data, client):
+        from .kudos import delivery_facts, require_recipient
+        existing = self.ledger.store.get("ledger_evidence", "kudos:" + meta["key"])
+        if not existing:
+            require_recipient(self.ledger, meta["recipient"])
+            self.confirm_human(meta["recipient"], client)
+        if not meta["participating"] and data.get("invitation") not in ("yes", "no"):
+            raise ValueError("Choose whether to send kudos only or also invite this member.")
+        try:
+            result = self.ledger.kudos(actor, meta["recipient"], data.get("message", ""), key=meta["key"],
+                shop=data.get("shop"), tool=data.get("tool"), public=data.get("public", False),
+                invite=data.get("invitation") == "yes", expected_participation=meta["participating"], emoji=data.get("emoji"))
+        except ConsentChanged:
+            data.pop("invitation", None)
+            return {"response_action": "update", "view": views.kudos_form(self.ledger, meta["recipient"], meta["key"], data)}
+        if not result.get("result_summary"):
+            self.ledger.store.atomic(lambda s: enqueue(s, "ledger_outbox", f"ack:{result['_id']}", "message", {
+                "member_id": actor, "type": "delivery", "audience": "member", "exception": True, "peer_kudos": True,
+                "facts": delivery_facts(self.ledger, result, acknowledged=True)}))
+        return {}
+
     def action(self, body, client):
         raw_actor = (body.get("user") or {}).get("id") or body.get("user_id")
         action = body["actions"][0]
-        if is_ineligible_slack_id(raw_actor) and action.get("action_id") not in ("shop", "kudos_change"):
+        if is_ineligible_slack_id(raw_actor) and action.get("action_id") not in ("shop", "kudos_change", "kudos_retry"):
             return
         actor = self.actor(body)
         name, value = action["action_id"], action.get("value", "")
+        if name == "admin_avatar_generate":
+            from . import admin_avatars
+            selection = json.loads(value)
+            member = selection["member"]
+            message = admin_avatars.generate(self.ledger, actor, member, selection.get("key"))
+            view = admin_avatars.detail(self.ledger, actor, member, message)
+            return client.views_update(view_id=body["view"]["id"], hash=body["view"].get("hash"), view=view)
+        if name == "kudos_retry":
+            from .kudos_submission import review
+            return review(self, body, client, value)
         if name == "join":
             return self.open(client, body, self.join_view(actor, value or None))
         if name == "leave":
@@ -513,6 +554,9 @@ class SlackUI:
         if name in ("stats", "progress", "achievements", "preferences", "browse_quests", "quest_author"):
             fn = {"stats": views.character_sheet, "progress": views.progress_view, "achievements": views.achievements,
                   "preferences": views.preferences, "browse_quests": views.quest_browser, "quest_author": views.quest_author}[name]
+            if name == "quest_author" and body.get("view", {}).get("type") == "modal":
+                # Create quest starts inside the browser's existing modal.
+                return client.views_push(trigger_id=body["trigger_id"], view=fn(self.ledger, actor))
             return self.open(client, body, fn(self.ledger, actor))
         if name == "skill_tree":
             return self.queue(actor, "/ledger-skills", "skills:" + body["trigger_id"])
@@ -582,6 +626,9 @@ class SlackUI:
     def options(self, body):
         actor = self.actor(body)
         name, search = body["action_id"], body.get("value", "").casefold()
+        if name == "avatar_participant":
+            from .admin_avatars import candidates
+            return candidates(self.ledger, actor, search)
         if name == "invite_recipient":
             from .admin_access import invitation_candidates, require_command
             require_command(self.ledger, actor)
@@ -615,7 +662,8 @@ class SlackUI:
             users = Counter(r.get("slack_id") for r in links)
             members = Counter(sid(r.get("member_id")) for r in links)
             linked = {sid(r.get("member_id")) for r in links if r.get("slack_id") and users[r["slack_id"]] == 1 and members[sid(r.get("member_id"))] == 1}
-            for member in self.ledger.sources.rows("members", {"status": {"$in": ["activeMember", "pending"]}, "merged_at": None}):
+            from .kudos import RECIPIENT_STATUSES
+            for member in self.ledger.sources.rows("members", {"status": {"$in": list(RECIPIENT_STATUSES)}, "merged_at": None}):
                 member_id = sid(member["_id"])
                 title = " ".join([member.get("firstname", ""), member.get("lastname", "")]).strip()
                 if member_id != actor and search in title.casefold() and member_id in linked:
@@ -665,6 +713,12 @@ def build_app(ui, token, signing_secret, team_id, bot_id, client=None):
     @app.view(re.compile(r".*"))
     def submissions(ack, body, client):
         try:
+            if body.get("view", {}).get("callback_id") == "kudos_send":
+                from .kudos_submission import reserve
+                with timeout(2):
+                    reserve(ui, body)
+                ack()
+                return
             ack(**ui.submission(body, client))
         except (ValueError, KeyError, TypeError) as error:
             blocks = body["view"].get("blocks", [])

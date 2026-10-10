@@ -77,7 +77,7 @@ Interactive reads use fixed source `$lookup`/`$graphLookup` pipelines, bounded o
 | `volunteer_tasks`, `volunteer_events` | Existing opportunities and reviewed catalog references |
 | `earned_memberships`, `groups` | Active earned status and household subscription coverage |
 
-Bindings were checked against the adjacent Rails models. Legacy coverage that cannot be proven by those fields requires a scoped expiry attestation, not a guess. `activeMember`/`pending`, nonmerged status, valid identity, and active human Slack account are checked for kudos; future expiration is an additional promotion condition, not a kudos condition.
+Bindings were checked against the adjacent Rails models. Legacy coverage that cannot be proven by those fields requires a scoped expiry attestation, not a guess. `activeMember`/`pending`/`inactive`/`nonMember`/`expired`, nonmerged status, valid identity, and active human Slack account are checked for kudos. Pending and expired/lapsed members can receive kudos; suspended/revoked memberships cannot. Future expiration is an additional promotion condition. Modal ingress durably reserves authored kudos in the existing outbox before acknowledgment; the interactive worker validates consent and recipient eligibility, commits once-only accounting, and sends deterministic acceptance or review feedback.
 
 ## MQTT
 

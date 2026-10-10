@@ -6,6 +6,10 @@ The implementation is a Python Slack Bolt application with durable Mongo inbox/o
 
 ## Run locally
 
+Personalized participant avatars use an optional sequential Qwen-Image-2.1
+vLLM-Omni service, with Slack references, opt-out preferences and automatic Home
+replacement. See [avatar deployment and lifecycle](docs/AVATARS.md).
+
 The Ledger can also author an individual or cooperative quest for human review with `python -m ledger.generate_quest`. Use `--rank N` to select an enabled rank, or omit it for weighted demand-based selection; `--dry-run --seed 42` previews without writes. See [quest generation, review and rollout](docs/QUEST_GENERATION.md) for required channel-use notices, configuration, resumable requests and shared project completion.
 
 Opted-in participants can receive targeted recruitment reminders with `python -m ledger.sponsorship_reminder --days never` or `--days N`. See [recruitment and opt-in](docs/RECRUITMENT.md) for options, dry runs and invitation follow-ups.
@@ -87,7 +91,7 @@ Seven stable numbered slots separate identity from editable names and emoji. Slo
 | 6 | 🌟 Adept | 5,000 | 16 checkouts, 5 shops, 2 completed shops | 12 sessions, 5 learners, 16 credits, develop another mentor, stewardship |
 | 7 | Unconfigured | — | Inactive | Inactive |
 
-All gates are cumulative and conjunctive. Promotion also requires a future `expirationTime` and verified paid/earned membership, including household coverage. Ambiguous prepaid/legacy coverage needs an independent admin/board attestation tied to that exact expiration. Expiration alone does **not** disqualify a kudos recipient with `activeMember` or `pending` status.
+All gates are cumulative and conjunctive. Promotion also requires a future `expirationTime` and verified paid/earned membership, including household coverage. Ambiguous prepaid/legacy coverage needs an independent admin/board attestation tied to that exact expiration. Pending or expired/lapsed membership does **not** disqualify a kudos recipient; suspended/revoked membership does.
 
 Distinct, non-revoked tool clearances count toward current skills. Shop completion uses staff-published frozen sets of enabled checkout-required tools. New equipment never erases an already awarded completion. Earned rank is retained after evidence corrections unless an independent moderator explicitly corrects the rank award.
 
@@ -108,7 +112,14 @@ Formal checkout teaching is imported automatically. Other mentoring needs learne
 
 ## Kudos
 
-Only participants with permitted Ledger access can give kudos. Select another linked, active human Slack identity first. Nonparticipants trigger a warning and an explicit **Send kudos only** / **Send kudos and invite them to The Ledger** choice.
+Permitted linked human members can give kudos regardless of Ledger participation. Select another linked, active human Slack identity first. Nonparticipants trigger a warning and an explicit **Send kudos only** / **Send kudos and invite them to The Ledger** choice.
+
+Send kudos durably queues the request and closes the modal promptly. The interactive
+worker rechecks recipient eligibility and consent before saving kudos. Fixed DMs
+report acceptance or ineligibility; **Review kudos** preserves the authored draft
+when a correction or renewed invitation choice is needed. Pending and expired/lapsed
+members (including inactive/nonMember statuses) can receive kudos; suspended/revoked
+members and bot/deactivated Slack accounts cannot. Participation and XP checks remain separate.
 
 The required body accepts 1–2,000 characters of Slack `mrkdwn`, links, line breaks, Unicode emoji, and emoji shortcodes. It is stored and rendered verbatim; The Ledger generates only an introduction. Optional shop/tool selections describe the contribution and never require clearance. Changing shops clears the tool.
 
@@ -130,6 +141,11 @@ python -m pytest
 $env:LEDGER_TEST_MONGO_URI = 'mongodb://localhost:27017/?replicaSet=rs0'
 python -m pytest tests/test_mongo_integration.py
 ```
+
+All pytest entry points share a session cleanup hook: temporary test trees and
+their symlinks are removed after success, failure, collection errors, or a handled
+interrupt. Forced process termination can leave files behind; `.pytest*`,
+`pytest-temp*`, and `.test-basetemp*` output is excluded from Git and Docker builds.
 
 The ordinary suite runs without credentials. It covers rules, accounting, consent, Slack forms, signed HTTP ingress, retries, public kudos, scopes, channel races, mentoring, quests, and a real local HTTP chat-API stub. The Mongo integration test is skipped unless explicitly configured; it creates and removes only its own random `ledger_test_*` database. Workspace Slack behavior, broker delivery, replica-set performance, and pilot latency need deployment validation.
 
