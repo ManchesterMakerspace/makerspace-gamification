@@ -320,7 +320,11 @@ def reference_images(worker, member, user, facts):
     # Shop overrides are operator-controlled local assets, never arbitrary URLs.
     directory = os.environ.get("LEDGER_AVATAR_SHOP_ASSET_DIR")
     path = Path(directory) / (str(facts.get("shop_id")) + ".png") if directory and facts.get("shop_id") else None
-    if path and path.exists():
+    if path and not path.is_file():
+        shop = worker.ledger.sources.shop(facts["shop_id"]) or {}
+        name = "".join(char for char in str(shop.get("name") or "").lower() if char.isalnum())
+        path = Path(directory) / (name + ".png") if name else None
+    if path and path.is_file():
         shop_image = raster(path.read_bytes())
     else:
         # A neutral illustrated workshop reference is generated locally, without AI.
@@ -363,6 +367,9 @@ class RuntimeClient:
 
     def ack(self, key):
         return self.call("ack", {"request_id": key})
+
+    def status(self, key):
+        return self.call("status", {"request_id": key})
 
 
 class AvatarPipeline:
@@ -639,6 +646,16 @@ def deliver(worker, job):
     member = job["payload"]["member_id"]
     row = visible(worker.ledger, member)
     if job["kind"] == "avatar_cleanup":
+        if job["payload"].get("wait_for_runtime"):
+            from .worker import HistoryImportPending
+            # Cancellation does not stop an in-flight supervisor request.
+            # Keep its inputs and receipt until inference has actually ended.
+            try:
+                status = RuntimeClient().status(job["payload"]["artifact_job"])
+            except (requests.RequestException, OSError, RuntimeError):
+                raise HistoryImportPending() from None
+            if status.get("status") not in ("done", "missing"):
+                raise HistoryImportPending()
         artifact = worker.store.get(COLLECTION, "job:" + job["payload"].get("artifact_job", "")) or {}
         if job["payload"].get("candidate_receipt"):
             generation = worker.store.get("ledger_outbox", job["payload"]["artifact_job"]) or {}

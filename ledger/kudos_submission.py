@@ -144,10 +144,10 @@ def review(ui, body, client, key):
     fresh_key = str(uuid4())
     try:
         require_recipient(ui.ledger, recipient)
+        ui.confirm_human(recipient, client)
     except Denied:
         view = views.kudos_recipient()
         view["private_metadata"] = json.dumps({"key": fresh_key, "draft": ui.draft(actor, data)})
     else:
-        ui.confirm_human(recipient, client)
         view = views.kudos_form(ui.ledger, recipient, fresh_key, data)
     return ui.open(client, body, view)

@@ -42,7 +42,12 @@ character continuity, bundled current-rank style, and shop. Missing optional
 images are omitted. Unavailable custom references never substitute the profile
 photo. References are normalized to bounded PNGs. The default shop reference is a
 local neutral workshop drawing; operators can mount `<shop-id>.png` assets in
-`LEDGER_AVATAR_SHOP_ASSET_DIR` on the avatar worker.
+`LEDGER_AVATAR_SHOP_ASSET_DIR` on the avatar worker. The shop ID is the source
+`shops` document's `_id`. If that file is missing, the worker tries the actual
+shop name in lowercase with only letters and digits retained, followed by
+`.png`: for example, `Wood Shop & CNC` becomes `woodshopcnc.png`. The ID file
+takes precedence. If neither file exists or the normalized name is empty, the
+worker uses the neutral workshop drawing.
 
 The runtime generates one 1280-square PNG, forty diffusion steps, true CFG 1.0,
 and a reserved seed. Pillow normalizes orientation, flattens transparency,
@@ -68,6 +73,11 @@ Runtime receipt deletion uses a separate durable `avatar_runtime_ack` delivery
 job. It retries with capped backoff until the supervisor recovers, independently
 of Slack and local-file cleanup, without consuming their retry budget. Keep the
 runtime URL/key configured until pending acknowledgment jobs have drained.
+When forced regeneration cancels a working candidate, its cleanup waits until
+the supervisor reports that request is no longer working. Supervisor outages
+defer this cleanup without spending retries. The acknowledgment endpoint also
+refuses deletion while inference holds the runtime lock, so a late receipt
+cannot outlive a prematurely completed acknowledgment.
 
 ## Storage and metrics
 

@@ -72,6 +72,15 @@ class Runtime:
         finally:
             self.lock.release()
 
+    def ack(self, key):
+        # A missing receipt while generation is running is not a completed ack.
+        if not self.lock.acquire(blocking=False):
+            raise RuntimeBusy("Generation is still running")
+        try:
+            self.path(key).unlink(missing_ok=True)
+        finally:
+            self.lock.release()
+
     def _load(self):
         if self.closed:
             raise RuntimeError("Runtime is shutting down")
@@ -175,7 +184,7 @@ def serve():
                         runtime.unload()
                         data = {"loaded": False}
                     elif self.path == "/ack":
-                        runtime.path(body["request_id"]).unlink(missing_ok=True)
+                        runtime.ack(body["request_id"])
                         data = {"ok": True}
                     else:
                         self.send_error(404)
