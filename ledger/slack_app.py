@@ -554,6 +554,9 @@ class SlackUI:
         if name in ("stats", "progress", "achievements", "preferences", "browse_quests", "quest_author"):
             fn = {"stats": views.character_sheet, "progress": views.progress_view, "achievements": views.achievements,
                   "preferences": views.preferences, "browse_quests": views.quest_browser, "quest_author": views.quest_author}[name]
+            if name == "quest_author" and body.get("view", {}).get("type") == "modal":
+                # Create quest starts inside the browser's existing modal.
+                return client.views_push(trigger_id=body["trigger_id"], view=fn(self.ledger, actor))
             return self.open(client, body, fn(self.ledger, actor))
         if name == "skill_tree":
             return self.queue(actor, "/ledger-skills", "skills:" + body["trigger_id"])
