@@ -123,6 +123,7 @@ def generate(ledger, actor, member, key):
         # Invalidate a running candidate; keep the activated pair until replacement.
         for queued in store.select("ledger_outbox", {"kind": "avatar_generate", "payload.member_id": member,
                 "status": {"$in": ["pending", "working"]}}):
+            was_working = queued["status"] == "working"
             queued["status"] = "cancelled"
             store.put("ledger_outbox", queued)
             artifact = store.get(avatars.COLLECTION, "job:" + queued["_id"])
@@ -131,6 +132,7 @@ def generate(ledger, actor, member, key):
                 store.put(avatars.COLLECTION, artifact)
                 enqueue(store, "ledger_outbox", queued["_id"] + ":failed-cleanup", "avatar_cleanup",
                     {"member_id": member, "artifact_job": queued["_id"], "failed_candidate": True,
+                     "wait_for_runtime": was_working,
                      "files": [artifact[k]["file_id"] for k in ("avatar", "avatar512")
                                if artifact.get(k, {}).get("file_id")]})
         live.touch(member)

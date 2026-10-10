@@ -57,6 +57,42 @@ def test_exact_jpg_pair_and_transparency():
             assert not image.getexif()
 
 
+@pytest.mark.parametrize("id_asset,name_asset,expected", [
+    (True, True, "red"), (True, False, "red"),
+    (False, True, "blue"), (False, False, "#eee7d8"),
+])
+def test_shop_reference_asset_id_precedes_normalized_name(joined, tmp_path, monkeypatch,
+                                                         id_asset, name_asset, expected):
+    ledger, _, source, composer, _, slack = joined
+    source.data["shops"][0]["name"] = "  Wood / Shop & CNC_2!!\t"
+    shop_id = str(oid(201))
+    if id_asset:
+        Image.new("RGB", (16, 16), "red").save(tmp_path / (shop_id + ".png"))
+    if name_asset:
+        Image.new("RGB", (16, 16), "blue").save(tmp_path / "woodshopcnc2.png")
+    monkeypatch.setenv("LEDGER_AVATAR_SHOP_ASSET_DIR", str(tmp_path))
+    refs = avatars.reference_images(Worker(ledger, composer, slack), str(oid(1)), {"id": "U1"},
+                                   {"shop_id": shop_id, "shop": "Stale display label"})
+    with Image.open(BytesIO(dict(refs)["shop"])) as image:
+        assert image.getpixel((0, 0)) == Image.new("RGB", (1, 1), expected).getpixel((0, 0))
+
+
+@pytest.mark.parametrize("name,filename,expected", [
+    ("Métal & 3D 🚀", "métal3d.png", "blue"),
+    (" \t/&__", ".png", "#eee7d8"),
+])
+def test_shop_reference_name_keeps_letters_digits_and_ignores_empty_names(joined, tmp_path, monkeypatch,
+                                                                        name, filename, expected):
+    ledger, _, source, composer, _, slack = joined
+    source.data["shops"][0]["name"] = name
+    Image.new("RGB", (16, 16), "blue").save(tmp_path / filename, format="PNG")
+    monkeypatch.setenv("LEDGER_AVATAR_SHOP_ASSET_DIR", str(tmp_path))
+    refs = avatars.reference_images(Worker(ledger, composer, slack), str(oid(1)), {"id": "U1"},
+                                   {"shop_id": str(oid(201))})
+    with Image.open(BytesIO(dict(refs)["shop"])) as image:
+        assert image.getpixel((0, 0)) == Image.new("RGB", (1, 1), expected).getpixel((0, 0))
+
+
 def test_generation_activation_notice_and_metrics(setup, capsys):
     ledger, store, api, slack, runtime, worker, pipeline, job, member = setup
     pipeline.generate(job)
@@ -448,6 +484,58 @@ def test_cleanup_finishes_offline_and_receipt_ack_retries_independently(setup, m
     slack.files_delete.assert_called_once()
 
 
+def test_force_regeneration_cleanup_waits_for_cancelled_inference(setup, monkeypatch, tmp_path):
+    from ledger import admin_avatars
+    ledger, store, _, slack, client, worker, pipeline, generation, member = setup
+    ledger.join(str(oid(10)))
+    monkeypatch.setenv("LEDGER_AVATAR_SPOOL", str(pipeline.directory))
+    supervisor = Runtime(tmp_path / "runtime")
+    supervisor._load = MagicMock()
+    supervisor._unload = MagicMock()
+    client.generate.side_effect = lambda key, prompt, refs, seed: supervisor.generate({
+        "request_id": key, "prompt": prompt, "references": refs, "seed": seed})
+    client.ack.side_effect = lambda key: supervisor.ack(key)
+    monkeypatch.setattr(avatars, "RuntimeClient", lambda: client)
+    monkeypatch.setattr(avatars, "reference_images", lambda *args: [("identity", image_bytes())])
+
+    def respond(*args, **kwargs):
+        artifact = store.get(avatars.COLLECTION, "job:" + generation["_id"])
+        artifact["avatar"] = {"file_id": "F_OBSOLETE"}
+        store.put(avatars.COLLECTION, artifact)
+        prefix = next(pipeline.directory.glob("*.refs.json")).with_suffix("").with_suffix("")
+        for suffix in (".avatar.jpg", ".avatar512.jpg"):
+            Path(str(prefix) + suffix).write_bytes(b"previous candidate image")
+        admin_avatars.generate(ledger, str(oid(10)), member, "force-inflight")
+        cleanup_id = generation["_id"] + ":failed-cleanup"
+        for unavailable in (True, False):
+            client.status.side_effect = (OSError("Supervisor unavailable") if unavailable else
+                lambda key: {"status": supervisor.status(key)["status"]})
+            assert worker.step("ledger_outbox", kinds=["avatar_cleanup"])
+            cleanup = store.get("ledger_outbox", cleanup_id)
+            assert cleanup["status"] == "pending" and cleanup["attempts"] == 0
+            assert list(pipeline.directory.glob("*.refs.json"))
+            assert len(list(pipeline.directory.glob("*.jpg"))) == 2
+            slack.files_delete.assert_not_called()
+            assert not worker.step("ledger_outbox", kinds=["avatar_runtime_ack"])
+            cleanup["available_at"] = now()
+            store.put("ledger_outbox", cleanup)
+        return MagicMock(json=lambda: {"data": [{"b64_json": client.generate.return_value["image"]}]})
+
+    monkeypatch.setattr("ledger.avatar_runtime.requests.post", respond)
+    with pytest.raises(Denied):
+        pipeline.generate(generation)
+    assert supervisor.path(generation["_id"]).exists()
+    assert worker.step("ledger_outbox", kinds=["avatar_cleanup"])
+    assert not list(pipeline.directory.glob("*.refs.json"))
+    assert not list(pipeline.directory.glob("*.jpg"))
+    slack.files_delete.assert_called_once_with(file="F_OBSOLETE")
+    assert worker.step("ledger_outbox", kinds=["avatar_runtime_ack"])
+    assert not supervisor.path(generation["_id"]).exists()
+    assert store.get("ledger_outbox", "avatar-runtime-ack:" + generation["_id"])["status"] == "done"
+    assert avatars.current(store, member) is None
+    slack.files_upload_v2.assert_not_called()
+
+
 def test_avatar_queue_is_disjoint():
     assert outbox_filters("avatars")["kinds"] == avatars.GENERATION
     assert set(avatars.GENERATION) <= set(outbox_filters("outbox")["exclude"])
@@ -467,17 +555,24 @@ def test_runtime_single_flight_and_lost_response_replay(tmp_path, monkeypatch):
     result = []
     thread = Thread(target=lambda: result.append(runtime.generate(request)))
     thread.start()
-    assert entered.wait(5)
-    with pytest.raises(RuntimeBusy):
-        runtime.generate({**request, "request_id": "two"})
-    with pytest.raises(RuntimeBusy):
-        runtime.unload()
-    release.set()
-    thread.join(5)
+    try:
+        assert entered.wait(5)
+        with pytest.raises(RuntimeBusy):
+            runtime.generate({**request, "request_id": "two"})
+        with pytest.raises(RuntimeBusy):
+            runtime.unload()
+        with pytest.raises(RuntimeBusy):
+            runtime.ack(request["request_id"])
+    finally:
+        release.set()
+        thread.join(5)
     assert result and runtime.generate(request) == result[0]
     assert runtime._load.call_count == 1
     with pytest.raises(ValueError):
         runtime.generate({**request, "prompt": "different"})
+    runtime.ack(request["request_id"])
+    assert not runtime.path(request["request_id"]).exists()
+    runtime.ack(request["request_id"])  # Acknowledgment remains idempotent.
 
 
 def test_runtime_timeout_terminates_inference(tmp_path, monkeypatch):

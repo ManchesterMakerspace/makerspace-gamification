@@ -97,6 +97,28 @@ def test_ineligible_after_ack_is_reported_without_narration_and_draft_survives(j
     api.complete.assert_not_called()
 
 
+@pytest.mark.parametrize("flag", ["deleted", "is_bot"])
+def test_unavailable_slack_recipient_review_preserves_draft(joined, flag):
+    ledger, store, _, composer, api, slack = joined
+    ui = SlackUI(ledger, composer)
+    key = kudos_submission.reserve(ui, modal_request(ledger, public=True, emoji="hammer"))
+    slack.users_info.side_effect = lambda user: {"user": {"id": user, flag: user == "U2"}}
+    worker = Worker(ledger, composer, slack)
+    assert worker.step("ledger_outbox", kinds=["kudos_submit"])
+    assert store.get("ledger_outbox", key)["submission_result"]["status"] == "rejected"
+    assert not store.get("ledger_evidence", "kudos:async-send")
+    ui.action({"user": {"id": "U1"}, "trigger_id": "T",
+               "actions": [{"action_id": "kudos_retry", "value": key}]}, slack)
+    view = slack.views_open.call_args.kwargs["view"]
+    assert view["callback_id"] == "kudos_recipient"
+    meta = json.loads(view["private_metadata"])
+    draft = ui.load_draft(str(oid(1)), meta["draft"])
+    assert draft["message"] == "*Thanks* :hammer:"
+    assert draft["public"] is True and draft["emoji"] == "hammer"
+    assert "invitation" not in draft and meta["key"] != "async-send"
+    api.complete.assert_not_called()
+
+
 def test_consent_race_requires_review_with_authored_values_preserved(joined):
     ledger, store, _, composer, _, slack = joined
     ui = SlackUI(ledger, composer)
