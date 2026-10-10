@@ -536,6 +536,74 @@ def test_force_regeneration_cleanup_waits_for_cancelled_inference(setup, monkeyp
     slack.files_upload_v2.assert_not_called()
 
 
+@pytest.mark.parametrize("dispatch", [True, False])
+def test_missing_runtime_receipt_waits_for_cancelled_worker_exit(setup, monkeypatch, tmp_path, dispatch):
+    from ledger import admin_avatars
+    ledger, store, _, slack, client, worker, pipeline, generation, member = setup
+    ledger.join(str(oid(10)))
+    monkeypatch.setenv("LEDGER_AVATAR_SPOOL", str(pipeline.directory))
+    supervisor = Runtime(tmp_path / "runtime")
+    supervisor._load = MagicMock()
+    supervisor._unload = MagicMock()
+    client.status.side_effect = lambda key: {"status": supervisor.status(key)["status"]}
+    client.ack.side_effect = supervisor.ack
+    monkeypatch.setattr(avatars, "RuntimeClient", lambda: client)
+    monkeypatch.setattr(avatars, "reference_images", lambda *args: [("identity", image_bytes())])
+    monkeypatch.setattr("ledger.avatar_runtime.requests.post", lambda *args, **kwargs:
+        MagicMock(json=lambda: {"data": [{"b64_json": client.generate.return_value["image"]}]}))
+
+    def delayed_generate(key, prompt, refs, seed):
+        admin_avatars.generate(ledger, str(oid(10)), member, "force-before-dispatch")
+        cancelled = store.get("ledger_outbox", key)
+        cancelled["avatar_pipeline_finished_lease"] = "previous-attempt"
+        cancelled["available_at"] = now() - timedelta(minutes=1)
+        store.put("ledger_outbox", cancelled)
+        lease = store.get("ledger_catalog", avatars.RUNTIME_LEASE)
+        lease["until"] = now() - timedelta(minutes=1)
+        store.put("ledger_catalog", lease)
+        assert supervisor.status(key)["status"] == "missing"
+        assert worker.step("ledger_outbox", kinds=["avatar_cleanup"])
+        cleanup = store.get("ledger_outbox", key + ":failed-cleanup")
+        assert cleanup["status"] == "pending" and cleanup["attempts"] == 0
+        assert list(pipeline.directory.glob("*.refs.json"))
+        assert not worker.step("ledger_outbox", kinds=["avatar_runtime_ack"])
+        cleanup["available_at"] = now()
+        store.put("ledger_outbox", cleanup)
+        if not dispatch:
+            raise Denied("Cancelled before dispatch")
+        return supervisor.generate({"request_id": key, "prompt": prompt, "references": refs, "seed": seed})
+
+    client.generate.side_effect = delayed_generate
+    with pytest.raises(Denied):
+        pipeline.generate(generation)
+    assert store.get("ledger_outbox", generation["_id"])["avatar_pipeline_finished_lease"] == generation["lease"]
+    assert supervisor.path(generation["_id"]).exists() is dispatch
+    assert worker.step("ledger_outbox", kinds=["avatar_cleanup"])
+    assert not list(pipeline.directory.glob("*.refs.json"))
+    assert worker.step("ledger_outbox", kinds=["avatar_runtime_ack"])
+    assert not supervisor.path(generation["_id"]).exists()
+    assert store.get("ledger_outbox", "avatar-runtime-ack:" + generation["_id"])["status"] == "done"
+    slack.files_upload_v2.assert_not_called()
+
+
+def test_missing_receipt_cleanup_after_worker_rejects_cancelled_job_at_preflight(setup, monkeypatch):
+    from ledger import admin_avatars
+    ledger, store, _, _, client, worker, pipeline, generation, member = setup
+    ledger.join(str(oid(10)))
+    store.put(avatars.COLLECTION, {"_id": "job:" + generation["_id"], "kind": "job", "status": "reserved"})
+    client.status.return_value = {"status": "missing"}
+    monkeypatch.setattr(avatars, "RuntimeClient", lambda: client)
+    monkeypatch.setenv("LEDGER_AVATAR_SPOOL", str(pipeline.directory))
+    admin_avatars.generate(ledger, str(oid(10)), member, "force-before-preflight")
+    with pytest.raises(Denied):
+        pipeline.generate(generation)
+    assert store.get("ledger_outbox", generation["_id"])["avatar_pipeline_finished_lease"] == generation["lease"]
+    assert worker.step("ledger_outbox", kinds=["avatar_cleanup"])
+    assert worker.step("ledger_outbox", kinds=["avatar_runtime_ack"])
+    client.ack.assert_called_once_with(generation["_id"])
+    client.generate.assert_not_called()
+
+
 def test_avatar_queue_is_disjoint():
     assert outbox_filters("avatars")["kinds"] == avatars.GENERATION
     assert set(avatars.GENERATION) <= set(outbox_filters("outbox")["exclude"])

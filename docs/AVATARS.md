@@ -75,7 +75,13 @@ of Slack and local-file cleanup, without consuming their retry budget. Keep the
 runtime URL/key configured until pending acknowledgment jobs have drained.
 When forced regeneration cancels a working candidate, its cleanup waits until
 the supervisor reports that request is no longer working. Supervisor outages
-defer this cleanup without spending retries. The acknowledgment endpoint also
+defer this cleanup without spending retries. A `missing` receipt also defers
+cleanup until the pipeline records completion for the cancelled job's current
+lease: the request may still be on its way to the supervisor. Cancellation,
+lease expiry and a previous attempt's completion do not establish that the
+current attempt has exited. If a worker crashes without recording completion,
+this cleanup remains deferred until operator recovery establishes that the old
+worker cannot dispatch another request. The acknowledgment endpoint also
 refuses deletion while inference holds the runtime lock, so a late receipt
 cannot outlive a prematurely completed acknowledgment.
 
@@ -111,31 +117,90 @@ The optional `avatars` Compose profile adds `ledger-avatars` and `ledger-image`.
 The narrator stays running. Ordinary delivery handles notices/cleanup and shares
 the avatar spool volume. No Docker socket or public inference route is added.
 
-1. Pin `VLLM_OMNI_IMAGE` to an immutable image digest verified for Qwen-Image-2.1
-   on the target Linux ARM64/GB10. The example `latest` value is a discovery
-   placeholder, not a production pin. The image build checks the pipeline import.
-   The [official serving recipe](https://recipes.vllm.ai/Qwen/Qwen-Image-2.1)
-   currently points to development support in vLLM-Omni PR #7759; select an image
-   containing that implementation rather than assuming a tagged release supports
-   it. Verify multiple-reference serving on the target GPU before enabling workers.
-2. Set a separate `LEDGER_AVATAR_RUNTIME_KEY` of at least 24 characters. Set
-   `LEDGER_AVATAR_MODEL_REVISION` to the deployed checkpoint revision. To freeze
-   every component, mount a pinned local model snapshot and use its path in the
-   runtime command; a serving revision flag may not reach every component loader.
-3. Configure Slack custom-profile IDs in `LEDGER_AVATAR_BIO_FIELD_ID` and
-   `LEDGER_AVATAR_INTERESTS_FIELD_ID`. Unset fields are omitted. Set
+Deployment information checked on October 9, 2026. Qwen-Image-2.1 support landed
+in [vLLM-Omni PR #8099](https://github.com/vllm-project/vllm-omni/pull/8099) on
+October 7, superseding the closed PR #7759. The
+[official serving recipe](https://recipes.vllm.ai/Qwen/Qwen-Image-2.1) still
+contains older prerequisites; check the implementation in the chosen image.
+
+1. Set `VLLM_OMNI_IMAGE` in `.env`. A candidate for Linux ARM64/GB10 testing is
+   `vllm/vllm-omni:qwen-image21-arm64-cu129`. Docker Hub metadata confirms Linux
+   ARM64 and the digest below; generation on the target GB10 still needs testing.
+   [Image tag](https://hub.docker.com/r/vllm/vllm-omni/tags?name=qwen-image21-arm64-cu129).
+
+   ```dotenv
+   VLLM_OMNI_IMAGE=vllm/vllm-omni@sha256:0903b0620d64d03de6acae489bc12dafd89006892f005270b69f2b32d9ea8661
+   ```
+
+   An [immutable digest](https://docs.docker.com/dhi/explore/security-concepts/digests/)
+   fixes the exact image contents; tags can move. Retain the tested digest for
+   production. The example `latest` value in `.env.example` and Compose is a
+   discovery placeholder. To inspect the tag before choosing a newer digest:
+
+   ```bash
+   docker buildx imagetools inspect vllm/vllm-omni:qwen-image21-arm64-cu129
+   ```
+
+2. Build the supervisor image on the deployment host:
+
+   ```bash
+   docker compose --profile avatars build ledger-image
+   ```
+
+   `Dockerfile.image` checks the `QwenImage21Pipeline` import. A successful build
+   establishes that the implementation imports; it does not validate GPU kernels,
+   memory capacity or multiple-reference generation.
+3. Set a separate `LEDGER_AVATAR_RUNTIME_KEY` of at least 24 characters. Configure
+   Slack custom-profile IDs in `LEDGER_AVATAR_BIO_FIELD_ID` and
+   `LEDGER_AVATAR_INTERESTS_FIELD_ID`; unset fields are omitted. Set
    `LEDGER_AVATAR_CONTEXT_LIMIT` to the narrator window (default 8192).
-4. Apply the updated Mongo role and run `ledger init`. Start with
-   `docker compose --profile avatars up -d --build ledger-image ledger-avatars ledger-delivery`.
-5. `LEDGER_AVATAR_RUNTIME_COMMAND` optionally accepts JSON argv, never shell
+
+   `LEDGER_AVATAR_RUNTIME_COMMAND` optionally accepts JSON argv, never shell
    code. Default: `vllm serve Qwen/Qwen-Image-2.1 --omni --host 127.0.0.1 --port
    8091`. Overrides must preserve that loopback API address. Test any offload or
    quantization flags on the selected runtime first.
 
+   Set `LEDGER_AVATAR_MODEL_REVISION` to the actual checkpoint revision for audit
+   metadata. This setting does not change the checkpoint loaded by the default
+   command. To freeze every model component, mount a pinned local snapshot and
+   use its path in the runtime command; a serving revision flag may not reach
+   every component loader.
+4. Optionally preload the model weights before enabling workers. Docker stores
+   the software image separately; the Hugging Face cache stores model weights.
+   Without preloading, the model loader downloads missing weights when the first
+   generation loads the model. After the image build, this command downloads the
+   current `Qwen/Qwen-Image-2.1` snapshot into the service's persistent cache:
+
+   ```bash
+   docker compose --profile avatars run --rm --no-deps \
+     --entrypoint python3 ledger-image \
+     -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen-Image-2.1')"
+   ```
+
+   For a pinned checkpoint, pass its full commit hash as `revision` and configure
+   the runtime to load that snapshot. See the
+   [Hugging Face download guide](https://huggingface.co/docs/huggingface_hub/main/guides/download).
+   Compose mounts the named `huggingface-cache` volume at
+   `/root/.cache/huggingface` for both narrator and image services. A model already
+   in the host's `~/.cache/huggingface` is not automatically visible in this volume;
+   using the host cache requires an explicit bind mount for both services.
+5. Apply the updated Mongo role and run `ledger init`. Verify generation with one
+   to four reference images on the target GPU alongside the narrator before
+   enabling avatar workers. Start the services with:
+
+   ```bash
+   docker compose --profile avatars up -d --build ledger-image ledger-avatars ledger-delivery
+   ```
+
+   When upgrading the supervisor protocol, deploy the application workers and
+   `ledger-image` together. Preserve the cache and spool volumes across restarts.
+
 The authenticated supervisor provides `/generate`, `/status`, `/unload`, `/ack`
 and `/health`. Disk receipts let a repeated request ID with identical inputs
 recover its generated image after a lost response. Changed inputs with the same
-ID are rejected. Its lock rejects concurrent generation/unload with HTTP 409.
+ID are rejected. Its lock rejects concurrent generation, unload or receipt
+acknowledgment with HTTP 409. Acknowledgment retries durably until inference has
+stopped, preventing a late receipt from surviving a prematurely completed `/ack`.
 GPU process logs are suppressed to keep prompts/images out of logs. Failure or
 timeout terminates the entire process group; Compose init reaps descendants.
 
