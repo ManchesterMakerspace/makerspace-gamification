@@ -182,6 +182,35 @@ def test_idle_is_not_polled_after_confirmed_unload(setup):
     runtime.unload.assert_called_once()
 
 
+def test_reference_replacement_after_manifest_read_prevents_inference(setup, monkeypatch):
+    ledger, store, _, slack, runtime, worker, pipeline, job, member = setup
+    monkeypatch.setattr(avatars, "reference_images", lambda *args: [("identity", image_bytes())])
+    monkeypatch.setattr(avatars, "download", lambda *args: image_bytes())
+    monkeypatch.setattr("ledger.image_captioning.describe_image", lambda *args: "A maker in an apron.")
+    slack.files_info.side_effect = lambda file: {"file": {"id": file, "user": "U1", "size": 100,
+                                                         "url_private": "https://files.slack.com/new.png"}}
+    read_text = Path.read_text
+
+    def replace_reference(path, *args, **kwargs):
+        text = read_text(path, *args, **kwargs)
+        if str(path).endswith(".refs.json"):
+            assert json.loads(text)  # The old personal reference is already loaded.
+            ledger.preferences(member, True, True, reference_file="F_NEW_REFERENCE")
+            reference_job = store.claim("ledger_outbox", kinds=["avatar_reference"])
+            avatars.save_reference(worker, reference_job)
+        return text
+
+    monkeypatch.setattr(Path, "read_text", replace_reference)
+    with pytest.raises(Denied):
+        pipeline.generate(job)
+    assert avatars.custom_reference(store, member)["file_id"] == "F_NEW_REFERENCE"
+    assert store.get("ledger_outbox", job["_id"])["status"] == "cancelled"
+    assert store.get("ledger_avatars", "job:" + job["_id"])["attempt_metrics"][-1]["outcome"] == "cancelled"
+    assert avatars.current(store, member) is None
+    runtime.generate.assert_not_called()
+    slack.files_upload_v2.assert_not_called()
+
+
 def test_opt_out_during_inference_cannot_activate(setup):
     ledger, store, api, slack, runtime, worker, pipeline, job, member = setup
     image = runtime.generate.return_value

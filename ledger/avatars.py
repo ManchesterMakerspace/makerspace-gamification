@@ -530,6 +530,7 @@ class AvatarPipeline:
                     self.runtime = RuntimeClient()
                 self.idle_confirmed = False
                 refs = json.loads(Path(str(prefix) + ".refs.json").read_text())
+                self.live(job)
                 result = self.runtime.generate(job["_id"], row["prompt"], refs, row["seed"])
                 if lost.is_set():
                     raise Denied("Avatar lease was lost")
