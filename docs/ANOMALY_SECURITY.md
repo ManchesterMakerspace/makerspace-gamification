@@ -33,6 +33,9 @@ status `configuration_problem`. Findings continue; there is no channel fallback.
 Critical incidents take priority within ten messages per recipient per UTC hour.
 Repeated rate signals have a 24-hour detector/entity/recipient cooldown. Rate
 overflow is summarized; critical overflow and failed deliveries remain pending.
+Missing Slack or Ledger queue configuration also leaves deliveries pending for
+retry after configuration is restored and the service restarts. Verified loss of
+recipient authorization cancels that recipient's delivery.
 Each verified privilege chain has its own incident and deterministic delivery ID.
 Shadow and historical backfill incidents are never converted into alert floods.
 
@@ -149,7 +152,8 @@ Rerun the existing Metabase bootstrap to seed eight security dashboards: account
 changes, resets, reset completions, registrations, email similarity, bounces,
 privilege changes and coverage. They query the existing read-only
 `reporting.cohort_metrics` view. Security partitions with any cell below the
-minimum cohort size (at least five) are suppressed with their totals before
+minimum cohort size (at least five), including absent categories with zero members,
+are suppressed with their totals before
 reports, charts, views or inference. Private security tables receive no reporting
 grants. Saved-card chart delivery uses the existing authorized renderer and text
 fallback.

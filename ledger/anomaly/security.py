@@ -301,17 +301,19 @@ class SecurityEngine:
             'privilege_changes': {'role_change', 'scope_grant', 'mfa_change'}}
         output = []
         for section, kinds in sections.items():
+            categories = kinds
             selected = [r for r in rows if r['kind'] in kinds]
             if section == 'bounce_outcomes':
                 bounced, messages, unknown = mail_counts(selected)
                 bounce_ids = {r['id'] for r in bounced}
                 selected = [{**r, 'kind': 'bounced_messages' if r['id'] in bounce_ids else 'delivered_messages'} for r in messages]
+                categories = {'bounced_messages', 'delivered_messages'}
             members = {r['member_id'] for r in selected if r.get('member_id')}
             if len(members) < minimum:
                 continue
             counts = Counter(r['kind'] for r in selected)
-            # If any cell is small, suppress the entire partition including its total.
-            if any(len({r['member_id'] for r in selected if r['kind'] == k and r.get('member_id')}) < minimum for k in counts):
+            # Absent categories are zero-sized cells, so suppress their complements too.
+            if any(len({r['member_id'] for r in selected if r['kind'] == k and r.get('member_id')}) < minimum for k in categories):
                 continue
             for kind, value in counts.items():
                 sample = len({r['member_id'] for r in selected if r['kind'] == kind and r.get('member_id')})
@@ -321,7 +323,9 @@ class SecurityEngine:
         reset_groups = defaultdict(list)
         for reset in resets:
             reset_groups[reset['outcome']].append(reset)
-        if reset_groups and all(len({r['member_id'] for r in group}) >= minimum for group in reset_groups.values()):
+        reset_categories = {'observed_completion', 'possible_completion', 'pending',
+                            'no_observed_completion', 'incomplete_coverage'}
+        if all(len({r['member_id'] for r in reset_groups.get(outcome, [])}) >= minimum for outcome in reset_categories):
             for outcome, group in reset_groups.items():
                 output.append({'report': 'reset_completions', 'cohort': outcome, 'sample_size': len({r['member_id'] for r in group}), 'value': len(group)})
         clusters = [r for _, r in self.state.rows('security_incidents') if r['rule'] in {'signup_alias_family', 'signup_similar'} and

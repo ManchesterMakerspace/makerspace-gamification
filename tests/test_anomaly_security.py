@@ -231,11 +231,77 @@ def test_small_and_complementary_cohorts_suppressed_everywhere():
     for n in range(5):
         event(state, str(n), 'profile_change', member='m'+str(n))
     assert not engine.aggregate(NOW)  # end is exclusive
-    assert any(r['report']=='account_changes' for r in engine.aggregate(NOW+timedelta(seconds=1)))
-    event(state, 'password', 'password_change')
     assert not any(r['report']=='account_changes' for r in engine.aggregate(NOW+timedelta(seconds=1)))
+    for n in range(4):
+        event(state, 'password'+str(n), 'password_change', member='m'+str(n))
+    assert not any(r['report']=='account_changes' for r in engine.aggregate(NOW+timedelta(seconds=1)))
+    event(state, 'password4', 'password_change', member='m4')
     engine.publish(NOW+timedelta(seconds=1))
+    assert {r['cohort'] for _,r in state.rows('security_report_metrics') if r['report']=='account_changes'} == {'profile_change', 'password_change'}
+    state.security_replace('password4', [])
+    engine.publish(NOW+timedelta(seconds=1))
+    assert not any(r['report']=='account_changes' for _,r in state.rows('security_report_metrics'))
     assert all(r['sample_size']>=5 for _,r in state.rows('security_report_metrics'))
+
+
+@pytest.mark.parametrize('minimum', [5, 7])
+@pytest.mark.parametrize('section,categories', [
+    ('account_changes', ('profile_change', 'password_change')),
+    ('registrations', ('signup', 'account_created')),
+    ('privilege_changes', ('role_change', 'scope_grant', 'mfa_change')),
+    ('bounce_outcomes', ('bounced_messages', 'delivered_messages')),
+])
+def test_security_partitions_require_all_expected_categories(section, categories, minimum):
+    for absent in categories:
+        state, engine = setup(minimum_cohort=minimum)
+
+        def add_category(category):
+            for n in range(minimum):
+                key = category + ':' + str(n)
+                if section == 'bounce_outcomes':
+                    event(state, key, 'mail_outcome', member=key, origin='mailtrap',
+                        outcome='bounce' if category == 'bounced_messages' else 'delivery', provider_message=key)
+                else:
+                    event(state, key, category, member=key)
+
+        for category in categories:
+            if category != absent:
+                add_category(category)
+        engine.publish(NOW+timedelta(seconds=1))
+        assert not any(r['report'] == section for _,r in state.rows('security_report_metrics'))
+        add_category(absent)
+        engine.publish(NOW+timedelta(seconds=1))
+        published = [r for _,r in state.rows('security_report_metrics') if r['report'] == section]
+        assert {r['cohort'] for r in published} == set(categories)
+        assert all(r['value'] == minimum and r['sample_size'] == minimum for r in published)
+
+
+@pytest.mark.parametrize('absent', ['observed_completion', 'possible_completion', 'pending',
+                                  'no_observed_completion', 'incomplete_coverage'])
+def test_reset_completion_partitions_suppress_absent_outcomes(absent):
+    state, engine = setup()
+    coverage(state, start=NOW-timedelta(days=3))
+    ages = {'observed_completion': timedelta(hours=1), 'possible_completion': timedelta(hours=2),
+            'pending': timedelta(hours=3), 'no_observed_completion': timedelta(days=2),
+            'incomplete_coverage': timedelta(days=4)}
+
+    def add_outcome(outcome):
+        for n in range(5):
+            key = outcome + ':' + str(n)
+            at = NOW-ages[outcome]
+            event(state, key, 'reset_request', member=key, at=at)
+            if outcome in {'observed_completion', 'possible_completion'}:
+                event(state, key+':password', 'password_change', member=key, at=at+timedelta(minutes=1),
+                      token_cleared=outcome == 'observed_completion')
+
+    for outcome in ages:
+        if outcome != absent:
+            add_outcome(outcome)
+    assert not any(r['report'] == 'reset_completions' for r in engine.aggregate(NOW))
+    add_outcome(absent)
+    published = [r for r in engine.aggregate(NOW) if r['report'] == 'reset_completions']
+    assert {r['cohort'] for r in published} == set(ages)
+    assert all(r['sample_size'] == r['value'] == 5 for r in published)
 
 
 def test_security_questions_route_before_membership_and_privacy_administration():
@@ -278,6 +344,43 @@ def test_security_delivery_independent_retries_deterministic_ids_and_revocation(
     delivery.step(NOW+timedelta(seconds=20))
     assert state.get('health','security_delivery')['status']=='configuration_problem'
     assert all(r['status']!='pending' for _,r in state.rows('security_deliveries'))
+
+
+@pytest.mark.parametrize('missing', ['both', 'slack', 'access'])
+def test_unconfigured_security_delivery_retries_after_restart(missing):
+    state, engine = setup()
+    incident = alert(state, engine)
+    slack = Mock()
+    slack.conversations_open.return_value = {'channel': {'id': 'DADMIN'}}
+    slack.chat_postMessage.return_value = {'ok': True}
+    access = Mock()
+    access.staff.return_value = True
+    access.authorize.return_value = 'staff_detail'
+    delivery = SecurityDelivery(state, engine.config,
+        None if missing in {'both', 'slack'} else slack,
+        None if missing in {'both', 'access'} else access)
+    delivery.step(NOW)
+    key = fingerprint([incident['id'], 'UADMIN'])
+    pending = state.get('security_deliveries', key)
+    assert pending['status'] == 'pending' and pending['attempts'] == 1
+    assert timestamp(pending['available_at']) > NOW
+    assert state.get('health', 'security_delivery')['status'] == 'configuration_problem'
+    assert not list(state.rows('security_budgets'))
+    slack.chat_postMessage.assert_not_called()
+    delivery.step(NOW+timedelta(seconds=1))
+    assert state.get('security_deliveries', key) == pending
+
+    # A fresh worker uses the same persisted receipt and rechecks current staff access.
+    restarted = SecurityDelivery(state, engine.config, slack, access)
+    restarted.step(NOW+timedelta(seconds=10))
+    assert len(list(state.rows('security_deliveries'))) == 1
+    assert state.get('security_deliveries', key)['status'] == 'sent'
+    assert state.get('health', 'security_delivery')['status'] == 'ready'
+    access.staff.assert_called_with('UADMIN')
+    access.authorize.assert_called_with('UADMIN', 'DADMIN')
+    assert slack.chat_postMessage.call_args.kwargs['channel'] == 'DADMIN'
+    restarted.step(NOW+timedelta(seconds=20))
+    slack.chat_postMessage.assert_called_once()
 
 
 def test_delivery_disabled_empty_recipients_budget_priority_and_no_channel_fallback():

@@ -47,7 +47,12 @@ class SecurityDelivery:
                         'status': 'pending', 'attempts': 0, 'available_at': now.isoformat(), 'created_at': stamp()})
 
     def destination(self, user):
-        if user not in self.config.security_dm_user_ids or not self.access or not self.access.staff(user):
+        if user not in self.config.security_dm_user_ids:
+            raise Denied('Security recipient is not a configured current staff member')
+        if self.slack is None or self.access is None:
+            # Missing dependencies are retryable; they do not revoke staff authority.
+            raise RuntimeError('Security delivery is not configured')
+        if not self.access.staff(user):
             raise Denied('Security recipient is not a configured current staff member')
         response = self.slack.conversations_open(users=user)
         channel = response.get('channel', {}).get('id')
@@ -72,7 +77,7 @@ class SecurityDelivery:
         authorized = 0
         for user in self.config.security_dm_user_ids:
             try:
-                authorized += bool(self.access and self.access.staff(user))
+                authorized += bool(self.slack is not None and self.access is not None and self.access.staff(user))
             except Exception:
                 pass
         self.state.put('health', 'security_delivery', {'status': 'ready' if authorized else 'configuration_problem',

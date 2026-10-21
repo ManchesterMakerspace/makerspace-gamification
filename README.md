@@ -39,7 +39,7 @@ For deployment, populate `.env` with database/Slack/MQTT credentials, a shared v
 
 After updating the deployment checkout, run `bash scripts/rebuild.sh` on the Linux deployment host to rebuild images and recreate all services while preserving named volumes and external data. See [rebuild behavior and verification](docs/DEPLOYMENT.md#rebuild-after-a-repository-update).
 
-The importable [Slack manifest JSON](slack-manifest.json) includes all eight commands, seven event subscriptions, App Home, modal interactions, and required bot scopes. Replace every `LEDGER_HOST` with the tunnel's public hostname. See the [Slack setup and permission mapping](docs/SLACK.md); check that `/kudos` is available before installation.
+The importable [Slack manifest JSON](slack-manifest.json) includes all eight commands (including `/ledger-anomaly security` subcommands), eight event subscriptions, App Home, modal interactions, and required bot scopes. Replace every `LEDGER_HOST` with the tunnel's public hostname. See the [Slack setup and permission mapping](docs/SLACK.md); check that `/kudos` is available before installation. Existing installations must re-authorize the added `im:read` scope for anomaly DM authorization.
 
 The bot's leatherbound grimoire icon is included at [512 × 512](icons/ledger-bot-512.png) for Slack upload and [36 × 36](icons/ledger-bot-36.png) for mobile rendering. See [icon assets and installation](icons/README.md) for the source illustration and generation prompt.
 

@@ -18,7 +18,7 @@ Upload [icons/ledger-bot-512.png](../icons/ledger-bot-512.png) in the app's **Ba
 | Every slash command | `/slack/commands` |
 | Interactivity and option loading | `/slack/interactions` |
 
-The manifest enables App Home and writable app messages. All seven commands have `should_escape: true` to preserve structured member mentions:
+The manifest enables App Home and writable app messages. All eight commands have `should_escape: true` to preserve structured member mentions:
 
 | Command | Function |
 | --- | --- |
@@ -29,6 +29,9 @@ The manifest enables App Home and writable app messages. All seven commands have
 | `/kudos` | Thanks for linked members with or without opt-in; optional emoji, public sharing and invitation |
 | `/ledger-project` | Project gallery and feedback threads |
 | `/ledger-admin` | Opted-in authorized staff/delegates only; role-scoped help and actions |
+| `/ledger-anomaly` | Data trends, schema/detector reviews, and security analytics; channel readers receive aggregates, with staff evidence and administration restricted to verified admin/board DMs |
+
+The anomaly commands share the existing `/slack/commands` endpoint, including when the analytics engine runs on another host. `ask <question>`, `status`, `detectors`, `schema`, and `security` are subcommands of `/ledger-anomaly`; they do not need separate Slack registrations. Security commands include `security summary`, `security incidents`, `security incident <id>`, `security evidence <id>`, `security resolve <id>`, and `security detectors list|review|propose|approve|disable`. Reviews, approvals, and disabling require an exact detector revision. See [anomaly command access and configuration](ANOMALY_SLACK.md) and [security monitoring](ANOMALY_SECURITY.md). Enable `ANOMALY_ENABLED` for requests and `ANOMALY_SECURITY_ENABLED` for security monitoring. Automatic security alerts go only to configured, currently authorized admin/board DM recipients.
 
 All modals, buttons, checkboxes, and external shop/tool/member dropdowns use the interaction endpoint. They are interaction payloads, not additional event subscriptions or commands.
 
@@ -113,16 +116,21 @@ The first Home-tab open publishes a brief processing placeholder and queues a pe
 | `commands` | All slash commands and their interactive flows |
 | `app_mentions:read` | `app_mention` event |
 | `chat:write` | `chat.postMessage` for DMs, notifications, kudos, project threads, and replies |
-| `channels:read` | `conversations.info` verifies the bot is a member of a public channel before chat delivery |
+| `channels:read` | `conversations.info` verifies public-channel access; `conversations.list` resolves the anomaly channel and `conversations.members` verifies its readers |
 | `channels:history` | Receives `message.channels` in public channels the bot has joined |
 | `channels:manage` | `conversations.kick` for public-channel cleanup |
-| `groups:read` | `conversations.info`, `conversations.members`, private-channel membership events |
+| `groups:read` | `conversations.info`, `conversations.list`, `conversations.members`, private-channel membership events; resolves private anomaly channels and verifies their readers |
 | `groups:history` | `message.groups`, including edits/deletions; private project thread visibility |
 | `groups:write` | `conversations.create` with `is_private`, `conversations.invite`, `conversations.kick` |
 | `im:history` | `message.im`, including edits/deletions |
+| `im:read` | `conversations.info` verifies an anomaly reply or security alert is going to the authorized recipient's own one-to-one DM |
 | `im:write` | `conversations.open` for recipient DMs and file delivery |
 | `users:read` | `users.info` for human/active checks, `user_change`, and complete bounded `users.list` name/alias reads for quest-inspiration redaction |
-| `files:write` | Skill-tree image/text and rank art via `files.getUploadURLExternal` / `files.completeUploadExternal` (`files_upload_v2`); reusable skill trees and rank icons are retained by Slack file ID for later Block Kit `slack_file` display |
+| `users.profile:read` | `users.profile.get` for profile images used by avatar and appearance features |
+| `files:write` | Skill-tree image/text, rank art, avatars, and anomaly charts via `files.getUploadURLExternal` / `files.completeUploadExternal` (`files_upload_v2`); `files.delete` cleans up generated avatar artifacts |
+| `files:read` | `files.info` checks cached image availability and submitted quest/avatar attachments |
+
+The added `im:read` scope is required by [conversations.info](https://docs.slack.dev/reference/methods/conversations.info/) for DM metadata. Update the installed app's manifest and reinstall/re-authorize it so its bot token receives the scope, then verify `/ledger-anomaly status` in a permitted caller's DM. Source security events come from MongoDB; no Slack Audit Logs or workspace-admin scope is required. Application authorization and Prompt Matrix 52 continue to determine who may receive evidence; installing a scope does not grant a member a staff role.
 
 `groups:write` is needed for [private-channel removal](https://docs.slack.dev/reference/methods/conversations.kick/) as well as [invitations](https://docs.slack.dev/reference/methods/conversations.invite/); `channels:manage` covers public-channel removal. Removal silently skips every Slack bot user, including The Ledger's configured bot ID and Slackbot. A failed human `conversations.kick` is logged as a best-effort cleanup failure and is not retried. Slack 429 responses establish a client-wide cooldown from `Retry-After`; later Slack API calls wait until that interval expires. [External file uploads](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) require `files:write`. `views.open`, `views.update`, `views.publish`, and `chat.getPermalink` need an authenticated bot but no extra scopes beyond this set for the supported flows.
 

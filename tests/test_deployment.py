@@ -69,12 +69,14 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
     assert not settings['socket_mode_enabled'] and not settings['token_rotation_enabled']
     scopes = set(MANIFEST['oauth_config']['scopes']['bot'])
     assert scopes == {'commands', 'app_mentions:read', 'chat:write', 'groups:read', 'groups:history',
-                      'groups:write', 'im:write', 'im:history', 'users:read', 'users.profile:read', 'files:write', 'files:read', 'channels:read', 'channels:history', 'channels:manage'}
+                      'groups:write', 'im:write', 'im:read', 'im:history', 'users:read', 'users.profile:read', 'files:write', 'files:read', 'channels:read', 'channels:history', 'channels:manage'}
     # Inventory actual SDK calls: new methods require an explicit permission review.
     method_scopes = {
         'users_info': {'users:read'}, 'users_list': {'users:read'}, 'users_profile_get': {'users.profile:read'},
-        'conversations_info': {'groups:read', 'channels:read'},
-        'conversations_members': {'groups:read'}, 'conversations_create': {'groups:write'},
+        # Anomaly authorization checks the caller's DM and public/private channels.
+        'conversations_info': {'groups:read', 'channels:read', 'im:read'},
+        'conversations_list': {'groups:read', 'channels:read'},
+        'conversations_members': {'groups:read', 'channels:read'}, 'conversations_create': {'groups:write'},
         'conversations_invite': {'groups:write'}, 'conversations_kick': {'groups:write', 'channels:manage'},
         'conversations_open': {'im:write'}, 'conversations_replies': {'groups:history', 'channels:history'},
         'files_upload_v2': {'files:write'}, 'files_info': {'files:read'}, 'files_delete': {'files:write'},
@@ -86,7 +88,7 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
         'api_call': set(),
     }
     calls = set()
-    for path in (ROOT / 'ledger').glob('*.py'):
+    for path in (ROOT / 'ledger').rglob('*.py'):
         for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and not node.func.attr.startswith('_') and hasattr(WebClient, node.func.attr)):
