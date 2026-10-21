@@ -138,6 +138,7 @@ See [administration](docs/ADMINISTRATION.md) for seven-slot editing, templates, 
 ## Verification
 
 ```powershell
+python -m pip install -e '.[test,anomaly]'
 python -m pytest
 # Optional real transaction/concurrency test, using a disposable replica set:
 $env:LEDGER_TEST_MONGO_URI = 'mongodb://localhost:27017/?replicaSet=rs0'

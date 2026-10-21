@@ -10,7 +10,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -e '.[test]'
+      - run: python -m pip install -e '.[test,anomaly]'
       - run: python -m ledger.prompt_library
       - run: python -m ledger.prompt_matrix
       - name: Verify prompt assets in wheel
