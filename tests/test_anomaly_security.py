@@ -114,6 +114,71 @@ def test_audit_overlap_enriches_without_double_counting_and_correction_retracts(
     assert len(effective(state, NOW-timedelta(days=11), NOW-timedelta(days=9))) == 1
 
 
+def resolved_email_incidents(state, engine, members):
+    for n in range(members):
+        event(state, 'signup'+str(n), 'signup', member='m'+str(n), origin='audit_logs',
+              email=email_features('subscriber+'+str(n)+'@example.org', 'key'))
+    signals = engine.detect(NOW)
+    assert {s['rule'] for s in signals} == {'signup_alias_family', 'signup_similar'}
+    for signal in signals:
+        engine.save(signal)
+        engine.resolve(signal['id'], 'UADMIN')
+    return {s['id']: state.get('security_incidents', s['id']) for s in signals}
+
+
+@pytest.mark.parametrize('correction', ['delete', 'update'])
+def test_resolved_email_incidents_retract_and_leave_reports_after_correction(correction):
+    state, engine = setup()
+    resolved = resolved_email_incidents(state, engine, 5)
+    engine.publish(NOW+timedelta(seconds=1))
+    assert any(r['report'] == 'email_similarity' for _,r in state.rows('security_report_metrics'))
+    names = ['orchardcopper', 'violinmeadow', 'penguincloud', 'tulipmariner', 'granitesparrow']
+    for n, name in enumerate(names):
+        source = 'signup'+str(n)
+        if correction == 'delete':
+            state.security_replace(source, [])
+        else:
+            row = state.security_events(source=source)[0]
+            state.security_replace(source, [{**row, 'email': email_features(name+'@example.org', 'key')}])
+    engine.retract()
+    for key, previous in resolved.items():
+        current = state.get('security_incidents', key)
+        assert current['status'] == 'retracted' and current['alertable'] is False
+        assert current['resolved_by'] == previous['resolved_by']
+        assert current['resolved_at'] == previous['resolved_at']
+        assert current['evidence_snapshot'] == previous['evidence_snapshot']
+        assert current['reason'] == 'Source evidence was corrected or deleted'
+    assert not any(r['report'] == 'email_similarity' for r in engine.aggregate(NOW+timedelta(seconds=1)))
+    engine.publish(NOW+timedelta(seconds=1))
+    assert not any(r['report'] == 'email_similarity' for _,r in state.rows('security_report_metrics'))
+    SecurityDelivery(state, engine.config).schedule(NOW)
+    assert not list(state.rows('security_deliveries'))
+
+
+def test_supported_resolved_incidents_refresh_evidence_without_reopening(monkeypatch):
+    state, engine = setup()
+    resolved = resolved_email_incidents(state, engine, 6)
+    removed = state.security_events(source='signup5')[0]
+    state.security_replace('signup5', [])
+    engine.retract()
+    for key, previous in resolved.items():
+        current = state.get('security_incidents', key)
+        assert current['status'] == 'resolved' and current['alertable'] is False
+        assert current['observed'] == 5 and current['members'] == ['m0', 'm1', 'm2', 'm3', 'm4']
+        assert removed['id'] not in current['evidence_hashes']
+        assert all(fingerprint(state.security_get_event(e)) == value for e,value in current['evidence_hashes'].items())
+        for field in ('created_at', 'resolved_at', 'resolved_by', 'historical', 'mode_shadow'):
+            assert current[field] == previous[field]
+    metric = next(r for r in engine.aggregate(NOW+timedelta(seconds=1)) if r['report'] == 'email_similarity')
+    assert metric['sample_size'] == 5
+    detect = Mock(wraps=engine.detect)
+    monkeypatch.setattr(engine, 'detect', detect)
+    engine.retract()
+    detect.assert_not_called()  # Updated hashes stop repeat work for unchanged evidence.
+    SecurityDelivery(state, engine.config).schedule(NOW)
+    assert not list(state.rows('security_deliveries'))
+
+
 @pytest.mark.parametrize('kind,count,global_count', [('profile_change',5,20), ('password_change',3,10), ('reset_request',5,20)])
 def test_individual_and_distributed_bursts(kind, count, global_count):
     state, engine = setup()

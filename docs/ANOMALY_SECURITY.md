@@ -41,6 +41,11 @@ Shadow and historical backfill incidents are never converted into alert floods.
 
 ## Evidence and limits
 
+Source corrections and deletions revalidate resolved incidents as well as open
+and shadow incidents. Unsupported findings become retracted and leave aggregate
+reports on the next report refresh. Findings that still qualify keep their staff
+resolution and refreshed evidence; revalidation never reopens their alerts.
+
 The separate projection keeps category markers, dated events, member/actor IDs,
 reviewed role transitions, evidence references and confidence. It never stores
 password hashes, reset tokens, changed profile values, email addresses/content,
@@ -124,7 +129,13 @@ and approval again; old models and evidence remain reviewable.
 
 Normalized security history follows `ANOMALY_HISTORY_MONTHS` (60 by default).
 Processed captures follow `ANOMALY_EVENT_RETENTION_DAYS` (90). Unresolved incident
-evidence and pending deliveries are preserved. No detector changes accounts,
+evidence and pending deliveries are preserved. When resolved or retracted incidents
+expire, retention also removes their completed delivery receipts and message
+snapshots in the same transaction, including orphans left by older retention code.
+A pending summary retains all referenced incidents, evidence and receipts until
+its delivery finishes. Completed summaries containing an expired incident are
+removed as a whole; receipts for other, retained incidents still prevent duplicate
+delivery. No detector changes accounts,
 membership, passwords, access, billing, roles or disciplinary decisions.
 
 ## Commands and dashboards

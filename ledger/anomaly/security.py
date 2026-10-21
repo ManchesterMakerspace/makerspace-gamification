@@ -196,7 +196,7 @@ class SecurityEngine:
         current_revision = self.state.get('security_meta', 'revision', {})
         previous_revision = self.state.get('security_control', 'retraction_revision')
         for key, row in self.state.rows('security_incidents'):
-            if row['status'] not in {'open', 'shadow'}:
+            if row['status'] not in {'open', 'shadow', 'resolved'}:
                 continue
             changed = any(fingerprint(self.state.security_get_event(e)) != value for e, value in row['evidence_hashes'].items())
             if not changed and not (row['rule'] == 'privileged_mfa_change' and current_revision != previous_revision):
@@ -204,7 +204,13 @@ class SecurityEngine:
             supported = [] if row.get('learned') else self.detect(timestamp(row['evaluated_at']))
             replacement = next((r for r in supported if r['id'] == key), None)
             if replacement:
-                self.save(replacement, backfill=row['historical'])
+                if row['status'] == 'resolved':
+                    # Refresh corrected facts without undoing the staff resolution
+                    # or making a previously resolved incident alertable again.
+                    self.state.put('security_incidents', key, {**row, **replacement,
+                        'historical': row['historical'], 'status': 'resolved', 'alertable': False})
+                else:
+                    self.save(replacement, backfill=row['historical'])
             else:
                 self.state.put('security_incidents', key, {**row, 'status': 'retracted', 'alertable': False,
                     'retracted_at': stamp(), 'reason': 'Source evidence was corrected or deleted'})

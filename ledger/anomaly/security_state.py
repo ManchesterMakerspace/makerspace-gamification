@@ -97,14 +97,54 @@ class SecurityState:
     def security_prune(self, months):
         if not hasattr(self, 'connection'):
             return
-        # Open incidents and notifications retain their supporting evidence.
-        self.connection.execute("DELETE FROM anomaly_security_events e WHERE at < now() - %s * interval '1 month' "
-            "AND NOT EXISTS (SELECT 1 FROM anomaly_documents d WHERE namespace='security_incidents' "
-            "AND (d.data->>'status' IN ('open','shadow') OR EXISTS (SELECT 1 FROM anomaly_documents j "
-            "WHERE j.namespace='security_deliveries' AND j.data->>'incident_id'=d.key AND j.data->>'status'='pending')) "
-            "AND d.data->'evidence' ? e.id)", (months,))
-        self.connection.execute("DELETE FROM anomaly_security_rollups WHERE bucket < now() - %s * interval '1 month'", (months,))
-        self.connection.execute("DELETE FROM anomaly_documents d WHERE namespace='security_incidents' "
-            "AND d.data->>'status' IN ('resolved','retracted') AND (d.data->>'created_at')::timestamptz < now() - %s * interval '1 month' "
-            "AND NOT EXISTS (SELECT 1 FROM anomaly_documents j WHERE j.namespace='security_deliveries' "
-            "AND j.data->>'incident_id'=d.key AND j.data->>'status'='pending')", (months,))
+        # A pending summary needs every embedded incident and receipt, including
+        # completed siblings. Keep its immutable text, evidence and retry ID intact.
+        pending = """
+            WITH pending_messages AS (
+                SELECT m.key, m.data FROM anomaly_documents m
+                WHERE m.namespace='security_messages' AND EXISTS (
+                    SELECT 1 FROM anomaly_documents j WHERE j.namespace='security_deliveries'
+                    AND j.data->>'status'='pending' AND j.data->>'message_id'=m.key)),
+            pending_incidents AS (
+                SELECT j.data->>'incident_id' AS id FROM anomaly_documents j
+                WHERE j.namespace='security_deliveries' AND j.data->>'status'='pending'
+                UNION
+                SELECT snapshot.value->>'id' FROM pending_messages m,
+                    jsonb_each(m.data->'incidents') snapshot)
+        """
+        with self.atomic():
+            self.connection.execute(pending + """
+                DELETE FROM anomaly_security_events e WHERE at < now() - %s * interval '1 month'
+                AND NOT EXISTS (SELECT 1 FROM anomaly_documents d WHERE d.namespace='security_incidents'
+                    AND (d.data->>'status' IN ('open','shadow') OR EXISTS (
+                        SELECT 1 FROM pending_incidents p WHERE p.id=d.key))
+                    AND d.data->'evidence' ? e.id)
+                AND NOT EXISTS (SELECT 1 FROM pending_messages m, jsonb_each(m.data->'incidents') snapshot
+                    WHERE snapshot.value->'evidence' ? e.id)
+                """, (months,))
+            self.connection.execute("DELETE FROM anomaly_security_rollups WHERE bucket < now() - %s * interval '1 month'", (months,))
+            self.connection.execute(pending + """
+                DELETE FROM anomaly_documents d WHERE d.namespace='security_incidents'
+                AND d.data->>'status' IN ('resolved','retracted')
+                AND (d.data->>'created_at')::timestamptz < now() - %s * interval '1 month'
+                AND NOT EXISTS (SELECT 1 FROM pending_incidents p WHERE p.id=d.key)
+                """, (months,))
+            # Also clear orphans left by older versions that pruned only incidents.
+            self.connection.execute(pending + """
+                DELETE FROM anomaly_documents d WHERE d.namespace='security_deliveries'
+                AND d.data->>'status' IN ('sent','summarized','cancelled','cooldown')
+                AND NOT EXISTS (SELECT 1 FROM anomaly_documents i WHERE i.namespace='security_incidents'
+                    AND i.key=d.data->>'incident_id')
+                AND NOT EXISTS (SELECT 1 FROM pending_messages m WHERE m.data->'incidents' ? d.key)
+                """)
+            # A completed summary containing an expired incident must not retain
+            # its private snapshot just because another incident is still recent.
+            self.connection.execute(pending + """
+                DELETE FROM anomaly_documents d WHERE d.namespace='security_messages'
+                AND NOT EXISTS (SELECT 1 FROM pending_messages m WHERE m.key=d.key)
+                AND (EXISTS (SELECT 1 FROM jsonb_each(d.data->'incidents') snapshot
+                    WHERE NOT EXISTS (SELECT 1 FROM anomaly_documents i WHERE i.namespace='security_incidents'
+                        AND i.key=snapshot.value->>'id'))
+                    OR (COALESCE(d.data->'incidents', '{}'::jsonb)='{}'::jsonb
+                        AND (d.data->>'created_at')::timestamptz < now() - %s * interval '1 month'))
+                """, (months,))

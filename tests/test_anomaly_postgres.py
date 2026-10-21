@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 pytest.importorskip("psycopg")
 from ledger.anomaly.state import State
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 @pytest.mark.skipif(not os.environ.get("ANOMALY_TEST_DATABASE_URL"), reason="Requires a disposable PostgreSQL database")
@@ -102,4 +102,131 @@ def test_security_atomic_evidence_rollups_restart_and_reporting_permissions():
         state.connection.execute('DELETE FROM anomaly_security_rollups WHERE kind=%s',(key,))
         state.connection.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(role)))
         state.connection.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(role)))
+        state.close()
+
+
+@pytest.mark.skipif(not os.environ.get('ANOMALY_TEST_DATABASE_URL'), reason='Requires a disposable PostgreSQL database')
+def test_security_retention_prunes_completed_snapshots_and_preserves_pending_groups():
+    from psycopg.types.json import Jsonb
+    uri = os.environ['ANOMALY_TEST_DATABASE_URL']
+    assert urlparse(uri).path.lstrip('/').startswith('ledger_anomaly_test_')
+    prefix = 'retention-test:' + uuid4().hex + ':'
+    state = State(uri)
+    state.initialize()
+    recent = datetime.now(timezone.utc).isoformat()
+    expired = (datetime.now(timezone.utc)-timedelta(days=366*6)).isoformat()
+    namespaces = ('security_incidents', 'security_deliveries', 'security_messages')
+    evidence_ids = []
+
+    def incident(name, status='resolved', at=expired):
+        key = prefix + name
+        evidence = {'id': key+':event', 'source_key': key, 'kind': 'profile_change', 'at': at,
+                    'member_id': name+':member', 'actor_id': name+':actor'}
+        evidence_ids.append(evidence['id'])
+        state.connection.execute('INSERT INTO anomaly_security_events(id,source_key,kind,at,member_id,actor_id,data) '
+            'VALUES(%s,%s,%s,%s,%s,%s,%s)', (evidence['id'], key, evidence['kind'], at,
+                evidence['member_id'], evidence['actor_id'], Jsonb(evidence)))
+        row = {'id': key, 'status': status, 'created_at': at, 'evidence': [evidence['id']],
+               'evidence_snapshot': [evidence], 'members': [evidence['member_id']], 'actors': [evidence['actor_id']]}
+        state.put('security_incidents', key, row)
+        return row
+
+    def notification(name, rows, statuses):
+        message_id = prefix + name + ':message'
+        deliveries = []
+        for n, (row, status) in enumerate(zip(rows, statuses)):
+            job = {'id': prefix+name+':job:'+str(n), 'incident_id': row['id'], 'status': status,
+                   'message_id': message_id, 'user': 'UADMIN', 'created_at': expired}
+            state.put('security_deliveries', job['id'], job)
+            deliveries.append(job)
+        message = {'id': message_id, 'incidents': {j['id']: r for j,r in zip(deliveries, rows)},
+                   'text': 'Immutable private alert text', 'created_at': expired}
+        state.put('security_messages', message_id, message)
+        return deliveries, message
+
+    def documents():
+        return {ns: dict(state.rows(ns, prefix=prefix)) for ns in namespaces}
+
+    try:
+        removed, retained, pending_jobs = [], [], []
+        for status in ('sent', 'summarized', 'cancelled', 'cooldown'):
+            row = incident(status, status='retracted' if status == 'cancelled' else 'resolved')
+            jobs, message = notification(status, [row], [status])
+            removed.extend([('security_incidents', row['id']), ('security_deliveries', jobs[0]['id']),
+                            ('security_messages', message['id'])])
+        for name, status, at in [('recent', 'resolved', recent), ('open', 'open', expired), ('shadow', 'shadow', expired)]:
+            row = incident(name, status, at)
+            jobs, message = notification(name, [row], ['sent'])
+            retained.extend([('security_incidents', row['id']), ('security_deliveries', jobs[0]['id']),
+                             ('security_messages', message['id'])])
+        for bound in (False, True):
+            row = incident('pending'+str(bound))
+            jobs, message = notification('pending'+str(bound), [row], ['pending'])
+            if not bound:
+                jobs[0].pop('message_id')
+                state.put('security_deliveries', jobs[0]['id'], jobs[0])
+                state.delete('security_messages', message['id'])
+            else:
+                retained.append(('security_messages', message['id']))
+            retained.extend([('security_incidents', row['id']), ('security_deliveries', jobs[0]['id'])])
+            pending_jobs.extend(jobs)
+
+        # A pending summary still reads its completed sibling receipt and evidence.
+        sibling, active = incident('pending-summary-closed'), incident('pending-summary-open', 'open')
+        jobs, message = notification('pending-summary', [sibling, active], ['sent', 'pending'])
+        retained.extend([('security_incidents', r['id']) for r in (sibling, active)])
+        retained.extend([('security_deliveries', j['id']) for j in jobs])
+        retained.append(('security_messages', message['id']))
+        pending_jobs.append(jobs[1])
+        pending_message = message
+
+        # A completed mixed-age summary cannot retain the expired sibling's snapshot.
+        old, new = incident('mixed-old'), incident('mixed-new', at=recent)
+        jobs, message = notification('mixed', [old, new], ['summarized', 'summarized'])
+        removed.extend([('security_incidents', old['id']), ('security_deliveries', jobs[0]['id']),
+                        ('security_messages', message['id'])])
+        retained.extend([('security_incidents', new['id']), ('security_deliveries', jobs[1]['id'])])
+
+        for status in ('sent', 'pending'):
+            row = incident('legacy-'+status)
+            jobs, message = notification('legacy-'+status, [row], [status])
+            state.delete('security_incidents', row['id'])  # Left behind by older retention code.
+            target = retained if status == 'pending' else removed
+            target.extend([('security_deliveries', jobs[0]['id']), ('security_messages', message['id'])])
+            if status == 'pending':
+                pending_jobs.extend(jobs)
+                orphan_evidence = row['evidence'][0]
+
+        before = documents()
+        with pytest.raises(RuntimeError, match='rollback retention'):
+            with state.atomic():
+                state.prune(90, 60)
+                assert state.get('security_incidents', old['id']) is None
+                raise RuntimeError('rollback retention')
+        assert documents() == before
+        assert all(state.security_get_event(key) for key in evidence_ids)
+
+        state.prune(90, 60)
+        assert all(state.get(ns, key) is None for ns, key in removed)
+        assert all(state.get(ns, key) == before[ns][key] for ns, key in retained)
+        assert state.get('security_messages', pending_message['id']) == pending_message
+        assert state.security_get_event(sibling['evidence'][0])
+        assert state.security_get_event(orphan_evidence)
+        assert state.security_get_event(old['evidence'][0]) is None
+
+        for job in pending_jobs:
+            state.put('security_deliveries', job['id'], {**job, 'status': 'sent'})
+        state.put('security_incidents', active['id'], {**active, 'status': 'resolved'})
+        state.prune(90, 60)
+        assert all(state.get('security_deliveries', job['id']) is None for job in pending_jobs)
+        assert state.get('security_messages', pending_message['id']) is None
+        assert state.get('security_incidents', sibling['id']) is None
+        assert state.security_get_event(sibling['evidence'][0]) is None
+        assert state.security_get_event(orphan_evidence) is None
+        after = documents()
+        state.prune(90, 60)
+        assert documents() == after
+    finally:
+        state.connection.execute('DELETE FROM anomaly_documents WHERE key LIKE %s', (prefix+'%',))
+        state.connection.execute('DELETE FROM anomaly_security_events WHERE source_key LIKE %s', (prefix+'%',))
         state.close()
