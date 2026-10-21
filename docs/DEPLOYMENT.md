@@ -6,7 +6,7 @@ The supplied [compose.yaml](../compose.yaml) runs nine services: web ingress, si
 
 Run the complete stack on a Linux ARM64 NVIDIA DGX Spark/GB10 host with Docker Compose v2 and NVIDIA Container Toolkit configured for GPU containers. The [vllm-gb10 project](https://github.com/timothystewart6/vllm-gb10) publishes `ghcr.io/timothystewart6/vllm-gb10`; its image requires an explicit `vllm serve` command. An ordinary Windows/x86 Docker installation does not provide the required GB10 runtime.
 
-Compose serves [nvidia/Qwen3.8-27B-NVFP4](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4). The model card's example targets multiple GPUs. This deployment instead starts with one GB10 GPU, an 8,192-token context, four concurrent sequences, FP8 KV cache, and 0.7 GPU memory utilization. These are conservative pilot settings, not a measured performance claim. Verify model loading and generation on the target machine; the model's mixed NVFP4/FP8 support depends on the selected image build. Adjust `VLLM_MAX_MODEL_LEN`, `VLLM_MAX_NUM_SEQS`, and `VLLM_GPU_MEMORY_UTILIZATION` after observing memory and response times.
+Compose serves [nvidia/Qwen3.8-27B-NVFP4](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4). The model card's example targets multiple GPUs. This deployment instead starts with one GB10 GPU, a 16,384-token context, four concurrent sequences, FP8 KV cache, and 0.7 GPU memory utilization. These are conservative pilot settings, not a measured performance claim. Verify model loading and generation on the target machine; the model's mixed NVFP4/FP8 support depends on the selected image build. Adjust `VLLM_MAX_MODEL_LEN`, `VLLM_MAX_NUM_SEQS`, and `VLLM_GPU_MEMORY_UTILIZATION` after observing memory and response times.
 
 Copy `.env.example` to `.env` and supply:
 

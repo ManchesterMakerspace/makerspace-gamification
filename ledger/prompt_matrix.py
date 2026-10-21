@@ -20,7 +20,7 @@ REQUIRED_SECTIONS = {"identity", "authority", "roles", "consent", "channels", "p
 REQUIRED_ROLES = {"ledger", "member", "participant", "nonparticipant", "sponsor", "success_buddy", "mentor",
                   "checkout_approver", "admin", "board_member", "resource_manager", "tool_captain",
                   "workshop_instructor", "design_challenge_judge", "quest_author", "ai_observer", "delegated_reviewer",
-                  "ledger_quest_author"}
+                  "ledger_quest_author", "anomaly_channel_reader"}
 log = logging.getLogger(__name__)
 
 

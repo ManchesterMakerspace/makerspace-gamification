@@ -9,6 +9,8 @@ Usage: bash scripts/rebuild.sh [--wait-timeout SECONDS]
 Rebuild images without build cache, refresh configured registry images, and
 recreate every enabled Compose service. Named volumes and external data survive.
 The health-check deadline defaults to 1800 seconds for model startup.
+When ledger-anomaly is enabled, every rebuild refreshes its Rails schema source
+and validates source access before stopping any running service.
 HELP
 }
 
@@ -62,6 +64,12 @@ if [[ "$up_help" != *'--wait-timeout'* || "$pull_help" != *'--ignore-buildable'*
     exit 2
 fi
 compose config --quiet
+enabled_services=$(compose config --services)
+has_service() { [[ $'\n'"$enabled_services"$'\n' == *$'\n'"$1"$'\n'* ]]; }
+if has_service ledger-anomaly; then
+    phase='Rails schema refresh'
+    bash "$repo_root/scripts/anomaly/refresh-rails.sh"
+fi
 
 phase='image build'
 printf 'Rebuilding application images without build cache...\n'
@@ -69,6 +77,22 @@ compose build --pull --no-cache
 phase='image pull'
 printf 'Refreshing configured registry images...\n'
 compose pull --ignore-buildable
+
+if has_service ledger-anomaly; then
+    phase='anomaly source/schema preflight'
+    # Export the exact built contract for offline permission generation/review.
+    compose run --rm --no-deps --entrypoint cat ledger-anomaly /app/schema/manifest.json \
+        > "$repo_root/build/anomaly/manifest.json.tmp"
+    mv -- "$repo_root/build/anomaly/manifest.json.tmp" "$repo_root/build/anomaly/manifest.json"
+    # Source-only permits a first deployment before the local PG volume exists.
+    # --no-deps prevents this read-only check from starting/migrating Postgres.
+    compose run --rm --no-deps ledger-anomaly python -m ledger.anomaly preflight --source-only
+    running_services=$(compose ps --status running --services)
+    if [[ $'\n'"$running_services"$'\n' == *$'\n'anomaly-postgres$'\n'* ]]; then
+        phase='anomaly state preflight'
+        compose run --rm --no-deps ledger-anomaly python -m ledger.anomaly preflight
+    fi
+fi
 
 phase='shutdown'
 restarting=true
@@ -80,8 +104,13 @@ compose up --detach --force-recreate --remove-orphans --no-build --pull never \
     --wait --wait-timeout "$wait_timeout"
 
 phase='database readiness'
-compose exec -T ledger-web python -c \
-    "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/ready', timeout=10).close()"
+if has_service ledger-web; then
+    compose exec -T ledger-web python -c \
+        "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/ready', timeout=10).close()"
+fi
+if has_service ledger-anomaly; then
+    compose exec -T ledger-anomaly python -m ledger.anomaly ready
+fi
 phase='service status'
 compose ps --all
 printf '\nAll enabled services restarted; health checks and database readiness passed.\n'

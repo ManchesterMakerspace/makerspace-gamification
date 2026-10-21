@@ -192,7 +192,7 @@ def test_worker_lanes_are_disjoint_and_compose_starts_them_without_inference_dep
     groups = [set(outbox_filters(name)['kinds']) for name in ('channels', 'results', 'interactive', 'avatars')]
     assert all(not left & right for i, left in enumerate(groups) for right in groups[i + 1:])
     assert outbox_filters('interactive')['kinds'] == ['conversation', 'guidance', 'community_count_reply', 'sponsor_report', 'kudos_submit', 'kudos_submission_reply']
-    assert set(outbox_filters('outbox')['exclude']) == set.union(*groups) | {'home_publish', 'home_profile_photo'}
+    assert set(outbox_filters('outbox')['exclude']) == set.union(*groups) | {'home_publish', 'home_profile_photo', 'anomaly_query'}
     assert outbox_filters('homes')['kinds'] == ['home_publish', 'home_profile_photo']
     config = yaml.safe_load((Path(__file__).parents[1] / 'compose.yaml').read_text())
     for name in ('results', 'interactive'):

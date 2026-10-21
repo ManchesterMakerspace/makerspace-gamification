@@ -1,11 +1,12 @@
 # Prompt Matrix Template: design and operation
 
-Version 46 adds descriptive fantasy-avatar composition, independent avatar
-preferences, reference-image replacement and private notification behavior.
-Equivalent policy wording and XML whitespace are compacted to preserve the
-30-KiB CRLF budget. The `avatar` JSON prompt set remains separate. A Google Doc
-override needs the same complete update and explicit reload; reserved jobs keep
-their saved policy. See [avatars](AVATARS.md).
+Version 50 adds anomaly analytics access independent of game participation,
+aggregate-only channel readers, current-source admin/board authority, and inert
+detector proposals. The matrix preserves its 32-KiB validation limit with at
+least 512 bytes of CRLF headroom. The `anomaly_explain` and `anomaly_propose`
+JSON prompt sets remain separate. A Google Doc override needs the complete
+version-50 content and explicit reload; reserved jobs retain their saved policy.
+See [anomaly Slack access](ANOMALY_SLACK.md).
 
 The [canonical matrix](../ledger/prompts/prompt_matrix.xml.md) is the shared behavioral policy for The Ledger, served through vLLM with `nvidia/Qwen3.8-27B-NVFP4`. It combines XML section/role identifiers with readable Markdown headings, tables, and examples inside CDATA. The packaged [JSON message types](PROMPTS.md) remain the source of audience-specific tasks and rotating voices; their inventory may grow independently of the matrix.
 
@@ -48,7 +49,7 @@ Rank floors and XP tables in the matrix are **seed examples**, aligned with `led
 
 ## Roles and conversation behavior
 
-The matrix explicitly covers `ledger`, `member`, `participant`, `nonparticipant`, `sponsor`, `success_buddy`, `mentor`, `checkout_approver`, `admin`, `board_member`, `resource_manager`, `tool_captain`, `workshop_instructor`, `design_challenge_judge`, `quest_author`, `ledger_quest_author`, `ai_observer`, and `delegated_reviewer`. These include application roles, participation/relationship states, and human-appointed pathways; descriptive titles remain separate from application-granted permissions.
+The matrix explicitly covers `ledger`, `member`, `participant`, `nonparticipant`, `sponsor`, `success_buddy`, `mentor`, `checkout_approver`, `admin`, `board_member`, `resource_manager`, `tool_captain`, `workshop_instructor`, `design_challenge_judge`, `quest_author`, `ledger_quest_author`, `ai_observer`, `delegated_reviewer`, and `anomaly_channel_reader`. These include application roles, participation/relationship states, and human-appointed pathways; descriptive titles remain separate from application-granted permissions.
 
 Admins and board members retain global Ledger administration. Resource managers remain shop-scoped reviewers. Nobody approves their own evidence. Rank and descriptive titles grant no staff or safety authority. Future roles must be added to the canonical matrix, required-role validation, and tests in the same change, as required by [AGENTS.md](../AGENTS.md).
 
@@ -111,7 +112,7 @@ Delivery stages and acceptance:
 | Reload and recovery | Only admin/board can reload; all composing processes observe the marker; reserved/cached messages retain original matrix |
 | Deployment pilot | Exercise a real Google export and Qwen endpoint; compare DM/channel answers, opt-out, self-approval requests, kudos preservation, and fallback rates |
 
-The 16-KiB document cap is a byte limit, not a tokenizer guarantee. The matrix shares the configured model context window with variations, facts, current-thread history, and output tokens. Check actual token usage against `VLLM_MAX_MODEL_LEN` during the pilot, especially with long custom prompts or non-English text. Do not silently truncate policy sections to fit. Provider/context-limit failures use canned fallbacks. Automated tests cover transport and request construction using mocks/local stubs; they do not certify live model obedience.
+The 32-KiB document cap is a byte limit, not a tokenizer guarantee. The matrix shares the configured model context window with variations, facts, current-thread history, and output tokens. Check actual token usage against `VLLM_MAX_MODEL_LEN` during the pilot, especially with long custom prompts or non-English text. Do not silently truncate policy sections to fit. Provider/context-limit failures use canned fallbacks. Automated tests cover transport and request construction using mocks/local stubs; they do not certify live model obedience.
 
 Policy version 3 adds required quest author, observer, and delegated reviewer coverage. Engagement proposals are now always audit-only: Python validates and records suggestions but never derives an accounting mutation from model category/XP output. Narration and policy confer no authority. That version used a 24 KiB export bound; the current complete matrix uses 32 KiB. Existing Google Doc overrides must receive the complete current policy and an explicit operator reload. No external document is published by implementation. See [rollout and limits](ENGAGEMENT_QUESTS.md).
 

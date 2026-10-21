@@ -25,6 +25,19 @@ This library changes narration, not delivery policy. Automatic shared announceme
 | Major achievements | `rank_up.json`, `shop_complete.json`, `boss.json`, `stewardship.json` |
 | Community recognition | `kudos.json`, `recruitment.json` |
 | Conversation and collaboration | `conversation.json`, `community_count.json`, `status.json`, `delivery.json`, `project.json`, `quest.json`, `correction.json` |
+| Data anomalies and trend research | `anomaly_explain.json`, `anomaly_propose.json` |
+
+The anomaly sets accept only an application-authored, privacy-filtered `summary`.
+They do not receive the original Slack question/history, member identities, raw
+documents, billing details, or internal notes. `anomaly_explain` describes supplied
+evidence, coverage, and uncertainty; `anomaly_propose` returns an inert JSON
+candidate constrained by the supplied detector schema and feature inventory.
+Python validates that candidate and requires human approval before activation.
+Each set has three paired variants and all four audience configurations. Shared
+audiences remain aggregate-only even for staff callers. Selection and saved text
+use the normal retry-stable reservation workflow; neither a prompt nor a Google
+Doc override grants data access or changes a detector's status. See
+[anomaly Slack access](ANOMALY_SLACK.md).
 
 ## Editing a file
 

@@ -209,3 +209,35 @@ def test_ticket_note_writer_is_separate_and_limited_to_revision_event_path():
     role = definition("mongosh", "ticket_note_writer")
     grants = {(p["resource"]["collection"], tuple(p["actions"])) for p in role["privileges"]}
     assert grants == {("fix_tickets", ("find", "update")), ("fix_ticket_events", ("find", "insert"))}
+
+
+def test_anomaly_role_follows_generated_manifest_and_never_adds_source_writes(tmp_path):
+    path = tmp_path / 'schema.json'
+    path.write_text(json.dumps({'format_version': 1, 'collections': {
+        'members': {}, 'checkins': {}, 'future_source_collection': {}, 'system_configs': {}}}))
+    for format in ('atlas', 'mongosh'):
+        result = subprocess.run([NODE, 'examples/mongodb-roles.js', format, 'anomaly',
+                                 'source_db', 'ignored_ledger_db', str(path)], cwd=ROOT,
+                                capture_output=True, text=True, check=True)
+        role = json.loads(result.stdout)
+        if format == 'atlas':
+            assert role['roleName'] == 'ledger_anomaly_source_reader'
+            assert {action['action'] for action in role['actions']} == {'FIND', 'CHANGE_STREAM'}
+            assert all({r['collection'] for r in action['resources']} ==
+                       {'members', 'checkins', 'future_source_collection', 'system_configs'} for action in role['actions'])
+            assert all(r['db'] == 'source_db' and r['cluster'] is False
+                       for action in role['actions'] for r in action['resources'])
+        else:
+            assert role['role'] == 'ledger_anomaly_source_reader'
+            assert all(p['actions'] == ['find', 'changeStream'] for p in role['privileges'])
+            assert all(p['resource']['db'] == 'source_db' for p in role['privileges'])
+
+
+@pytest.mark.parametrize('name', ['', '*', 'ledger_inbox', 'system.profile', '$cmd', 'members\x00'])
+def test_anomaly_role_rejects_broad_or_owned_names(tmp_path, name):
+    path = tmp_path / 'schema.json'
+    path.write_text(json.dumps({'format_version': 1, 'collections': {name: {}}}))
+    result = subprocess.run([NODE, 'examples/mongodb-roles.js', 'atlas', 'anomaly',
+                             'source_db', 'ignored', str(path)], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert result.stdout == ''

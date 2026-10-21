@@ -22,6 +22,7 @@ from .sources import FIELDS, Sources
 from .storage import connect, connect_database, enqueue, now
 from .slack_client import SlackCallDebugClient
 from .worker import Worker, ingest_mqtt
+from .anomaly.slack import ANOMALY_KINDS
 
 
 CHANNEL_KINDS = ["remove", "invite", "provision_slot", "review_channel_invite"]
@@ -49,7 +50,7 @@ def outbox_filters(queue):
         return {"kinds": RESULT_KINDS}
     if queue == "interactive":
         return {"kinds": INTERACTIVE_KINDS}
-    return {"exclude": CHANNEL_KINDS + RESULT_KINDS + INTERACTIVE_KINDS + HOME_KINDS + AVATAR_KINDS}
+    return {"exclude": CHANNEL_KINDS + RESULT_KINDS + INTERACTIVE_KINDS + HOME_KINDS + AVATAR_KINDS + ANOMALY_KINDS}
 
 
 def database_ledger():
