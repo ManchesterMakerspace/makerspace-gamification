@@ -250,20 +250,29 @@ class SecurityEngine:
         for bucket, dirty in list(self.state.rows('security_dirty'))[:20]:
             start = timestamp(bucket)
             self.rollup(start)
-            if start < hour(now) - timedelta(hours=1):
-                rows = self.context(start+timedelta(hours=1), extra_minutes=60)
+            if start <= now:
+                # A correction can change a later window, including a grant made
+                # up to 48 hours after a corrected promotion. Replay recent hours
+                # too: detect(now) no longer sees their short burst windows.
+                horizon = max([r['window_minutes'] for r in self.rules['rules']] +
+                    [self.rules['email']['window_minutes'], self.rules['bounce']['window_minutes'],
+                     self.rules['privileges']['bulk_window_minutes'], self.rules['privileges']['chain_hours'] * 60])
+                end = min(now, start + timedelta(hours=1, minutes=horizon))
+                rows = self.state.security_events(start.isoformat(), (end+timedelta(microseconds=1)).isoformat())
                 cursor = self.state.get('security_backfill_cursor', bucket, {})
                 after = cursor.get('at', '') if cursor.get('revision') == dirty['revision'] else ''
-                times = sorted({r['at'] for r in rows if start <= timestamp(r['at']) < start+timedelta(hours=1) and r['at'] > after})
+                times = sorted({r['at'] for r in rows if r['at'] > after})
                 batch = times[:work_remaining]
                 for at in batch:
-                    for signal in self.detect(timestamp(at), rows):
+                    for signal in self.detect(timestamp(at)):
                         self.save(signal, backfill=True)
                 work_remaining -= len(batch)
                 if len(times) > len(batch):
                     if batch:
                         self.state.put('security_backfill_cursor', bucket, {'at': batch[-1], 'revision': dirty['revision']})
                     break
+            else:
+                continue
             with self.state.atomic():
                 if self.state.get('security_dirty', bucket) == dirty:
                     self.state.delete('security_dirty', bucket)
@@ -363,5 +372,7 @@ class SecurityEngine:
         row = self.state.get('security_incidents', incident_id)
         if not row:
             raise ValueError('Unknown security incident ID')
+        if row['status'] not in {'open', 'shadow'}:
+            raise ValueError('Only open or shadow security incidents can be resolved')
         self.state.put('security_incidents', incident_id, {**row, 'status': 'resolved', 'resolved_by': actor,
             'resolved_at': stamp(), 'alertable': False})

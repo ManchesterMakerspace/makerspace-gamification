@@ -106,6 +106,39 @@ def test_security_atomic_evidence_rollups_restart_and_reporting_permissions():
 
 
 @pytest.mark.skipif(not os.environ.get('ANOMALY_TEST_DATABASE_URL'), reason='Requires a disposable PostgreSQL database')
+def test_security_learning_receipts_expire_with_history_or_superseded_generation():
+    uri = os.environ['ANOMALY_TEST_DATABASE_URL']
+    assert urlparse(uri).path.lstrip('/').startswith('ledger_anomaly_test_')
+    prefix = 'learning-retention:' + uuid4().hex + ':'
+    state = State(uri)
+    state.initialize()
+    recent = datetime.now(timezone.utc).isoformat()
+    expired = (datetime.now(timezone.utc)-timedelta(days=366*6)).isoformat()
+    try:
+        for status in ('active', 'shadow', 'disabled', 'superseded'):
+            state.put('security_detectors', prefix+status, {'status': status})
+            state.put('security_learning_receipts', prefix+status, {'at': recent, 'revision': prefix+status, 'hit': False})
+        state.put('security_learning_receipts', prefix+'legacy-old', {'at': expired, 'hit': True})
+        state.put('security_learning_receipts', prefix+'legacy-recent', {'at': recent, 'hit': False})
+        state.put('security_learning_receipts', prefix+'active-old', {'at': expired, 'revision': prefix+'active', 'hit': True})
+        with pytest.raises(RuntimeError, match='rollback'):
+            with state.atomic():
+                state.security_prune(60)
+                assert not state.get('security_learning_receipts', prefix+'legacy-old')
+                raise RuntimeError('rollback')
+        assert state.get('security_learning_receipts', prefix+'legacy-old')
+        state.security_prune(60)
+        for name in ('superseded', 'legacy-old', 'active-old'):
+            assert not state.get('security_learning_receipts', prefix+name)
+        for name in ('active', 'shadow', 'disabled', 'legacy-recent'):
+            assert state.get('security_learning_receipts', prefix+name)
+        assert state.get('security_detectors', prefix+'superseded')  # Keep model review history.
+    finally:
+        state.connection.execute('DELETE FROM anomaly_documents WHERE key LIKE %s', (prefix+'%',))
+        state.close()
+
+
+@pytest.mark.skipif(not os.environ.get('ANOMALY_TEST_DATABASE_URL'), reason='Requires a disposable PostgreSQL database')
 def test_security_retention_prunes_completed_snapshots_and_preserves_pending_groups():
     from psycopg.types.json import Jsonb
     uri = os.environ['ANOMALY_TEST_DATABASE_URL']
