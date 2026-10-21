@@ -47,6 +47,14 @@ through Adoptium's APT repository or upgrades every Debian package during the
 build. Update the sibling Metabase checkout as well as this repository when
 deploying this Dockerfile fix. The final runtime remains Temurin 25 on Alpine.
 
+The source build normalizes the required shell scripts to LF inside the image,
+invokes `bin/build.sh` through Bash, and copies the normalized runtime entrypoint
+with mode `755`. It supports Windows line endings and source checkouts without
+executable permissions without modifying the host checkout. If an older Dockerfile
+fails with `bin/build.sh: Permission denied` (exit 126), update the Dockerfile in
+`METABASE_SOURCE_DIR` before retrying the same rebuild command. This build failure
+occurs before shutdown; existing services stay running.
+
 If Metabase fails during dependency installation, check the toolchain separately
 before rebuilding the full application (use the same source directory configured
 for Compose):
