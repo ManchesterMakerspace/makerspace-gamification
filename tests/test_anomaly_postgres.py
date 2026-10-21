@@ -26,6 +26,17 @@ def test_checkpoint_restart_and_transaction_rollback():
         state = State(uri)
         assert state.checkpoint(key) == {"token": key}
         assert not state.capture(key, key, {"safe": True}, {"token": key})
+        with pytest.raises(RuntimeError):
+            with state.atomic():
+                state.advance_checkpoint(key, {"idle": 1})
+                raise RuntimeError("crash before checkpoint commit")
+        assert state.checkpoint(key) == {"token": key}
+        for idle in range(100):
+            state.advance_checkpoint(key, {"idle": idle})
+        state.close()
+        state = State(uri)
+        assert state.checkpoint(key) == {"idle": 99}
+        assert state.connection.execute("SELECT count(*) AS n FROM anomaly_events WHERE collection=%s", (key,)).fetchone()["n"] == 1
     finally:
         state.connection.execute("DELETE FROM anomaly_events WHERE id=%s", (key,))
         state.connection.execute("DELETE FROM anomaly_checkpoints WHERE collection=%s", (key,))

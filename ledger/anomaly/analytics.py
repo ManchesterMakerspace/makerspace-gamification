@@ -484,6 +484,11 @@ class Analytics:
             else:
                 cohort['retention_24m','cohort','insufficient_payment_history'].add(member)
         with self.state.atomic():
+            # Outcomes are derived from the current evidence, including corrections
+            # and deletions. A redated event must replace its former label.
+            for key, _ in self.state.rows('outcomes'):
+                if key not in outcomes:
+                    self.state.delete('outcomes', key)
             for key,row in outcomes.items():
                 self.state.put('outcomes',key,row)
         for _, outcome_row in self.state.rows('outcomes'):

@@ -148,7 +148,8 @@ def reconstruct_coverage(state, history_months=60, as_of=None):
             refs = prior.get('invoice_evidence', [])
             # Retention alone never revokes proved history. A known correction or
             # refund does, including when other old receipts have been pruned.
-            bad = any((state.get('observations', ref) and (ref not in observations or
+            bad = any(state.get('observation_tombstones', ref) or
+                      (state.get('observations', ref) and (ref not in observations or
                        observations[ref]['values'].get('refunded') or not observations[ref]['values'].get('paid_positive'))) for ref in refs)
             changed = any(evidence_value(ref) is not None and fingerprint(evidence_value(ref)) != revision
                           for ref,revision in prior.get('proof',{}).items())

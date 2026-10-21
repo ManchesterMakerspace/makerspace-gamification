@@ -144,6 +144,36 @@ def test_reports_use_dashboard_keys_and_suppress_small_outcome_groups():
     assert not any(v['report'] == 'sustained_membership' for v in metrics)
 
 
+@pytest.mark.parametrize('kind', ['membership_revoked', 'subscription_cancelled'])
+@pytest.mark.parametrize('correction', ['deleted', 'nonqualifying', 'redated'])
+def test_outcomes_follow_current_audit_evidence(kind, correction):
+    state = MemoryState()
+    for i in range(5):
+        observation(state, 'members', 'm'+str(i), {'status': 'activeMember'})
+        observation(state, 'audit_logs', str(i), {'subject_id': 'm'+str(i), 'event_type': kind,
+                    'resource_type': 'Member', 'created_at': '2025-10-01'})
+    analytics = Analytics(state, config())
+    analytics.refresh('2026-01-01')
+    assert len(list(state.rows('outcomes'))) == 5
+    assert any(r['dimension'] == 'outcome_month' for _, r in state.rows('report_metrics'))
+    for i in range(5):
+        key = 'audit_logs:'+str(i)
+        if correction == 'deleted':
+            state.delete('observations', key)
+            state.put('observation_tombstones', key, {'operation': 'delete'})
+        else:
+            row = state.get('observations', key)
+            row['values'].update({'event_type': 'member_updated'} if correction == 'nonqualifying' else {'created_at': '2025-11-01'})
+            state.put('observations', key, row)
+    analytics.refresh('2026-01-01')
+    outcomes = [row for _, row in state.rows('outcomes')]
+    if correction == 'redated':
+        assert len(outcomes) == 5 and all(row['at'].startswith('2025-11-01') for row in outcomes)
+    else:
+        assert not outcomes
+        assert not any(r['dimension'] == 'outcome_month' for _, r in state.rows('report_metrics'))
+
+
 def paid_example():
     state = MemoryState()
     observation(state,'members','m',{'status':'activeMember','expirationTime':'2025-02-01'})
@@ -233,7 +263,8 @@ def test_payer_retention_does_not_count_prior_beneficiary_time():
     assert not state.get('member_analytics','m')['sustained']['qualifies']
 
 
-def test_old_qualification_is_compacted_survives_receipt_retention_and_revokes_on_refund():
+@pytest.mark.parametrize('correction', ['refund', 'delete'])
+def test_old_qualification_is_compacted_survives_receipt_retention_and_revokes_on_correction(correction):
     state = paid_example()
     invoice = state.get('observations','invoices:i')
     invoice['values'].update(quantity=19,settled_at='2019-01-01')
@@ -245,13 +276,20 @@ def test_old_qualification_is_compacted_survives_receipt_retention_and_revokes_o
     assert not list(state.rows('coverage'))
     assert state.get('coverage_qualifications','m')['qualifies']
     state.delete('observations','audit_logs:a')
+    state.delete('observations','invoices:i')  # Compacted evidence without a source-deletion tombstone.
     reconstruct_coverage(state,history_months=60,as_of='2026-01-01')
     Analytics(state,config()).refresh('2026-01-01')
     assert state.get('member_analytics','m')['sustained']['qualifies']
-    invoice['values']['refunded'] = True
-    state.put('observations','invoices:i',invoice)
+    if correction == 'refund':
+        invoice['values']['refunded'] = True
+        state.put('observations','invoices:i',invoice)
+    else:
+        state.delete('observations','invoices:i')
+        state.put('observation_tombstones','invoices:i',{'operation':'delete'})
     reconstruct_coverage(state,history_months=60,as_of='2026-01-01')
     assert not state.get('coverage_qualifications','m')
+    Analytics(state,config()).refresh('2026-01-01')
+    assert not state.get('member_analytics','m')['sustained']['qualifies']
 
 
 def test_old_outcomes_are_not_reintroduced_after_retention_prunes_them():

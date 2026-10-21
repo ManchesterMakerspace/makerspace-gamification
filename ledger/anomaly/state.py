@@ -120,9 +120,16 @@ class State:
             inserted = self.connection.execute("INSERT INTO anomaly_events(id,collection,data) VALUES(%s,%s,%s) "
                 "ON CONFLICT DO NOTHING RETURNING id", (event_id, collection, Jsonb(data))).fetchone()
             if token is not None:
-                self.connection.execute("INSERT INTO anomaly_checkpoints(collection,token) VALUES(%s,%s) "
-                    "ON CONFLICT(collection) DO UPDATE SET token=EXCLUDED.token,updated_at=now()", (collection, Jsonb(token)))
+                self.advance_checkpoint(collection, token)
             return bool(inserted)
+
+    def advance_checkpoint(self, collection, token):
+        """Commit an idle post-batch token without retaining a synthetic event."""
+        from psycopg.types.json import Jsonb
+        with self.lock:
+            self.connection.execute("INSERT INTO anomaly_checkpoints(collection,token) VALUES(%s,%s) "
+                "ON CONFLICT(collection) DO UPDATE SET token=EXCLUDED.token,updated_at=now() "
+                "WHERE anomaly_checkpoints.token IS DISTINCT FROM EXCLUDED.token", (collection, Jsonb(token)))
 
     def checkpoint(self, collection):
         with self.lock:
@@ -192,8 +199,12 @@ class MemoryState:
             new = event_id not in self.events
             self.events.setdefault(event_id, {"id": event_id, "collection": collection, "data": deepcopy(data), "processed": False})
             if token is not None:
-                self.tokens[collection] = deepcopy(token)
+                self.advance_checkpoint(collection, token)
             return new
+
+    def advance_checkpoint(self, collection, token):
+        with self.lock:
+            self.tokens[collection] = deepcopy(token)
 
     def checkpoint(self, collection):
         return deepcopy(self.tokens.get(collection))
