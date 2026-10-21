@@ -262,6 +262,21 @@ def test_capture_failure_rolls_back_event_and_checkpoint():
             ingestor.capture("members", {"_id": "m1"}, "insert", {"token": 1})
             raise RuntimeError("simulated commit failure")
     assert state.pending() == [] and state.checkpoint("members") is None
+    assert list(state.rows("capture_receipts")) == []
+
+
+def test_idle_checkpoint_is_transactional_without_retained_events():
+    state = MemoryState()
+    state.advance_checkpoint("members", {"token": 1})
+    with pytest.raises(RuntimeError):
+        with state.atomic():
+            state.advance_checkpoint("members", {"token": 2})
+            raise RuntimeError("simulated commit failure")
+    assert state.checkpoint("members") == {"token": 1}
+    assert not state.events
+    state.advance_checkpoint("members", {"token": 3})
+    assert state.checkpoint("members") == {"token": 3}
+    assert not state.events
 
 
 def test_missing_update_lookup_preserves_state_and_requests_reconciliation():
@@ -383,23 +398,178 @@ def test_timestamp_increment_orders_events_and_inferred_delete_is_uncertain(monk
     assert state.get("observations", "members:m1") is None
 
 
-def test_scan_generation_rechecks_unchanged_documents_and_interruption_is_not_complete(monkeypatch):
+def test_scan_deduplicates_unchanged_documents_and_interruption_is_not_complete(monkeypatch):
     ingestor, state, _ = setup(rows={"members": [{"_id": "m1", "status": "activeMember"}]})
     at(monkeypatch, "2026-01-01T00:00:01+00:00")
     ingestor.scan(historical=True)
     ingestor.drain()
     ingestor.check_references()
     assert state.get("reference_checks", "members:m1") is None
+    def unexpected_inspection(*args):
+        pytest.fail("An unchanged snapshot must not repeat validation")
+    monkeypatch.setattr(ingestor, "inspection", unexpected_inspection)
     at(monkeypatch, "2026-01-01T00:00:02+00:00")
     ingestor.scan()
     ingestor.drain()
-    assert state.get("reference_checks", "members:m1") is not None
+    assert len(state.events) == 1
+    assert state.get("reference_checks", "members:m1") is None
+    assert state.get("scan_seen", "members:m1")["generation"] == "2026-01-01T00:00:02+00:00"
     assert list(state.rows("transitions")) == []
     state.delete("health", "scan")
     ingestor.stop.set()
     ingestor.scan()
     assert state.get("health", "scan") is None
     assert state.get("observations", "members:m1") is not None
+
+
+def test_snapshot_deduplication_survives_pending_work_restart_and_event_retention(monkeypatch):
+    document = {"_id": "m1", "status": "activeMember"}
+    ingestor, state, _ = setup()
+    first = ingestor.capture("members", document, "snapshot", generation="one")
+    assert ingestor.capture("members", document, "snapshot", generation="two") == first
+    assert len(state.pending()) == 1
+    ingestor.drain()
+    state.events.clear()  # Processed-event retention must not reset the snapshot receipt.
+    restarted, _, _ = setup(state=state)
+    assert restarted.capture("members", document, "snapshot", generation="three") == first
+    assert state.pending() == []
+
+
+def test_snapshots_capture_returns_to_prior_content_and_reinsertions():
+    ingestor, state, _ = setup()
+    active = {"_id": "m1", "status": "activeMember"}
+    first = ingestor.capture("members", active, "snapshot", generation="one")
+    ingestor.drain()
+    second = ingestor.capture("members", {**active, "status": "inactive"}, "snapshot", generation="two")
+    ingestor.drain()
+    third = ingestor.capture("members", active, "snapshot", generation="three")
+    ingestor.drain()
+    assert len({first, second, third}) == 3
+    assert state.get("observations", "members:m1")["values"]["status"] == "activeMember"
+    ingestor.capture("members", None, "delete", {"token": 1}, document_id="m1")
+    ingestor.drain()
+    assert ingestor.capture("members", active, "snapshot", generation="four") != third
+    ingestor.drain()
+    assert state.get("observations", "members:m1")
+
+
+def test_fresh_snapshot_can_retry_content_previously_discarded_as_stale(monkeypatch):
+    ingestor, state, _ = setup()
+    at(monkeypatch, "2026-01-01T00:00:03+00:00")
+    newer = ingestor.capture("members", {"_id": "m1", "status": "inactive"}, "update", {"token": 1})
+    old = {"_id": "m1", "status": "activeMember"}
+    stale = ingestor.capture("members", old, "snapshot", read_started_at="2026-01-01T00:00:01+00:00")
+    process(ingestor, state, newer)
+    process(ingestor, state, stale)
+    at(monkeypatch, "2026-01-01T00:00:04+00:00")
+    fresh = ingestor.capture("members", old, "snapshot")
+    assert fresh != stale
+    ingestor.drain()
+    assert state.get("observations", "members:m1")["values"]["status"] == "activeMember"
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_unchanged_snapshot_advances_stale_event_boundary(monkeypatch, pending):
+    ingestor, state, _ = setup()
+    document = {"_id": "m1", "status": "activeMember"}
+    at(monkeypatch, "2026-01-01T00:00:01+00:00")
+    first = ingestor.capture("members", document, "snapshot")
+    if not pending:
+        ingestor.drain()
+    at(monkeypatch, "2026-01-01T00:00:03+00:00")
+    assert ingestor.capture("members", document, "snapshot") == first
+    assert len(state.events) == 1
+    at(monkeypatch, "2026-01-01T00:00:04+00:00")
+    ingestor.capture("members", {**document, "status": "revoked"}, "update", {"token": 1},
+                     occurred_at="2026-01-01T00:00:02+00:00", transition={"status": "revoked"})
+    ingestor.drain()
+    assert state.get("observations", "members:m1")["first_seen"] == "2026-01-01T00:00:01+00:00"
+    assert state.get("observations", "members:m1")["values"]["status"] == "activeMember"
+
+
+def test_snapshot_detects_unprojected_structure_changes_without_storing_raw_values():
+    schema = contract(fields={"_id": {"types": ["String"]}, "private_field": {"types": ["String"]}})
+    ingestor, state, _ = setup({"members": schema})
+    first = ingestor.capture("members", {"_id": "m1", "private_field": "never-store"}, "snapshot")
+    ingestor.drain()
+    second = ingestor.capture("members", {"_id": "m1", "private_field": 123}, "snapshot")
+    ingestor.drain()
+    assert first != second
+    assert state.events[first]["data"]["values"] == state.events[second]["data"]["values"]
+    assert any(row["rule"] == "type" for _, row in state.rows("findings"))
+    assert "never-store" not in json.dumps(list(state.documents.values()) + list(state.events.values()))
+
+
+def test_approved_contract_rechecks_unchanged_snapshot_with_same_manifest_version():
+    schema = contract(fields={"status": {"types": ["String"], "enum": ["activeMember", "inactive"]}})
+    ingestor, state, _ = setup({"members": schema})
+    document = {"_id": "m1", "status": "inactive"}
+    candidate = deepcopy(ingestor.registry.manifest)
+    candidate["collections"]["members"]["fields"]["status"]["enum"] = ["activeMember"]
+    ingestor.registry = SchemaRegistry(state, candidate)
+    assert ingestor.registry.install()["pending"]
+    first = ingestor.capture("members", document, "snapshot")
+    ingestor.drain()
+    assert not list(state.rows("findings"))
+    ingestor.registry.approve(ingestor.registry.version, "admin")
+    second = ingestor.capture("members", document, "snapshot")
+    ingestor.drain()
+    assert first != second
+    assert any(row["rule"] == "enum" for _, row in state.rows("findings"))
+
+
+def test_deduplicated_snapshot_rechecks_deleted_and_restored_reference_targets():
+    member = {"_id": "m1", "group_id": "g1"}
+    group = {"_id": "g1"}
+    schema = contract(references=[{"field": "group_id", "collection": "groups", "optional": False}])
+    ingestor, state, source = setup({"members": schema, "groups": contract()},
+                                    {"members": [member], "groups": [group]})
+    for _ in range(2):  # Establish both the documents and their dependency revisions.
+        ingestor.scan()
+        ingestor.drain()
+        ingestor.check_references()
+    assert not list(state.rows("findings"))
+    count = len(state.events)
+    ingestor.scan()
+    ingestor.drain()
+    assert len(state.events) == count
+    source["groups"].rows.clear()
+    ingestor.capture("groups", None, "delete", {"token": 1}, document_id="g1")
+    ingestor.drain()
+    ingestor.scan()
+    ingestor.drain()
+    ingestor.check_references()
+    assert len(state.events) == count + 1  # Only the target deletion adds an event.
+    assert any(row["rule"] == "orphan_reference" and row["status"] == "open" for _, row in state.rows("findings"))
+    count = len(state.events)
+    ingestor.scan()
+    ingestor.drain()
+    assert len(state.events) == count
+    source["groups"].rows.append(group)
+    ingestor.capture("groups", group, "insert", {"token": 2})
+    ingestor.drain()
+    ingestor.scan()
+    ingestor.drain()
+    ingestor.check_references()
+    assert all(row["status"] == "resolved" for _, row in state.rows("findings"))
+
+
+def test_idle_post_batch_tokens_only_update_checkpoint(monkeypatch):
+    ingestor, state, source = setup()
+    class IdleStream:
+        resume_token = None
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def try_next(self):
+            self.resume_token = {"token": 1 + (self.resume_token or {}).get("token", 0)}
+            if self.resume_token["token"] == 100:
+                ingestor.stop.set()
+            return None
+    monkeypatch.setattr(source["members"], "watch", lambda **kwargs: IdleStream())
+    ingestor.watch("members", SimpleNamespace(set=lambda: None))
+    assert state.checkpoint("members") == {"token": 100}
+    assert not state.events
+    assert state.get("health", "stream:members")["caught_up"] is True
 
 
 def test_stream_uses_resume_token_and_normalized_removed_fields_without_source_writes():
@@ -501,6 +671,7 @@ def test_expired_resume_token_records_gap_and_clears_checkpoint_atomically():
     assert state.get("reconcile", "all")
     assert state.get("health", "coverage_gap")["unresolved"] is True
     assert len(list(state.rows("gaps"))) == 1
+    assert len(state.events) == 1  # Only the pre-upgrade checkpoint fixture remains.
 
 
 def test_scan_keeps_gap_open_until_collection_stream_is_recovered_and_caught_up(monkeypatch):

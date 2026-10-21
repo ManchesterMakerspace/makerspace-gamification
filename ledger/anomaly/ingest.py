@@ -105,10 +105,44 @@ class Ingestor:
                 findings.append({"rule": "duplicate", "field": ",".join(sorted(keys)), "severity": "error"})
         return findings
 
+    def unchanged_snapshot(self, key, signature, data, dependencies):
+        """Reuse the receipt while preserving the latest successful read boundary.
+
+        Called inside the capture transaction, including before event processing.
+        An unchanged scan still proves that older buffered updates are stale.
+        """
+        receipt = self.state.get("capture_receipts", key, {})
+        if receipt.get("signature") != signature or receipt.get("stale"):
+            return None
+        read_started_at, observed_at = data["read_started_at"], data["observed_at"]
+        updated = False
+        if timestamp(read_started_at) > timestamp(receipt["read_started_at"]):
+            receipt.update(read_started_at=read_started_at, observed_at=observed_at)
+            if data["operation"] == "snapshot":
+                receipt["snapshot_read"] = {"event_id": receipt["event_id"],
+                    "read_started_at": read_started_at, "observed_at": observed_at}
+            updated = True
+            old = self.state.get("observations", key, {})
+            if old.get("capture_event_id") == receipt["event_id"] and old.get("operation") == "snapshot":
+                self.state.put("observations", key, {**old, "read_started_at": read_started_at, "observed_at": observed_at})
+        if receipt.get("dependencies") != dependencies and data["operation"] == "snapshot":
+            # Target changes need delayed cross-document validation, not another
+            # retained copy of this unchanged document.
+            receipt["dependencies"] = dependencies
+            updated = True
+            self.state.put("reference_checks", key, {"collection": key.split(":", 1)[0],
+                "document_key": data["document_key"], "required_enforced": data["required_enforced"],
+                "due": (timestamp(observed_at) + timedelta(seconds=self.config.reference_delay)).isoformat(),
+                "historical": data["historical"], "generation": fingerprint([receipt["event_id"], dependencies])})
+        if updated:
+            self.state.put("capture_receipts", key, receipt)
+        return receipt["event_id"]
+
     def capture(self, collection, doc, operation, token=None, *, document_id=None, historical=False, transition=None,
                 generation=None, removed=None, occurred_at=None, source_order=None, read_started_at=None, reconciled=False,
                 changed_fields=()):
-        if collection not in self.registry.contracts():
+        schema = self.registry.contracts().get(collection)
+        if schema is None:
             return None
         observed_at = stamp()
         doc_id = doc.get("_id") if doc else document_id
@@ -124,15 +158,52 @@ class Ingestor:
             changed = any(field == path or field.startswith(path + ".") or field.startswith(path + "[].") for path in changes)
             if event_at and event_at > timestamp(accepted_at) and (operation in {"insert", "replace"} or operation == "update" and changed):
                 enforced.add(field)
-        findings = self.inspection(collection, doc, enforced) if doc else []
-        event_id = fingerprint([collection, encoded(token)]) if token is not None else fingerprint([collection, key, operation, values, findings, generation])
+        # Hash the whole source document with the local secret: structural changes
+        # outside the analytics projection still matter, but their values stay private.
+        document_fingerprint = digest(canonical(encoded(doc)), self.secret)
+        targets = {ref.get("collection") for ref in schema.get("references", [])} - {None}
+        if collection == "members" and "groups" in self.registry.contracts():
+            targets.add("groups")
+        if any(index.get("unique") for index in schema.get("indexes", [])):
+            targets.add(collection)
+        dependencies = {target: self.state.get("source_revisions", target) for target in sorted(targets)}
+        signature = fingerprint([collection, key, operation, document_fingerprint, values,
+                                 self.registry.version, schema, sorted(enforced)])
+        observation_key = collection + ":" + entity
         payload = {"document_key": encoded(doc_id), "entity": key, "operation": operation, "values": values,
-                   "findings": findings, "observed_at": observed_at, "read_started_at": read_started_at or observed_at,
+                   "observed_at": observed_at, "read_started_at": read_started_at or observed_at,
                    "source_order": source_order, "reconciled": reconciled, "historical": historical,
                    "required_enforced": sorted(enforced), "provenance": self.registry.provenance(),
                    "schema_version": self.registry.version, "transition": transition or {}, "removed": removed or [],
-                   "missing_document": doc is None and operation != "delete", "occurred_at": occurred_at}
-        self.state.capture(event_id, collection, payload, encoded(token) if token is not None else None)
+                   "missing_document": doc is None and operation != "delete", "occurred_at": occurred_at,
+                   "document_fingerprint": document_fingerprint}
+        if token is None:
+            with self.state.atomic():
+                duplicate = self.unchanged_snapshot(observation_key, signature, payload, dependencies)
+                if duplicate:
+                    return duplicate
+        payload["findings"] = self.inspection(collection, doc, enforced) if doc else []
+        with self.state.atomic():
+            duplicate = (self.unchanged_snapshot(observation_key, signature, payload, dependencies)
+                         if token is None else None)
+            if duplicate:
+                return duplicate
+            receipt = self.state.get("capture_receipts", observation_key, {})
+            # The prior receipt distinguishes A -> B -> A and delete/reinsert from
+            # an unchanged rescan. Scan generations are only for deletion detection.
+            event_id = (fingerprint([collection, encoded(token)]) if token is not None else
+                        fingerprint([signature, receipt.get("event_id")]))
+            if self.state.capture(event_id, collection, payload, encoded(token) if token is not None else None):
+                # Keep the latest snapshot boundary even if a stream capture arrives
+                # before that snapshot is processed. Older buffered updates cannot
+                # replace the state proved by a later unchanged read.
+                snapshot_read = receipt.get("snapshot_read")
+                if operation == "snapshot" and (not snapshot_read or
+                        timestamp(payload["read_started_at"]) >= timestamp(snapshot_read["read_started_at"])):
+                    snapshot_read = {"event_id": event_id, "read_started_at": payload["read_started_at"], "observed_at": observed_at}
+                self.state.put("capture_receipts", observation_key, {"signature": signature, "event_id": event_id,
+                    "read_started_at": payload["read_started_at"], "observed_at": observed_at,
+                    "dependencies": dependencies, "snapshot_read": snapshot_read})
         return event_id
 
     def process_one(self, event):
@@ -142,6 +213,10 @@ class Ingestor:
         observation_key = name + ":" + entity
         with self.state.atomic():
             old = self.state.get("observations", observation_key)
+            receipt = self.state.get("capture_receipts", observation_key, {})
+            snapshot_read = receipt.get("snapshot_read") or {}
+            if data["operation"] == "snapshot" and snapshot_read.get("event_id") == event["id"]:
+                data = {**data, "read_started_at": snapshot_read["read_started_at"], "observed_at": snapshot_read["observed_at"]}
             if data.get("missing_document"):
                 self.state.put("reconcile", "all", {"requested_at": stamp()})
                 self.state.processed(event["id"])
@@ -174,8 +249,16 @@ class Ingestor:
                     "before": before, "after": after, "at": data.get("occurred_at") or data["observed_at"], "historical": False,
                     "operation": data["operation"], "confidence": "observed" if known_before and after == data["values"] else "uncertain"})
             if stale:
+                receipt = self.state.get("capture_receipts", observation_key, {})
+                if receipt.get("event_id") == event["id"]:
+                    # A later, fresh read of this content must not be suppressed.
+                    self.state.put("capture_receipts", observation_key, {**receipt, "stale": True})
                 self.state.processed(event["id"])
                 return True
+            if data["operation"] == "delete" or (old or {}).get("document_fingerprint") != data.get("document_fingerprint"):
+                # Referencing documents need another check when their targets change,
+                # even if the referencing document itself is unchanged.
+                self.state.put("source_revisions", name, {"event_id": event["id"]})
             if data["operation"] == "delete":
                 self.state.delete("observations", observation_key)
                 self.state.put("observation_tombstones", observation_key, {"observed_at": data["observed_at"],
@@ -189,9 +272,11 @@ class Ingestor:
                         self.state.put("findings", finding_id, finding)
             else:
                 enforced = sorted(set(data.get("required_enforced", [])) | set((old or {}).get("required_enforced", [])))
-                self.state.put("observations", observation_key, {"values": data["values"], "first_seen": (old or {}).get("first_seen", data["observed_at"]),
+                self.state.put("observations", observation_key, {"values": data["values"], "first_seen": (old or {}).get("first_seen", event["data"]["observed_at"]),
                     "observed_at": data["observed_at"], "document_key": data["document_key"], "schema_version": data["schema_version"],
                     "operation": data["operation"], "source_order": data.get("source_order"),
+                    "document_fingerprint": data.get("document_fingerprint"),
+                    "capture_event_id": event["id"],
                     "required_enforced": enforced,
                     "read_started_at": data.get("read_started_at") or data["observed_at"]})
                 self.state.delete("observation_tombstones", observation_key)
@@ -314,8 +399,7 @@ class Ingestor:
                                          source_order=[event["clusterTime"].time, event["clusterTime"].inc] if event.get("clusterTime") else None)
                         elif stream.resume_token:
                             # Empty batch post-batch tokens advance only after all preceding captures committed.
-                            self.state.capture("checkpoint:" + fingerprint([collection, encoded(stream.resume_token)]), collection,
-                                {"checkpoint_only": True}, encoded(stream.resume_token))
+                            self.state.advance_checkpoint(collection, encoded(stream.resume_token))
                         if self.retired(collection):
                             return
                         self.state.put("health", "stream:" + collection, {"status": "ready", "caught_up": event is None, "updated_at": stamp()})
@@ -342,7 +426,7 @@ class Ingestor:
             self.state.put("gaps", fingerprint([collection, start]), {"collection": collection, "start": start, "detected_at": stamp(), "end": None})
             self.state.put("health", "stream:" + collection, {"status": "gap", "caught_up": False, "updated_at": stamp()})
             self.state.put("health", "coverage_gap", {"status": "gap", "unresolved": True, "updated_at": stamp()})
-            self.state.capture("gap:" + fingerprint([collection, start]), collection, {"checkpoint_only": True}, {})
+            self.state.advance_checkpoint(collection, {})
             self.state.put("reconcile", "all", {"requested_at": stamp()})
 
     def scan(self, historical=False):

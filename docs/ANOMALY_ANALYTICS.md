@@ -48,6 +48,11 @@ older scan data from replacing newer stream observations. Expired tokens record
 coverage gaps. `updateLookup` is current state, so unprovable event histories
 remain uncertain.
 
+Unchanged reconciliation snapshots reuse a persistent content receipt, including
+after processed-event retention. Scan generations track missing documents only;
+changed content, accepted schema changes and changed reference targets trigger
+new validation. Idle stream tokens update checkpoints without retained event rows.
+
 The source contract is parsed using [Ruby Prism](https://docs.ruby-lang.org/en/3.4/Prism.html).
 Mongo deployment must support [ChangeStreams](https://www.mongodb.com/docs/manual/changestreams/);
 size its connection pool above the number of simultaneous collection streams.
@@ -113,6 +118,10 @@ to 90 days. Open findings, pending deliveries, baselines, model generations and
 positive qualification proof survive pruning/rebuilds. Only explicitly granted
 `reporting` views are available to curated Metabase; PostgreSQL working state is
 private to the engine.
+
+Outcome refresh replaces derived labels with the current evidence set, removing
+labels invalidated by corrections or deletions. Archived paid qualifications
+survive history compaction but are revoked by a known invoice deletion or refund.
 
 ## Detectors and delivery
 
