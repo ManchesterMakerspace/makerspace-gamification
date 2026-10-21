@@ -15,6 +15,9 @@ from .privacy import timestamp
 from .reports import Reports
 from .schema import SchemaRegistry
 from .state import stamp
+from .security import SecurityEngine
+from .security_delivery import SecurityDelivery
+from .security_evidence import enabled as security_enabled
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +54,9 @@ class Service:
         self.reports = None
         self.ledger = None
         self.delivery = Delivery(state)
+        self.security = SecurityEngine(state, config)
+        self.security_delivery = SecurityDelivery(state, config)
+        self.security_thread = None
         self.scan_thread = None
         self.analysis_thread = None
         self.io_thread = Thread(target=self.external_io, daemon=True)
@@ -78,6 +84,7 @@ class Service:
                                       os.environ.get("ANOMALY_METABASE_CHART_API_KEY", ""))
         self.reports = Reports(self.state, self.ledger, slack, access, self.registry, self.config, api, metabase)
         self.delivery.slack, self.delivery.access = slack, access
+        self.security_delivery.slack, self.security_delivery.access = slack, access
         self.state.put("health", "slack", {"status": "ready", "updated_at": stamp()})
 
     def job(self):
@@ -150,7 +157,7 @@ class Service:
         self.scan_thread = Thread(target=self.scan, args=(initial,), daemon=True)
         self.scan_thread.start()
         last_scan = time.monotonic()
-        last_analysis = last_train = last_prune = 0
+        last_analysis = last_train = last_prune = last_security = 0
         try:
             while not self.ingestor.stop.is_set():
                 self.state.put("health", "runtime", {"status": "ready", "updated_at": stamp()})
@@ -161,6 +168,10 @@ class Service:
                         self.state.put("health", "bootstrap", {"status": "ready", "completed_at": stamp(), "updated_at": stamp()})
                         initial = False
                 now = time.monotonic()
+                if security_enabled(self.config) and now-last_security >= self.config.security_evaluation_seconds and (self.security_thread is None or not self.security_thread.is_alive()):
+                    self.security_thread = Thread(target=self.analyze_security, daemon=True)
+                    self.security_thread.start()
+                    last_security = now
                 if not self.scan_thread.is_alive() and (now - last_scan >= self.config.reconcile_seconds or
                         now - last_scan >= 60 and self.state.get("reconcile", "all")):
                     self.scan_thread = Thread(target=self.scan, args=(initial,), daemon=True)
@@ -185,17 +196,24 @@ class Service:
             self.ingestor.stop.set()
             self.delivery.mqtt.loop_stop()
             self.delivery.mqtt.disconnect()
-            for thread in (self.scan_thread, self.analysis_thread, self.io_thread):
+            for thread in (self.scan_thread, self.analysis_thread, self.security_thread, self.io_thread):
                 if thread and thread.ident is not None:
                     thread.join(timeout=5)
             self.state.put("health", "runtime", {"status": "stopped", "updated_at": stamp()})
 
     def external_io(self):
+        for component, action in [('slack_jobs', self.job), ('delivery', self.delivery.step),
+                                  ('security_delivery', self.security_delivery.step)]:
+            try:
+                action()
+            except Exception as exc:
+                self.state.put('health', component, {'status': 'error', 'error': type(exc).__name__, 'updated_at': stamp()})
+
+    def analyze_security(self):
         try:
-            self.job()
-            self.delivery.step()
+            self.security.evaluate()
         except Exception as exc:
-            self.state.put("health", "delivery", {"status": "error", "error": type(exc).__name__, "updated_at": stamp()})
+            self.state.put('health', 'security', {'status': 'error', 'error': type(exc).__name__, 'updated_at': stamp()})
 
 
 def readiness(state, source, max_age=180):

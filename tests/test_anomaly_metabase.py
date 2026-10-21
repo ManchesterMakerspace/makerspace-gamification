@@ -247,12 +247,14 @@ def test_bootstrap_creates_curated_views_and_dashboards_without_native_queries(b
     SetupClient, config = bootstrap_setup
     SetupClient.modern = modern
     result = bootstrap(config)
-    assert len(result["dashboard_ids"]) == 7
-    assert set(result["cards"]) == {"quality", "status", "churn", "revocation", "retention_24m", "attendance", "model_quality"}
+    assert len(result["dashboard_ids"]) == 15
+    assert set(result["cards"]) == {"quality", "status", "churn", "revocation", "retention_24m", "attendance", "model_quality",
+        'security_account_changes', 'security_reset_activity', 'security_reset_completions', 'security_registrations',
+        'security_email_similarity', 'security_bounce_outcomes', 'security_privilege_changes', 'security_monitoring_coverage'}
     assert set(result["cards"]) == set(result["dashboards_by_report"])
     assert bootstrap(config) == result
-    assert len(SetupClient.objects["/api/card"]) == 7
-    assert len(SetupClient.updates) == 7
+    assert len(SetupClient.objects["/api/card"]) == 15
+    assert len(SetupClient.updates) == 15
     assert SetupClient.settings["/api/setting/anomaly-analytics-only"] is True
     assert SetupClient.settings["/api/setting/anomaly-analytics-database-ids"] == [10]
     for card in SetupClient.card_payloads:

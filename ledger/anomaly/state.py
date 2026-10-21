@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from threading import RLock
+from .security_state import SecurityState, DDL as SECURITY_DDL
 
 
 def stamp():
@@ -26,7 +27,12 @@ CREATE SCHEMA IF NOT EXISTS reporting;
 CREATE OR REPLACE VIEW reporting.cohort_metrics AS
  SELECT data->>'report' report, data->>'dimension' dimension, data->>'bucket' bucket,
  (data->>'value')::double precision value, (data->>'sample_size')::integer sample_size,
- data->>'as_of' as_of FROM anomaly_documents WHERE namespace='report_metrics';
+ data->>'as_of' as_of FROM anomaly_documents WHERE namespace='report_metrics'
+ UNION ALL
+ SELECT 'security_' || (data->>'report'), 'security', data->>'cohort',
+ (data->>'value')::double precision, (data->>'sample_size')::integer,
+ data->>'period_end' FROM anomaly_documents WHERE namespace='security_report_metrics'
+ AND (data->>'sample_size')::integer >= 5;
 CREATE OR REPLACE VIEW reporting.findings_summary AS
  WITH counts AS (
  SELECT data->>'collection' collection, data->>'rule' rule, data->>'severity' severity,
@@ -46,7 +52,7 @@ CREATE OR REPLACE VIEW reporting.model_quality AS
 """
 
 
-class State:
+class State(SecurityState):
     def __init__(self, url):
         import psycopg
         from psycopg.rows import dict_row
@@ -58,6 +64,7 @@ class State:
         if type(minimum_cohort) is not int or minimum_cohort < 5:
             raise ValueError("Reporting cohorts require at least five members")
         with self.atomic():
+            self.connection.execute(SECURITY_DDL)
             self.connection.execute(DDL.replace("min(population) >= 5", f"min(population) >= {minimum_cohort}")
                                     .replace("::integer >= 5", f"::integer >= {minimum_cohort}"))
             # Only an existing deployment-provisioned role can receive these privileges.
@@ -147,6 +154,7 @@ class State:
 
     def prune(self, event_days, history_months):
         with self.atomic():
+            self.security_prune(history_months)
             self.connection.execute("DELETE FROM anomaly_events WHERE processed AND created_at < now() - %s * interval '1 day'", (event_days,))
             self.connection.execute("DELETE FROM anomaly_documents WHERE namespace IN ('features','outcomes','transitions') "
                 "AND COALESCE(data->>'as_of', data->>'at')::timestamptz < now() - %s * interval '1 month'", (history_months,))
@@ -165,7 +173,7 @@ class State:
         self.connection.close()
 
 
-class MemoryState:
+class MemoryState(SecurityState):
     """Deterministic transactional test double; never selected by deployment configuration."""
     def __init__(self):
         self.documents, self.events, self.tokens = {}, {}, {}

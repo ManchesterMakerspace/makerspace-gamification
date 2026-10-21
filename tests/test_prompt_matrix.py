@@ -37,7 +37,7 @@ def fake_connection(raw, *, status=200, content_type='text/plain; charset=utf-8'
 
 def test_bundled_matrix_codifies_roles_and_seed_economy():
     matrix = bundled_matrix()
-    assert matrix['version'] == '51'
+    assert matrix['version'] == '52'
     root = ElementTree.fromstring(matrix['text'])
     kudos = root.find('kudos').text
     assert 'activeMember/pending/inactive/nonMember/expired' in kudos
@@ -49,13 +49,13 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'MLAB members role admin' in admin and 'every rank' in admin
     assert '/ledger-admin avatar inspects saved images/metrics' in admin
     assert 'never overrides opt-out or exposes raw DMs' in admin
-    assert 'sender display name replaces the admin real name' in admin
-    assert 'on opt-out remove them' in admin
+    assert 'sender name replaces admin real name' in admin
+    assert 'opt-out removes' in admin
     assert 'Omit /ledger-admin & related help for ineligible callers' in root.find('response').text
     generated_author = root.find("roles/role[@id='ledger_quest_author']").text
     member_author = root.find("roles/role[@id='quest_author']").text
     privacy = root.find('privacy').text
-    assert 'Never announce rank-ups in shared Ledge Chat' in root.find('channels').text
+    assert 'No rank-ups in shared Ledge Chat' in root.find('channels').text
     assert 'quest/discipline prose' in generated_author and 'human publication edits' in generated_author
     assert 'any active participant in good standing may propose/revise' in member_author
     assert 'enabled minimum rank ≤ their rank' in member_author
@@ -98,7 +98,7 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'people need attendance + space/here' in channels
     assert 'Python filters out seed/global quest examples' in channels
     assert 'post a generic ascent in the prior rank channel without hinting at the next' in channels
-    assert 'then remove from the prior & welcome only after invite succeeds' in channels
+    assert 'then remove from the prior & welcome after successful invite' in channels
     assert 'Python supplies stage-limited facts' in channels and 'rejects next-rank names' in channels
     assert 'Dedupe removals' in channels and 'skip bots before queue/kick' in channels
     assert 'log human failure,no retry' in channels
@@ -353,3 +353,13 @@ def test_older_uncomposed_reservations_receive_one_matrix_snapshot(joined):
     saved = store.get('ledger_outbox', job['_id'])
     assert saved['prompt_selection']['matrix']['sha256'] == saved['composed']['matrix_sha256']
     assert saved['composed']['prompt_variation'] == voice
+
+
+def test_security_policy_staff_dm_and_suppressed_reader_scope():
+    root = ElementTree.fromstring(bundled_matrix()['text'])
+    assert 'configured staff DMs only,no channel fallback' in root.find("roles/role[@id='admin']").text
+    assert 'Security review/exact-revision approval: staff DMs' in root.find("roles/role[@id='board_member']").text
+    assert 'aggregate security/data trends' in root.find("roles/role[@id='anomaly_channel_reader']").text
+    assert 'incident evidence' in root.find("roles/role[@id='anomaly_channel_reader']").text
+    assert '7 days/50 shadow windows' in root.find('privacy').text
+    assert 'including complements' in root.find('privacy').text

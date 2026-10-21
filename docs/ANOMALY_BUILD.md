@@ -41,6 +41,26 @@ for the selected checkout when deploying. Compose supplies the literal string
 quotes required by the Metabase build script's Clojure `-X` arguments. Set the
 environment value without quotes; the image tag itself remains an ordinary tag.
 
+The Metabase fork's builder uses Node 22 on Debian Bookworm and copies Java 25
+from the official `eclipse-temurin:25-jdk-jammy` image. It no longer installs Java
+through Adoptium's APT repository or upgrades every Debian package during the
+build. Update the sibling Metabase checkout as well as this repository when
+deploying this Dockerfile fix. The final runtime remains Temurin 25 on Alpine.
+
+If Metabase fails during dependency installation, check the toolchain separately
+before rebuilding the full application (use the same source directory configured
+for Compose):
+
+```sh
+docker build --pull --no-cache --progress=plain --target toolchain ../metabase
+```
+
+This target verifies Java, javac, Node, Clojure CLI, and uv before copying the
+application source or installing frontend dependencies. Keep the first failing
+command and its preceding error lines; APT exit code 100 alone does not identify
+the failing repository or package. After the toolchain succeeds, rerun the normal
+rebuild command above for full compilation and deployment preflight.
+
 `scripts/rebuild.sh` discovers enabled services, refreshes Rails when analytics is
 enabled, builds images, exports the exact built schema, and runs read-only source
 preflight **before stopping any containers**. A running local Postgres also gets a

@@ -69,3 +69,6 @@ the existing game-administration authorization; anomaly permission does not gran
 general prompt publication rights. No external document is edited automatically.
 Missing required roles retain the last valid or bundled policy, and reload does
 not replace already reserved prompts or composed deliveries.
+
+
+Security monitoring adds `/ledger-anomaly security summary` for aggregate readers. `security incidents`, `security incident <ID>`, `security resolve <ID>` and security detector review/propose/approve/disable require a verified staff DM. Automatic security alerts use only `ANOMALY_SECURITY_DM_USER_IDS`, never the anomaly channel. Every attempt rechecks current staff identity and source eligibility, including expired staff. See [security analytics](ANOMALY_SECURITY.md).

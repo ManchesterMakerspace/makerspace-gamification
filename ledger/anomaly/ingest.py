@@ -13,6 +13,8 @@ from pymongo.errors import OperationFailure
 from .privacy import ALLOWED, normalize, identifier, digest, timestamp
 from .schema import validate_document, fingerprint, canonical
 from .state import stamp
+from .security_projection import COLLECTIONS as SECURITY_COLLECTIONS, project as security_project
+from .security_evidence import configure as configure_security, enabled as security_enabled, record as record_security
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ class Ingestor:
         with state.atomic():
             self.secret = state.get("config", "pseudonym_key", {}).get("value") or secrets.token_hex(32)
             state.put("config", "pseudonym_key", {"value": self.secret})
+        configure_security(state, config)
 
     def inspection(self, collection, doc, enforced_required=()):
         schema = self.registry.contracts().get(collection)
@@ -140,7 +143,7 @@ class Ingestor:
 
     def capture(self, collection, doc, operation, token=None, *, document_id=None, historical=False, transition=None,
                 generation=None, removed=None, occurred_at=None, source_order=None, read_started_at=None, reconciled=False,
-                changed_fields=()):
+                changed_fields=(), updated_fields=None, security_removed=()):
         schema = self.registry.contracts().get(collection)
         if schema is None:
             return None
@@ -149,6 +152,9 @@ class Ingestor:
         # Internal IDs allow a source re-read; opaque custom IDs remain BSON encoded.
         key = canonical(encoded(doc_id))
         values = normalize(collection, doc or {}, self.secret)
+        security = (security_project(collection, doc, self.secret, operation=operation,
+                    updates=updated_fields, removed=security_removed)
+                    if security_enabled(self.config) and collection in SECURITY_COLLECTIONS else None)
         entity = identifier(doc_id) or fingerprint(encoded(doc_id))
         old = self.state.get("observations", collection + ":" + entity, {})
         enforced = set(old.get("required_enforced", []))
@@ -168,7 +174,7 @@ class Ingestor:
             targets.add(collection)
         dependencies = {target: self.state.get("source_revisions", target) for target in sorted(targets)}
         signature = fingerprint([collection, key, operation, document_fingerprint, values,
-                                 self.registry.version, schema, sorted(enforced)])
+                                 self.registry.version, schema, sorted(enforced), security])
         observation_key = collection + ":" + entity
         payload = {"document_key": encoded(doc_id), "entity": key, "operation": operation, "values": values,
                    "observed_at": observed_at, "read_started_at": read_started_at or observed_at,
@@ -177,6 +183,8 @@ class Ingestor:
                    "schema_version": self.registry.version, "transition": transition or {}, "removed": removed or [],
                    "missing_document": doc is None and operation != "delete", "occurred_at": occurred_at,
                    "document_fingerprint": document_fingerprint}
+        if security is not None:
+            payload['security'] = security
         if token is None:
             with self.state.atomic():
                 duplicate = self.unchanged_snapshot(observation_key, signature, payload, dependencies)
@@ -218,6 +226,7 @@ class Ingestor:
             if data["operation"] == "snapshot" and snapshot_read.get("event_id") == event["id"]:
                 data = {**data, "read_started_at": snapshot_read["read_started_at"], "observed_at": snapshot_read["observed_at"]}
             if data.get("missing_document"):
+                record_security(self.state, {**event, 'data': data}, entity, self.config, stale=True)
                 self.state.put("reconcile", "all", {"requested_at": stamp()})
                 self.state.processed(event["id"])
                 return True
@@ -233,6 +242,7 @@ class Ingestor:
                 elif prior.get("operation") == "snapshot" and timestamp(data.get("occurred_at")):
                     # An old buffered event is not the current database state.
                     stale |= timestamp(data["occurred_at"]) < timestamp(prior.get("read_started_at") or prior["observed_at"])
+            record_security(self.state, {**event, 'data': data}, entity, self.config, stale=stale)
             if not data["historical"] and data["operation"] != "snapshot":
                 known_before = bool(old) and not stale and not data.get("reconciled")
                 if old and old.get("operation") == "snapshot":
@@ -377,6 +387,8 @@ class Ingestor:
             try:
                 self.state.put("health", "stream:" + collection, {"status": "connecting", "caught_up": False, "updated_at": stamp()})
                 with self.source[collection].watch(**options) as stream:
+                    security_start = stamp()
+                    coverage_key = collection + ':' + security_start
                     started.set()
                     while not self.stop.is_set() and not self.retired(collection):
                         event = stream.try_next()
@@ -395,6 +407,8 @@ class Ingestor:
                             self.capture(collection, event.get("fullDocument"), operation, event["_id"],
                                          document_id=event.get("documentKey", {}).get("_id"), transition=transition, removed=removed,
                                          changed_fields=list(updates) + event.get("updateDescription", {}).get("removedFields", []),
+                                         updated_fields=updates,
+                                         security_removed=event.get("updateDescription", {}).get("removedFields", []),
                                          occurred_at=event["clusterTime"].as_datetime().isoformat() if event.get("clusterTime") else None,
                                          source_order=[event["clusterTime"].time, event["clusterTime"].inc] if event.get("clusterTime") else None)
                         elif stream.resume_token:
@@ -403,6 +417,9 @@ class Ingestor:
                         if self.retired(collection):
                             return
                         self.state.put("health", "stream:" + collection, {"status": "ready", "caught_up": event is None, "updated_at": stamp()})
+                        if event is None and security_enabled(self.config) and collection in SECURITY_COLLECTIONS:
+                            self.state.put('security_coverage', coverage_key, {'collection': collection,
+                                'start': security_start, 'end': stamp()})
             except OperationFailure as exc:
                 if self.retired(collection):
                     return
