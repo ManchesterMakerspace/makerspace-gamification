@@ -334,6 +334,11 @@ def bootstrap(config: Mapping[str, str]):
              ("retention_24m", "Long-term Retention", "cohort_metrics", "bar", "retention_24m"),
              ("attendance", "Attendance", "cohort_metrics", "bar", "attendance"),
              ("model_quality", "Model Quality", "model_quality", "table", None)]
+    for section, title in [('account_changes', 'Account Changes'), ('reset_activity', 'Reset Activity'),
+                           ('reset_completions', 'Reset Completions'), ('registrations', 'Registration Patterns'),
+                           ('email_similarity', 'Email Similarity'), ('bounce_outcomes', 'Bounce Outcomes'),
+                           ('privilege_changes', 'Privilege Changes'), ('monitoring_coverage', 'Security Coverage')]:
+        specs.append(('security_' + section, title, 'cohort_metrics', 'bar', 'security_' + section))
     for identifier, title, table_name, display, report in specs:
         table = tables[table_name]
         fields = {f["name"]: f["id"] for f in table.get("fields", [])}

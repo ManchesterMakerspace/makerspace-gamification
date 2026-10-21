@@ -11,6 +11,7 @@ from .detectors import DetectorRegistry, GUARDRAILS, SPEC_KEYS
 from .privacy import timestamp
 from .schema import fingerprint
 from .state import stamp
+from .slack import SECURITY_INTENT
 from ..domain import Denied
 from ..prompt_library import library_template, variables_for, render
 from ..prompt_matrix import PromptMatrix
@@ -25,6 +26,10 @@ def request_kind(text):
     """Intent only; raw Slack text never enters inference or a SQL/Mongo interface."""
     text = text.strip()
     words = text.split()
+    if words and words[0].lower() == 'security':
+        return 'security', words[1:]
+    if SECURITY_INTENT.search(text):
+        return 'security', []
     if words and words[0] in {"status", "detectors", "schema"}:
         return words[0], words[1:]
     if re.search(r"revok|revocation", text, re.I): return "revocation", []
@@ -96,6 +101,9 @@ class Reports:
         capability = self.access.authorize(p["user_id"], p["channel"])
         kind, args = request_kind(p["text"])
         staff = capability == "staff_detail"
+        if kind == 'security':
+            from .security_reports import build
+            return build(self, job, args, capability)
         if kind in {"detectors", "schema"}:
             if not staff or not self.access.staff(p["user_id"]):
                 raise Denied("Detector and schema review require a verified staff DM.")
@@ -238,7 +246,7 @@ class Reports:
                 result = self.build(job)
             except ValueError as exc:
                 # Only our bounded validation messages are allowed, never provider exception bodies.
-                result = {"text": "The analytics request needs more evidence or a supported command. Use /ledger-anomaly status, detectors list, or schema review.", "charts": [], "capability": capability}
+                result = {"text": "The analytics request needs more evidence or a supported command. Use /ledger-anomaly status, security summary, security detectors list, detectors list, or schema review.", "charts": [], "capability": capability}
             self.state.put("query_results", job["_id"], result)
         if result["capability"] != capability:
             raise Denied("Analytics audience changed while queued.")

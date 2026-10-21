@@ -17,7 +17,13 @@ ANOMALY_KINDS = ["anomaly_query"]
 _USER = re.compile(r"[UW][A-Z0-9]+")
 _CHANNEL = re.compile(r"[CG][A-Z0-9]+")
 _DM = re.compile(r"D[A-Z0-9]+")
+SECURITY_INTENT = re.compile(
+    r"\b(?:security|sign[- ]?ups?|registrations?|bounc\w*|privilege\w*|MFA)\b|"
+    r"\b(?:password|profile|reset)\b.{0,45}\b(?:changes?|edits?|requests?|attempts?|bursts?|rates?|activity|resets?)\b|"
+    r"\bsimilar\w*\b.{0,30}\bemails?\b|\bemails?\b.{0,30}\bsimilar\w*\b|"
+    r"\b(?:promot\w*|elevat\w*|grant\w*)\b.{0,40}\b(?:admin|board|resource.manager)\b", re.I)
 _ANALYTICS = re.compile(
+    SECURITY_INTENT.pattern + r"|"
     r"\b(?:anomal(?:y|ies|ous)|non[- ]?conform\w*|schema|baseline|drift|churn|"
     r"retention|revocations?|drop(?:ping)?[- ]?outs?)\b|"
     r"\b(?:subscri\w*|membership|members?)\b.{0,65}\b(?:cancel\w*|renew\w*|"
@@ -31,7 +37,7 @@ _ANALYTICS = re.compile(
     r"\b(?:check[- ]?ins?|visits?|billing|payments?)\b",
     re.I,
 )
-_QUESTION = re.compile(r"\?|^\s*(?:<@[A-Z0-9]+>\s*)?(?:show|list|explain|analy[sz]e|compare|summari[sz]e|report|what|which|how|why|when|who|is|are|can|do|does)\b", re.I)
+_QUESTION = re.compile(r"\?|^\s*(?:<@[A-Z0-9]+>\s*)?(?:show|list|explain|analy[sz]e|compare|summari[sz]e|report|what|which|how|why|when|who|is|are|can|do|does|did|has|have)\b", re.I)
 
 
 def anomaly_enabled():

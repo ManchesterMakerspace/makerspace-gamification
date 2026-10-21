@@ -235,3 +235,6 @@ Build tests use local Git fixtures and mocked Docker. Run native Metabase
 API/render tests in that fork's backend environment. Docker builds, private Git
 authentication, database restore, native PNG output, GB10 and live integrations
 remain deployment checks separate from Python/static validation.
+
+
+Security analytics adds a separate privacy-safe event projection, indexed PostgreSQL history, 15-second exact-rule evaluation, staff-only DM alerts and suppressed aggregate reports. See [security monitoring and rollout](ANOMALY_SECURITY.md). Membership analytics retains its existing schedule and models.

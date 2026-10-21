@@ -101,3 +101,6 @@ python -m pytest tests/test_anomaly_metabase.py
 The Metabase fork adds `metabase.metabot.api.analytics-test` for route authentication, ownership-before-state checks, current query permissions, fail-closed database selection, render bounds and the forced read-only tool profile. Run it using the fork's normal backend test environment before deployment. Local static syntax checks do not replace compiling or executing those native tests.
 
 Deployment verification must cover the built image, native Metabot with the configured vLLM model, PostgreSQL reader grants, MongoDB read-only connection, reporting sync, real PNG output and Slack upload. An absent or unsupported chart must leave a useful text response without claiming that an attachment was sent. Revoke chat/chart permissions during testing to confirm access loss fails closed.
+
+
+Security bootstrap adds eight aggregate dashboards through the existing `reporting.cohort_metrics` view. Python applies minimum-cohort and complementary suppression; SQL also rejects rows below the configured cohort floor. Security event, rollup, incident and delivery tables are private and receive no reporting grants. Rerun bootstrap after deployment; existing cards are reused. See [security analytics](ANOMALY_SECURITY.md).
