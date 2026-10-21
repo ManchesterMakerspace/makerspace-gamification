@@ -97,6 +97,21 @@ class SlackUI:
     def command(self, body, client):
         raw_actor = body.get("user_id") or body.get("user")
         raw_actor = raw_actor.get("id") if isinstance(raw_actor, dict) else raw_actor
+        if body.get("command") == "/ledger-anomaly":
+            from .anomaly.slack import AnomalyAccess, anomaly_enabled, queue_anomaly_request
+            if not anomaly_enabled():
+                raise Denied("Anomaly analytics is disabled for this deployment.")
+            destination = body.get("channel_id", "")
+            access = AnomalyAccess(self.ledger, client)
+            if not destination.startswith("D"):
+                try:
+                    in_anomaly_channel = destination == access.channel_id()
+                except Denied:
+                    in_anomaly_channel = False
+                if not in_anomaly_channel:
+                    destination = client.conversations_open(users=raw_actor)["channel"]["id"]
+            return queue_anomaly_request(self.ledger, client, raw_actor, destination,
+                body.get("text", "").strip() or "status", "slash:" + body["trigger_id"])
         if is_ineligible_slack_id(raw_actor) and body.get("command") != "/kudos":
             return
         actor = self.actor(body)
@@ -702,7 +717,7 @@ def build_app(ui, token, signing_secret, team_id, bot_id, client=None):
             return BoltResponse(status=403, body="Workspace not allowed")
         return next()
 
-    @app.command(re.compile(r"^/(?:ledger(?:-skills|-quests|-mentor|-project|-admin)?|kudos)$"))
+    @app.command(re.compile(r"^/(?:ledger(?:-skills|-quests|-mentor|-project|-admin|-anomaly)?|kudos)$"))
     def commands(ack, body, client):
         try:
             ui.command(body, client)

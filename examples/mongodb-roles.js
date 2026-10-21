@@ -62,7 +62,7 @@ var LedgerMongoRoles = (() => {
   }
 
   function toAtlas(role) {
-    const actionNames = { find: "FIND", insert: "INSERT", update: "UPDATE", remove: "REMOVE", createIndex: "CREATE_INDEX" };
+    const actionNames = { find: "FIND", changeStream: "CHANGE_STREAM", insert: "INSERT", update: "UPDATE", remove: "REMOVE", createIndex: "CREATE_INDEX" };
     const actions = new Map();
     for (const privilege of role.privileges) {
       for (const name of privilege.actions) {
@@ -78,16 +78,39 @@ var LedgerMongoRoles = (() => {
     };
   }
 
-  return { buildRoles, toAtlas };
+  // Separate from the normal source role: no source writes, wildcard resource,
+  // database-wide stream, or role-management privilege. Never auto-provision it.
+  function buildAnomalyRole(manifest, sourceDatabase = "makerauth") {
+    if (typeof sourceDatabase !== "string" || !sourceDatabase.trim() || /[\x00*]/.test(sourceDatabase)) {
+      throw new Error("Supply an explicit source database name.");
+    }
+    if (!manifest || manifest.format_version !== 1 || !manifest.collections ||
+        typeof manifest.collections !== "object" || Array.isArray(manifest.collections)) {
+      throw new Error("Supply a version-1 extracted schema manifest.");
+    }
+    const names = Object.keys(manifest.collections).sort();
+    if (!names.length || names.some(name => !/^[a-z][a-z0-9_]*$/.test(name) || name.startsWith("ledger_"))) {
+      throw new Error("Source manifest requires explicit, non-Ledger collection names.");
+    }
+    return { role: "ledger_anomaly_source_reader", roles: [], privileges: names.map(collection => ({
+      resource: { db: sourceDatabase, collection }, actions: ["find", "changeStream"],
+    })) };
+  }
+
+  return { buildRoles, buildAnomalyRole, toAtlas };
 })();
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = LedgerMongoRoles;
   if (typeof require !== "undefined" && require.main === module) {
-    const [format = "atlas", kind = "gamification", sourceDb = "makerauth", ledgerDb = "makerauth"] = process.argv.slice(2);
+    const [format = "atlas", kind = "gamification", sourceDb = "makerauth", ledgerDb = "makerauth", manifestPath] = process.argv.slice(2);
     const roles = LedgerMongoRoles.buildRoles(sourceDb, ledgerDb);
+    if (kind === "anomaly") {
+      if (!manifestPath) throw new Error("Anomaly role requires a fifth argument: schema manifest path.");
+      roles.anomaly = LedgerMongoRoles.buildAnomalyRole(JSON.parse(require("node:fs").readFileSync(manifestPath, "utf8")), sourceDb);
+    }
     if (!["atlas", "mongosh"].includes(format) || !Object.hasOwn(roles, kind)) {
-      throw new Error("Usage: node examples/mongodb-roles.js atlas|mongosh source|ledger|gamification [sourceDb] [ledgerDb]");
+      throw new Error("Usage: node examples/mongodb-roles.js atlas|mongosh source|ledger|gamification|anomaly [sourceDb] [ledgerDb] [manifest.json]");
     }
     console.log(JSON.stringify(format === "atlas" ? LedgerMongoRoles.toAtlas(roles[kind]) : roles[kind], null, 2));
   }

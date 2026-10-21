@@ -37,7 +37,7 @@ def fake_connection(raw, *, status=200, content_type='text/plain; charset=utf-8'
 
 def test_bundled_matrix_codifies_roles_and_seed_economy():
     matrix = bundled_matrix()
-    assert matrix['version'] == '49'
+    assert matrix['version'] == '51'
     root = ElementTree.fromstring(matrix['text'])
     kudos = root.find('kudos').text
     assert 'activeMember/pending/inactive/nonMember/expired' in kudos
@@ -80,8 +80,8 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'legacy done jobs without receipts' in consent and 'confirmed same-generation receipts' in consent
     normalized_bytes = len(matrix['text'].encode('utf-8'))
     crlf_bytes = len(matrix['text'].replace('\n', '\r\n').encode('utf-8'))
-    assert normalized_bytes <= 30 * 1024
-    assert crlf_bytes <= 30 * 1024
+    assert normalized_bytes <= MAX_MATRIX_BYTES - 512
+    assert crlf_bytes <= MAX_MATRIX_BYTES - 512
     assert crlf_bytes <= MAX_MATRIX_BYTES
     assert {r.get('id') for r in root.find('roles')} == REQUIRED_ROLES
     assert 'Repeated join requests show saved participation' in root.find('consent').text
@@ -157,7 +157,7 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert {'admin', 'board_member', 'resource_manager'} <= found <= REQUIRED_ROLES
 
 
-@pytest.mark.parametrize('role', ['quest_author', 'ledger_quest_author', 'ai_observer', 'delegated_reviewer'])
+@pytest.mark.parametrize('role', ['quest_author', 'ledger_quest_author', 'ai_observer', 'delegated_reviewer', 'anomaly_channel_reader'])
 def test_missing_new_required_remote_role_retains_current_policy(role):
     import re
     matrix = PromptMatrix(DOC)
@@ -166,6 +166,21 @@ def test_missing_new_required_remote_role_retains_current_policy(role):
     with patch('ledger.prompt_matrix.fetch_google_doc', return_value=incomplete):
         assert matrix.refresh('missing-role')['outcome'] == 'bundled_fallback'
     assert matrix.snapshot() == before
+
+
+def test_anomaly_policy_separates_reader_access_staff_authority_and_game_consent():
+    root = ElementTree.fromstring(bundled_matrix()['text'])
+    reader = root.find("roles/role[@id='anomaly_channel_reader']").text
+    assert 'source linkage/game opt-in unnecessary' in reader
+    assert 'No member-level details' in reader and 'unknown authorization denies' in reader
+    assert 'current source role+human identity,not game opt-in' in root.find("roles/role[@id='admin']").text
+    assert 'Expired allowed' in root.find("roles/role[@id='admin']").text
+    assert 'suspended/revoked/merged/unknown denied' in root.find("roles/role[@id='admin']").text
+    assert 'Anomaly staff rights match admin,independent of game opt-in' in root.find("roles/role[@id='board_member']").text
+    assert 'expired allowed' in root.find("roles/role[@id='board_member']").text
+    assert 'Anomaly-channel replies/alerts are aggregate-only' in root.find('channels').text
+    assert 'Small cohorts are suppressed in Python' in root.find('privacy').text
+    assert 'no AI schema/data/access changes' in root.find('privacy').text
 
 
 @pytest.mark.parametrize('transform', [

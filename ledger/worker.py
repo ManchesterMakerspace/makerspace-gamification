@@ -36,6 +36,9 @@ class Worker:
         self.composer, self.slack, self.mqtt, self.bot_id = composer, slack, mqtt, bot_id
 
     def step(self, collection, kinds=None, exclude=None):
+        if collection == "ledger_outbox":
+            from .anomaly.slack import ANOMALY_KINDS
+            exclude = list(dict.fromkeys((exclude or []) + ANOMALY_KINDS))
         job = self.store.claim(collection, kinds=kinds, exclude=exclude)
         if not job:
             return False
@@ -680,6 +683,9 @@ class Worker:
     def event(self, event, key, attempts=1):
         kind = event.get("type")
         if kind in ("message", "app_mention"):
+            from .anomaly.slack import route_anomaly_event
+            if event.get("user") != self.bot_id and route_anomaly_event(self.ledger, self.slack, event):
+                return "anomaly_query_queued"
             from .ineligible import is_ineligible_slack_id
             if is_ineligible_slack_id(event.get("user")):
                 return "ignored_ineligible_identity"

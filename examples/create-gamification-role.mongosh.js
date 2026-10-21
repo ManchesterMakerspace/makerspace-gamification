@@ -20,3 +20,7 @@ db.createRole(roles.ledger); // LEDGER_URI user: named Ledger collections only.
 // db.createRole(roles.gamification); // Includes the optional ticket-note grants.
 // A role is not a user; assign it when provisioning the corresponding DB user.
 // No user/role administration permissions are granted to the application roles.
+// Optional anomaly role is generated from the exact rebuilt schema manifest:
+// const schema = JSON.parse(cat("build/anomaly/manifest.json"));
+// db.createRole(LedgerMongoRoles.buildAnomalyRole(schema, makerspaceDatabase));
+// Review and apply its replacement privileges when new source collections appear.

@@ -4,6 +4,8 @@ An opt-in Slack world system for makerspace members. The journey is **learn → 
 
 The implementation is a Python Slack Bolt application with durable Mongo inbox/outbox workers, a vLLM Chat Completions composer, and MQTT reconciliation. Rails and React collections remain read-only. No game rank grants tool access or administrative authority.
 
+The optional [anomaly analytics stack](docs/ANOMALY_ANALYTICS.md) adds schema monitoring, persistent baselines, outcome research, authorized Slack analytics, and separate curated/raw Metabase instances. It can run on another host and refreshes Rails schema contracts before each rebuild.
+
 ## Run locally
 
 Personalized participant avatars use an optional sequential Qwen-Image-2.1
@@ -37,11 +39,11 @@ For deployment, populate `.env` with database/Slack/MQTT credentials, a shared v
 
 After updating the deployment checkout, run `bash scripts/rebuild.sh` on the Linux deployment host to rebuild images and recreate all services while preserving named volumes and external data. See [rebuild behavior and verification](docs/DEPLOYMENT.md#rebuild-after-a-repository-update).
 
-The importable [Slack manifest JSON](slack-manifest.json) includes all seven commands, seven event subscriptions, App Home, modal interactions, and required bot scopes. Replace every `LEDGER_HOST` with the tunnel's public hostname. See the [Slack setup and permission mapping](docs/SLACK.md); check that `/kudos` is available before installation.
+The importable [Slack manifest JSON](slack-manifest.json) includes all eight commands, seven event subscriptions, App Home, modal interactions, and required bot scopes. Replace every `LEDGER_HOST` with the tunnel's public hostname. See the [Slack setup and permission mapping](docs/SLACK.md); check that `/kudos` is available before installation.
 
 The bot's leatherbound grimoire icon is included at [512 × 512](icons/ledger-bot-512.png) for Slack upload and [36 × 36](icons/ledger-bot-36.png) for mobile rendering. See [icon assets and installation](icons/README.md) for the source illustration and generation prompt.
 
-The Ledger narration uses [23 message-type JSON files](ledger/prompts), with three paired variations per type and two additional System variations in five completion types. The bot avoids the last two voices before selecting randomly, using shared history for channel posts and separate history per DM recipient. It substitutes verified member/event details, and delivery retries reuse the composed text. See the [rank-up example](ledger/prompts/rank_up.json) and [prompt authoring guide](docs/PROMPTS.md) for variables, audience settings, and admin preview/publication.
+The Ledger narration uses [versioned message-type JSON files](ledger/prompts), with three paired variations per type and two additional System variations in five completion types. The bot avoids the last two voices before selecting randomly, using shared history for channel posts and separate history per DM recipient. It substitutes verified member/event details, and delivery retries reuse the composed text. See the [rank-up example](ledger/prompts/rank_up.json) and [prompt authoring guide](docs/PROMPTS.md) for variables, audience settings, and admin preview/publication.
 
 The shared [Prompt Matrix Template](ledger/prompts/prompt_matrix.xml.md) codifies roles, game rules, personality, and channel/DM conduct in hybrid XML/Markdown. Set `LEDGER_PROMPT_MATRIX_DOC_URL` to optionally load it from a Google Doc on worker startup; `/ledger-admin reload-prompts` requests a fresh copy. Failed refreshes retain valid policy, and existing deliveries retain their snapshots. See [matrix design, authentication, reload, and validation](docs/PROMPT_MATRIX.md).
 
@@ -136,6 +138,7 @@ See [administration](docs/ADMINISTRATION.md) for seven-slot editing, templates, 
 ## Verification
 
 ```powershell
+python -m pip install -e '.[test,anomaly]'
 python -m pytest
 # Optional real transaction/concurrency test, using a disposable replica set:
 $env:LEDGER_TEST_MONGO_URI = 'mongodb://localhost:27017/?replicaSet=rs0'

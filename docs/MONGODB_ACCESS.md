@@ -1,5 +1,13 @@
 # Separate Mongo connections and restricted roles
 
+The optional anomaly service uses a separate, manifest-derived
+`ledger_anomaly_source_reader` role with exact per-collection `find` and
+`changeStream` actions, never source writes. It does not alter the normal Ledger
+source-reader role. Every analytics rebuild refreshes its Rails source contracts
+and emits a new role payload for review when collection coverage changes. Follow
+[the anomaly build guide](ANOMALY_BUILD.md#source-privileges) for generation,
+preflight, and provisioning. The application does not administer database roles.
+
 Participant avatars add the owned `ledger_avatars` collection with
 `find`, `insert`, `update`, and `createIndex` privileges. Both role examples and
 their collection/index inventory tests cover it. Requests, current image pairs,

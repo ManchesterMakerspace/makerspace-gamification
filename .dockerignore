@@ -6,4 +6,7 @@ __pycache__
 .pytest*
 pytest-temp*
 .test-basetemp*
+build/anomaly/rails.git
+build/anomaly/rails.previous
+build/anomaly/snapshot.*
 tests

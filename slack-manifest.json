@@ -61,6 +61,13 @@
         "description": "Authorized account actions",
         "url": "https://LEDGER_HOST/slack/commands",
         "should_escape": true
+      },
+      {
+        "command": "/ledger-anomaly",
+        "description": "Ask about data trends or manage anomaly monitoring",
+        "usage_hint": "ask <question> | status | detectors | schema",
+        "url": "https://LEDGER_HOST/slack/commands",
+        "should_escape": true
       }
     ]
   },

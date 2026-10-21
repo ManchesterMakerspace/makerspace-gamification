@@ -32,6 +32,7 @@ def rebuild(tmp_path):
         return 0
     fi
     if [[ "$1" == "$DOCKER_TEST_FAIL" ]]; then return 19; fi
+    if [[ "$1" == config && "${2:-}" == --services ]]; then printf 'ledger-web\\n'; fi
     return 0
 }
 ''', encoding='utf-8', newline='\n')
@@ -57,7 +58,7 @@ def rebuild(tmp_path):
 def test_rebuild_recreates_full_stack_after_images_and_checks_readiness(rebuild):
     result, calls = rebuild('--wait-timeout', '2400')
     assert result.returncode == 0, result.stderr
-    lifecycle = [call for call in calls if '--help' not in call and call[0] != 'version']
+    lifecycle = [call for call in calls if '--help' not in call and call[0] != 'version' and call != ['config', '--services']]
     assert lifecycle[:4] == [['config', '--quiet'], ['build', '--pull', '--no-cache'],
                             ['pull', '--ignore-buildable'], ['down', '--remove-orphans', '--timeout', '60']]
     assert lifecycle[4] == ['up', '--detach', '--force-recreate', '--remove-orphans', '--no-build',
