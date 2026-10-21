@@ -38,6 +38,22 @@ docker compose -f compose.anomaly.yaml run --rm \
 
 The keys are read from the operator environment; no secret value belongs in the command. Bootstrap creates the reporting connection, requests a schema sync if necessary, and asks for a rerun after that sync. Reruns reuse exact owned names and leave existing cards and populated dashboards intact. Duplicate names or a changed reporting connection fail instead of selecting a target silently. Configuration changes to an existing source require explicit administrative correction.
 
+Reporting validation compares engine, host, port, database, user, TLS and the exact
+`reporting` inclusion filters. Unconfigured connection overrides, such as JDBC
+options or SSH tunnels, fail validation. Numeric and string ports compare equally;
+the masked reporting password is not compared. Metabase may enable TLS during
+connection creation even when configured false; if validation detects this, set
+`ANOMALY_REPORTING_DB_SSL=true` to match the intended connection and rerun.
+
+The raw source must use Mongo URI mode with the resolved `MLAB_URI`/`MLAB_DATABASE`
+and no separate database-name or tunnel override. A visible URI mismatch fails.
+The native API masks the entire URI, including its target and credentials, so a
+masked value cannot establish a match. On explicit bootstrap reruns, the configured
+URI is reapplied to that database ID through the authenticated update API before
+accepting it. An update failure aborts bootstrap. This preserves the configured
+source credentials without exposing them in results or errors; actual read-only
+grants still require deployment verification.
+
 It seeds these cards and dashboards from `reporting` only:
 
 | Report identifier | Dashboard | Source |

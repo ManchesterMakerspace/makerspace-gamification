@@ -203,6 +203,75 @@ def _items(value):
     return value.get("data", []) if isinstance(value, dict) else value
 
 
+def _connection_matches(database, engine, expected):
+    """Compare effective setup details without trusting redacted credentials.
+
+    Extra JDBC properties can override even explicitly supplied TLS/host values.
+    Only known inert UI options and disabled connection options may be added.
+    """
+    actual = database.get("details")
+    if database.get("engine") != engine or not isinstance(actual, Mapping):
+        return False
+    if any(database.get(key) for key in ("write_data_details", "admin_details")):
+        return False
+    actual = dict(actual)
+    if engine == "postgres":
+        port = actual.get("port")
+        if isinstance(port, str) and port.isascii() and port.isdecimal():
+            actual["port"] = int(port)
+        # Metabase never returns the stored reporting password.
+        actual.pop("password", None)
+        expected = {key: value for key, value in expected.items() if key != "password"}
+    if any(type(actual.get(key)) is not type(value) or actual.get(key) != value
+           for key, value in expected.items()):
+        return False
+    defaults = {"tunnel-enabled": False}
+    inert_booleans = {"advanced-options", "json-unfolding", "let-user-control-scheduling", "auto_run_queries", "refingerprint"}
+    if engine == "postgres":
+        defaults.update({"ssl-mode": "require", "ssl-use-client-auth": False,
+                         "use-auth-provider": False, "additional-options": ""})
+    else:
+        # Mongo selects a separate dbname before the URI's database, if nonempty.
+        defaults["dbname"] = ""
+        inert_booleans.add("ssl")  # Ignored by the Mongo driver in URI mode.
+    for key in actual.keys() - expected.keys():
+        value = actual[key]
+        if key in inert_booleans and (value is None or type(value) is bool):
+            continue
+        if key in defaults and (value is None or (type(value) is type(defaults[key]) and value == defaults[key])):
+            continue
+        return False
+    return True
+
+
+def _ensure_raw_source(client, uri):
+    name = "Makerspace Source (read only)"
+    matches = [row for row in _items(client._json("GET", "/api/database")) if row.get("name") == name]
+    if len(matches) > 1:
+        raise MetabaseError(f"Duplicate bootstrap objects named {name}")
+    details = {"use-conn-uri": True, "conn-uri": uri}
+    body = {"engine": "mongo", "details": details, "is_full_sync": False}
+    masked = "**MetabasePass**"  # Native API secret/protected-password marker.
+    if matches:
+        database = matches[0]
+        masked_details = {**details, "conn-uri": masked}
+        if _connection_matches(database, "mongo", masked_details):
+            # A mask proves nothing about the old target or credentials. Explicit
+            # bootstrap reestablishes the configured URI; PUT failures abort setup.
+            database = client._json("PUT", f"/api/database/{database['id']}", json=body)
+        elif not _connection_matches(database, "mongo", details):
+            raise MetabaseError("Existing raw source does not match the configured read-only connection")
+        else:
+            return database
+    else:
+        database = client._json("POST", "/api/database", json={"name": name, **body})
+    # A redacted response is safe only after our own successful connection write.
+    if not (_connection_matches(database, "mongo", details) or
+            _connection_matches(database, "mongo", {**details, "conn-uri": masked})):
+        raise MetabaseError("Existing raw source does not match the configured read-only connection")
+    return database
+
+
 def _notebook_query(query):
     """Cards accept legacy MBQL on creation but this fork returns MBQL 5."""
     if not isinstance(query, dict):
@@ -242,8 +311,7 @@ def bootstrap(config: Mapping[str, str]):
                "schema-filters-type": "inclusion", "schema-filters-patterns": "reporting"}
     database = ensure(curated, "/api/database", "Ledger Anomaly Reporting",
                       {"engine": "postgres", "details": details, "is_full_sync": True})
-    if database.get("engine") != "postgres" or any(
-            database.get("details", {}).get(field) != details[field] for field in ("host", "dbname", "user")):
+    if not _connection_matches(database, "postgres", details):
         raise MetabaseError("Existing reporting source does not match the configured read-only connection")
     db_id = database["id"]
     curated._json("PUT", "/api/setting/anomaly-analytics-database-ids", json={"value": [db_id]})
@@ -300,10 +368,7 @@ def bootstrap(config: Mapping[str, str]):
     if config.get("ANOMALY_METABASE_RAW_URL"):
         raw_key = config["ANOMALY_METABASE_RAW_API_KEY"]
         raw = MetabaseClient(config["ANOMALY_METABASE_RAW_URL"], raw_key, raw_key)
-        raw_db = ensure(raw, "/api/database", "Makerspace Source (read only)",
-                        {"engine": "mongo", "details": {"use-conn-uri": True,
-                         "conn-uri": resolved_mongo_uri(config["MLAB_URI"], config.get("MLAB_DATABASE"))},
-                         "is_full_sync": False})
+        raw_db = _ensure_raw_source(raw, resolved_mongo_uri(config["MLAB_URI"], config.get("MLAB_DATABASE")))
         raw_id = raw_db["id"]
     return {"reporting_database_id": db_id, "collection_id": collection["id"],
             "dashboard_ids": dashboards, "cards": cards,

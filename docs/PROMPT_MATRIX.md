@@ -1,11 +1,11 @@
 # Prompt Matrix Template: design and operation
 
-Version 50 adds anomaly analytics access independent of game participation,
-aggregate-only channel readers, current-source admin/board authority, and inert
-detector proposals. The matrix preserves its 32-KiB validation limit with at
+Version 51 clarifies that expired admins and board members retain anomaly staff
+access independently of game participation. Suspended, revoked, merged, and unknown
+memberships remain excluded from staff authority. The matrix preserves its 32-KiB validation limit with at
 least 512 bytes of CRLF headroom. The `anomaly_explain` and `anomaly_propose`
 JSON prompt sets remain separate. A Google Doc override needs the complete
-version-50 content and explicit reload; reserved jobs retain their saved policy.
+version-51 content and explicit reload; reserved jobs retain their saved policy.
 See [anomaly Slack access](ANOMALY_SLACK.md).
 
 The [canonical matrix](../ledger/prompts/prompt_matrix.xml.md) is the shared behavioral policy for The Ledger, served through vLLM with `nvidia/Qwen3.8-27B-NVFP4`. It combines XML section/role identifiers with readable Markdown headings, tables, and examples inside CDATA. The packaged [JSON message types](PROMPTS.md) remain the source of audience-specific tasks and rotating voices; their inventory may grow independently of the matrix.

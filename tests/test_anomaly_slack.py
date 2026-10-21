@@ -25,12 +25,16 @@ def anomaly_env(env, monkeypatch):
 
 
 @pytest.mark.parametrize('user', ['U10', 'U11'])
-def test_staff_detail_uses_current_source_role_without_game_consent(anomaly_env, monkeypatch, user):
+@pytest.mark.parametrize('status', ['activeMember', 'expired'])
+def test_staff_detail_uses_current_source_role_without_game_consent(anomaly_env, monkeypatch, user, status):
     ledger, store, source, _, _, slack = anomaly_env
+    source.data['members'][int(user[1:]) - 1]['status'] = status
     monkeypatch.setenv('SLACKIDS_INELIGIBLE', '["U10", "U11"]')
     access = AnomalyAccess(ledger, slack)
     assert access.staff(user)
+    slack.conversations_members.return_value = {'members': [], 'response_metadata': {}}
     assert access.authorize(user, 'D' + user) == 'staff_detail'
+    slack.conversations_members.return_value = {'members': [user], 'response_metadata': {}}
     assert not store.select('ledger_participants')
     # Source permission changes revoke staff detail even in a reused instance.
     source.data['members'][int(user[1:]) - 1]['role'] = 'member'
@@ -72,7 +76,7 @@ def test_inactive_bot_and_unknown_human_identity_fail_closed(anomaly_env, change
         AnomalyAccess(ledger, slack).authorize('U1', 'CAUDIT')
 
 
-@pytest.mark.parametrize('status', ['suspended', 'revoked', None])
+@pytest.mark.parametrize('status', ['suspended', 'revoked', 'unknown', None])
 def test_invalid_source_membership_cannot_grant_staff_detail(anomaly_env, status):
     ledger, _, source, _, _, slack = anomaly_env
     source.data['members'][9]['status'] = status

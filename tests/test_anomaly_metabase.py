@@ -1,5 +1,6 @@
 """Native Metabot transport, ownership and bounded chart delivery contracts."""
 import json
+from copy import deepcopy
 
 import pytest
 import requests
@@ -164,8 +165,8 @@ def test_mongo_database_override_preserves_authsource_and_escaped_password():
         resolved_mongo_uri("https://elsewhere.example/data")
 
 
-@pytest.mark.parametrize("modern", [False, True])
-def test_bootstrap_creates_curated_views_and_dashboards_without_native_queries(monkeypatch, modern):
+@pytest.fixture
+def bootstrap_setup(monkeypatch):
     from ledger.anomaly import metabase
     names = {"cohort_metrics": ["report", "dimension", "bucket", "value", "sample_size", "as_of"],
              "findings_summary": ["collection", "rule", "severity", "count", "first_seen", "last_seen"],
@@ -177,14 +178,36 @@ def test_bootstrap_creates_curated_views_and_dashboards_without_native_queries(m
 
     class SetupClient:
         objects = {"/api/database": [], "/api/collection": [], "/api/card": [], "/api/dashboard": []}
+        raw_objects = {"/api/database": []}
         settings = {}
         updates = []
         card_payloads = []
+        calls = []
+        modern = False
+        mask_uri = False
+        fail_raw_update = False
 
-        def __init__(self, *_):
-            pass
+        def __init__(self, base_url, *_):
+            self.raw = base_url == "https://raw.example"
+            if self.raw:
+                self.objects = self.raw_objects
 
         def _json(self, method, path, *, json=None, **_):
+            self.calls.append((self.raw, method, path, deepcopy(json)))
+            value = deepcopy(self.response(method, path, json=json))
+            if self.raw and self.mask_uri:
+                for row in value if isinstance(value, list) else [value]:
+                    if isinstance(row, dict) and row.get("details", {}).get("conn-uri"):
+                        row["details"]["conn-uri"] = "**MetabasePass**"
+            return value
+
+        def response(self, method, path, *, json=None):
+            if self.raw and method == "PUT" and path.startswith("/api/database/"):
+                if self.fail_raw_update:
+                    raise MetabaseError("Metabase request failed (HTTP 400)")
+                database = next(row for row in self.objects["/api/database"] if path.endswith('/' + str(row['id'])))
+                database["details"].update(json["details"])
+                return database
             if path.endswith("/metadata"):
                 return {"tables": tables}
             if path.startswith("/api/setting/"):
@@ -199,7 +222,7 @@ def test_bootstrap_creates_curated_views_and_dashboards_without_native_queries(m
                 if path == "/api/card":
                     self.card_payloads.append(json)
                 value = {"id": 10 + len(self.objects[path]), **json}
-                if path == "/api/card" and modern:
+                if path == "/api/card" and self.modern:
                     query = value["dataset_query"]
                     value["dataset_query"] = {"lib/type": "mbql/query", "database": query["database"],
                                               "stages": [{"lib/type": "mbql.stage/mbql", **query["query"]}]}
@@ -216,6 +239,13 @@ def test_bootstrap_creates_curated_views_and_dashboards_without_native_queries(m
     config = {"ANOMALY_METABASE_URL": "https://curated.example", "ANOMALY_METABASE_BOOTSTRAP_API_KEY": "setup",
               "ANOMALY_REPORTING_DB_HOST": "postgres", "ANOMALY_REPORTING_DB_USER": "reader",
               "ANOMALY_REPORTING_DB_PASSWORD": "secret"}
+    return SetupClient, config
+
+
+@pytest.mark.parametrize("modern", [False, True])
+def test_bootstrap_creates_curated_views_and_dashboards_without_native_queries(bootstrap_setup, modern):
+    SetupClient, config = bootstrap_setup
+    SetupClient.modern = modern
     result = bootstrap(config)
     assert len(result["dashboard_ids"]) == 7
     assert set(result["cards"]) == {"quality", "status", "churn", "revocation", "retention_24m", "attendance", "model_quality"}
@@ -230,6 +260,99 @@ def test_bootstrap_creates_curated_views_and_dashboards_without_native_queries(m
         assert card["dataset_query"]["database"] == 10
         assert card["dataset_query"]["query"]["source-table"] in {1, 2, 3, 4}
     assert "secret" not in str(result)
+
+
+@pytest.mark.parametrize("changed", [
+    {"host": "other"}, {"dbname": "other"}, {"user": "writer"}, {"port": 6432},
+    {"ssl": True}, {"schema-filters-type": "exclusion"}, {"schema-filters-patterns": "public"},
+    {"ssl-mode": "prefer"}, {"additional-options": "sslmode=disable"},
+    {"sslmode": "disable"}, {"tunnel-enabled": True}, {"tunnel-enabled": 0},
+])
+def test_bootstrap_rejects_reporting_connection_drift_before_writes(bootstrap_setup, changed):
+    setup, config = bootstrap_setup
+    bootstrap(config)
+    setup.objects["/api/database"][0]["details"].update(changed)
+    setup.calls.clear()
+    with pytest.raises(MetabaseError, match="reporting source does not match"):
+        bootstrap(config)
+    assert all(method == "GET" for _, method, _, _ in setup.calls)
+
+
+@pytest.mark.parametrize("setting,value", [("ANOMALY_REPORTING_DB_PORT", "6432"), ("ANOMALY_REPORTING_DB_SSL", "true")])
+def test_reporting_config_changes_require_connection_correction(bootstrap_setup, setting, value):
+    _, config = bootstrap_setup
+    bootstrap(config)
+    with pytest.raises(MetabaseError, match="reporting source does not match"):
+        bootstrap({**config, setting: value})
+
+
+def test_reporting_accepts_equivalent_port_and_masked_password(bootstrap_setup):
+    setup, config = bootstrap_setup
+    config.update(ANOMALY_REPORTING_DB_PORT="6432", ANOMALY_REPORTING_DB_SSL="true")
+    result = bootstrap(config)
+    setup.objects["/api/database"][0]["details"].update(port="6432", password="**MetabasePass**", **{"ssl-mode": "require"})
+    assert bootstrap(config) == result
+
+
+@pytest.fixture
+def raw_bootstrap_setup(bootstrap_setup):
+    setup, config = bootstrap_setup
+    config.update(ANOMALY_METABASE_RAW_URL="https://raw.example", ANOMALY_METABASE_RAW_API_KEY="raw-secret",
+                  MLAB_URI="mongodb+srv://reader:p%40ss@mongo.example/old?authSource=admin&tls=true", MLAB_DATABASE="source")
+    return setup, config
+
+
+@pytest.mark.parametrize("changed", [
+    {"engine": "postgres"}, {"details": {}},
+    {"details": {"use-conn-uri": False}},
+    {"details": {"conn-uri": "mongodb://writer:private-password@other.example/wrong"}},
+    {"details": {"conn-uri": "mongodb+srv://writer:private-password@mongo.example/source?authSource=admin&tls=true"}},
+    {"details": {"conn-uri": "mongodb+srv://reader:p%40ss@mongo.example/source?authSource=admin&tls=false"}},
+    {"details": {"dbname": "other"}}, {"details": {"tunnel-enabled": True}},
+])
+def test_bootstrap_rejects_reused_raw_connection_mismatch(raw_bootstrap_setup, changed):
+    setup, config = raw_bootstrap_setup
+    bootstrap(config)
+    database = setup.raw_objects["/api/database"][0]
+    if changed.get("details"):
+        database["details"].update(changed["details"])
+    else:
+        database.update(changed)
+    setup.calls.clear()
+    with pytest.raises(MetabaseError, match="raw source does not match") as caught:
+        bootstrap(config)
+    assert "private-password" not in str(caught.value) and "p%40ss" not in str(caught.value)
+    assert all(method == "GET" for raw, method, _, _ in setup.calls if raw)
+
+
+@pytest.mark.parametrize("masked", [False, True])
+def test_raw_bootstrap_reuses_resolved_source_with_native_uri_masking(raw_bootstrap_setup, masked):
+    setup, config = raw_bootstrap_setup
+    setup.mask_uri = masked
+    result = bootstrap(config)
+    # Native creation may add ssl=true; URI mode ignores this separate flag.
+    setup.raw_objects["/api/database"][0]["details"]["ssl"] = True
+    setup.calls.clear()
+    assert bootstrap(config) == result
+    assert len(setup.raw_objects["/api/database"]) == 1
+    updates = [payload for raw, method, _, payload in setup.calls if raw and method == "PUT"]
+    assert len(updates) == int(masked)
+    if masked:
+        assert updates[0]["details"]["conn-uri"] == resolved_mongo_uri(config["MLAB_URI"], "source")
+    assert "p%40ss" not in str(result) and "raw-secret" not in str(result)
+
+
+def test_masked_raw_source_is_reestablished_from_configuration(raw_bootstrap_setup):
+    setup, config = raw_bootstrap_setup
+    result = bootstrap(config)
+    setup.mask_uri = True
+    database = setup.raw_objects["/api/database"][0]
+    database["details"]["conn-uri"] = "mongodb://writer:secret@other.example/wrong"
+    assert bootstrap(config) == result
+    assert database["details"]["conn-uri"] == resolved_mongo_uri(config["MLAB_URI"], "source")
+    setup.fail_raw_update = True
+    with pytest.raises(MetabaseError, match="HTTP 400"):
+        bootstrap(config)
 
 
 def test_bootstrap_refuses_another_source_before_modifying_instance(monkeypatch):

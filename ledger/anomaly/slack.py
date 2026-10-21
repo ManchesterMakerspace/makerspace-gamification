@@ -67,7 +67,7 @@ class AnomalyAccess:
         member = self.ledger.sources.identity(user_id)
         return bool(isinstance(member, Mapping) and member.get("_id") is not None and
                     not member.get("merged_at") and
-                    member.get("status") in ("activeMember", "pending", "inactive", "nonMember") and
+                    member.get("status") in ("activeMember", "pending", "inactive", "nonMember", "expired") and
                     member.get("role") in ("admin", "board_member"))
 
     def channel_id(self):

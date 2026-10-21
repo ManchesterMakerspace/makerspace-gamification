@@ -10,8 +10,8 @@ active, accessible to the bot, and not externally shared.
 Active human members of the configured channel may ask aggregate data and trend
 questions there or in their own one-to-one DM with The Ledger. They need no source
 member link or Ledger game opt-in. A current uniquely linked source `admin` or
-`board_member` may request private staff detail and administer monitoring in their
-own DM; suspended, revoked, merged, or unknown source memberships do not grant
+`board_member`, including one with `expired` membership, may request private staff
+detail and administer monitoring in their own DM; suspended, revoked, merged, or unknown source memberships do not grant
 staff authority. Resource-manager titles and game ranks grant no anomaly staff
 rights. Channel replies are always aggregate-only, including staff requests.
 
@@ -55,7 +55,7 @@ clearances, game consent, or channel enrollment are modified by a question.
 
 ## Prompt policy
 
-Matrix version 50 documents the `anomaly_channel_reader` permission and independent
+Matrix version 51 documents the `anomaly_channel_reader` permission and independent
 admin/board authority. `anomaly_explain` and `anomaly_propose` are separate rotating
 JSON prompt sets. Only sanitized application-generated evidence enters inference;
 member detail is rendered outside the model after authorization. Small cohorts
@@ -63,7 +63,7 @@ are suppressed in application code. AI-generated detector candidates remain iner
 until a human approves a validated revision; schema/data/access changes are never
 model-driven. Risk associations are not proof of cause or misconduct.
 
-Operators using a Google Doc policy override must copy the complete version-50
+Operators using a Google Doc policy override must copy the complete version-51
 matrix and explicitly run `/ledger-admin reload-prompts`. The reload still uses
 the existing game-administration authorization; anomaly permission does not grant
 general prompt publication rights. No external document is edited automatically.
