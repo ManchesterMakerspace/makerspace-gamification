@@ -23,6 +23,11 @@ different person's DM, group DM, or unrelated channel is never a detail surface.
 
 ## Commands and routing
 
+Set `ANOMALY_ENABLED=true` on the Ledger ingress and worker deployment to enable
+analytics requests. When unset or false, messages retain normal Ledger routing
+and `/ledger-anomaly` returns an ephemeral disabled response without opening a DM
+or enqueueing a job.
+
 Install the updated `slack-manifest.json` slash command:
 
 - `/ledger-anomaly ask <question>` asks about the supported data and trend reports.

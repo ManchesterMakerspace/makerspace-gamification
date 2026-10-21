@@ -34,6 +34,11 @@ _ANALYTICS = re.compile(
 _QUESTION = re.compile(r"\?|^\s*(?:<@[A-Z0-9]+>\s*)?(?:show|list|explain|analy[sz]e|compare|summari[sz]e|report|what|which|how|why|when|who|is|are|can|do|does)\b", re.I)
 
 
+def anomaly_enabled():
+    """Slack ingress is opt-in on each Ledger deployment."""
+    return os.environ.get("ANOMALY_ENABLED", "false").strip().lower() == "true"
+
+
 def _object(response, key):
     """SlackResponse and ordinary dictionaries share the public get interface."""
     if response.get("ok") is False:
@@ -169,6 +174,8 @@ def route_anomaly_event(ledger, slack, event):
 Denied recognized requests must not fall through to a less restricted handler.
 No ambient message history or membership enrollment is created here.
 """
+    if not anomaly_enabled():
+        return False
     if (event.get("type") not in ("message", "app_mention") or event.get("subtype") or
             event.get("bot_id") or event.get("bot_profile") or event.get("app_id")):
         return False

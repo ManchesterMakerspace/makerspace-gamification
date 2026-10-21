@@ -11,6 +11,7 @@ from ledger.worker import Worker
 
 @pytest.fixture
 def anomaly_env(env, monkeypatch):
+    monkeypatch.setenv('ANOMALY_ENABLED', 'true')
     monkeypatch.setenv('SLACK_CHANNEL_ANOMALY', 'CAUDIT')
     ledger, store, source, composer, api, slack = env
     def info(channel):
@@ -130,16 +131,34 @@ def test_queue_is_durable_idempotent_and_never_enrolls(anomaly_env):
     slack.chat_postMessage.assert_not_called()
 
 
-def test_analytics_routes_before_game_ineligibility_and_broad_counts(anomaly_env, monkeypatch):
+@pytest.mark.parametrize('kind', ['message', 'app_mention'])
+def test_analytics_routes_before_game_ineligibility_and_broad_counts(anomaly_env, monkeypatch, kind):
     ledger, store, source, composer, api, slack = anomaly_env
     monkeypatch.setenv('SLACKIDS_INELIGIBLE', '["U1"]')
     aggregate = Mock(side_effect=AssertionError('Must not use public count handler'))
     monkeypatch.setattr(source, '_aggregate', aggregate, raising=False)
-    event = {'type': 'message', 'user': 'U1', 'channel': 'CAUDIT', 'ts': '123.45',
+    event = {'type': kind, 'user': 'U1', 'channel': 'CAUDIT', 'ts': '123.45',
              'text': 'How many members cancelled their subscription this month?'}
     assert Worker(ledger, composer, slack).event(event, 'evt') == 'anomaly_query_queued'
     assert len(store.select('ledger_outbox', {'kind': 'anomaly_query'})) == 1
     aggregate.assert_not_called()
+    api.complete.assert_not_called()
+
+
+@pytest.mark.parametrize('flag', [None, 'false', 'FALSE', ''])
+@pytest.mark.parametrize('kind', ['message', 'app_mention'])
+def test_disabled_analytics_preserves_normal_message_handling(anomaly_env, monkeypatch, flag, kind):
+    ledger, store, _, composer, api, slack = anomaly_env
+    if flag is None:
+        monkeypatch.delenv('ANOMALY_ENABLED')
+    else:
+        monkeypatch.setenv('ANOMALY_ENABLED', flag)
+    event = {'type': kind, 'user': 'UANY', 'channel': 'CAUDIT', 'ts': '123.45',
+             'text': 'What are good predictors of users at risk of dropping out?'}
+    assert Worker(ledger, composer, slack).event(event, 'evt') == 'ignored_unlinked_identity'
+    assert not route_anomaly_event(ledger, slack, event)
+    assert not store.select('ledger_outbox', {'kind': 'anomaly_query'})
+    assert not slack.method_calls
     api.complete.assert_not_called()
 
 
@@ -173,6 +192,22 @@ def test_slash_request_outside_anomaly_channel_routes_to_own_dm(anomaly_env, mon
     job = store.select('ledger_outbox', {'kind': 'anomaly_query'})[0]
     assert job['payload']['channel'] == 'DU10'
     assert job['payload']['text'] == 'detectors list'
+
+
+@pytest.mark.parametrize('flag', [None, 'false', 'FALSE', ''])
+def test_disabled_slash_request_is_rejected_before_slack_calls_or_queueing(anomaly_env, monkeypatch, flag):
+    ledger, store, _, composer, api, slack = anomaly_env
+    if flag is None:
+        monkeypatch.delenv('ANOMALY_ENABLED')
+    else:
+        monkeypatch.setenv('ANOMALY_ENABLED', flag)
+    with pytest.raises(Denied, match='Anomaly analytics is disabled'):
+        SlackUI(ledger, composer).command({'command': '/ledger-anomaly', 'user_id': 'U10',
+            'channel_id': 'COTHER', 'text': 'detectors list', 'trigger_id': 'T1'}, slack)
+    assert not store.select('ledger_outbox', {'kind': 'anomaly_query'})
+    assert not store.select('ledger_inbox', {'kind': 'command'})
+    assert not slack.method_calls
+    api.complete.assert_not_called()
 
 
 def test_generic_workers_never_claim_anomaly_jobs(anomaly_env):

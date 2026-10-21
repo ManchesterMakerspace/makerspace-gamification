@@ -98,7 +98,9 @@ class SlackUI:
         raw_actor = body.get("user_id") or body.get("user")
         raw_actor = raw_actor.get("id") if isinstance(raw_actor, dict) else raw_actor
         if body.get("command") == "/ledger-anomaly":
-            from .anomaly.slack import AnomalyAccess, queue_anomaly_request
+            from .anomaly.slack import AnomalyAccess, anomaly_enabled, queue_anomaly_request
+            if not anomaly_enabled():
+                raise Denied("Anomaly analytics is disabled for this deployment.")
             destination = body.get("channel_id", "")
             access = AnomalyAccess(self.ledger, client)
             if not destination.startswith("D"):
