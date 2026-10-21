@@ -422,6 +422,19 @@ class AvatarPipeline:
         self.store.atomic(claim)
 
     def generate(self, job):
+        try:
+            return self._generate(job)
+        finally:
+            def finished(s):
+                owned_job = s.get("ledger_outbox", job["_id"]) or {}
+                if owned_job.get("lease") == job["lease"]:
+                    # Cancellation/lease expiry alone cannot prove this attempt
+                    # has stopped dispatching requests to the supervisor.
+                    owned_job["avatar_pipeline_finished_lease"] = job["lease"]
+                    s.put("ledger_outbox", owned_job)
+            self.store.atomic(finished)
+
+    def _generate(self, job):
         from .worker import HistoryImportPending
         # Cleanup may have removed the spool before a crashed worker's lease
         # is reclaimed. An activated job must never generate a second image.
@@ -613,10 +626,10 @@ class AvatarPipeline:
                 "job_end_time": now(), "outcome": outcome, "attempt": job.get("attempts", 1)}
             print(json.dumps({"event": "avatar_job", **metric}, default=str), flush=True)
             def record(s):
+                owned_job = s.get("ledger_outbox", job["_id"]) or {}
                 saved = s.get(COLLECTION, "job:" + job["_id"])
                 if saved:
                     saved["attempt_metrics"] = [*saved.get("attempt_metrics", []), metric][-10:]
-                    owned_job = s.get("ledger_outbox", job["_id"]) or {}
                     if owned_job.get("lease") == job["lease"] and (outcome == "cancelled" or (outcome == "failed" and job.get("attempts", 1) >= 10)):
                         saved.update(status=outcome, job_end_time=metric["job_end_time"])
                         if saved.get("context"):
@@ -654,7 +667,12 @@ def deliver(worker, job):
                 status = RuntimeClient().status(job["payload"]["artifact_job"])
             except (requests.RequestException, OSError, RuntimeError):
                 raise HistoryImportPending() from None
-            if status.get("status") not in ("done", "missing"):
+            if status.get("status") == "missing":
+                generation = worker.store.get("ledger_outbox", job["payload"]["artifact_job"]) or {}
+                if (not generation.get("lease") or
+                        generation.get("avatar_pipeline_finished_lease") != generation["lease"]):
+                    raise HistoryImportPending()
+            elif status.get("status") != "done":
                 raise HistoryImportPending()
         artifact = worker.store.get(COLLECTION, "job:" + job["payload"].get("artifact_job", "")) or {}
         if job["payload"].get("candidate_receipt"):
