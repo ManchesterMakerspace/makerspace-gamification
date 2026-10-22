@@ -55,6 +55,14 @@ fails with `bin/build.sh: Permission denied` (exit 126), update the Dockerfile i
 `METABASE_SOURCE_DIR` before retrying the same rebuild command. This build failure
 occurs before shutdown; existing services stay running.
 
+If backend compilation fails with `Premature i18n string lookup` in
+`metabase/metabot/settings.clj`, update the sibling Metabase checkout too. The
+`anomaly-analytics-database-ids` JSON setting must declare `:encryption :no` because
+it stores non-secret database IDs. Without that declaration, settings registration
+throws a validation error whose translation is blocked during compilation,
+masking the missing option. Keep the translation guard enabled; changing `.env`
+or database credentials does not fix this source error.
+
 If Metabase fails during dependency installation, check the toolchain separately
 before rebuilding the full application (use the same source directory configured
 for Compose):

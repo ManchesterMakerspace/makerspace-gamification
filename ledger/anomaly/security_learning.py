@@ -209,7 +209,7 @@ class SecurityDetectors:
                     stats.setdefault('first_at', now.isoformat())
                     stats['last_at'] = now.isoformat()
                     self.state.put('security_shadow', revision, stats)
-                    self.state.put('security_learning_receipts', key, {'at': row['at'], 'hit': hit})
+                    self.state.put('security_learning_receipts', key, {'at': row['at'], 'hit': hit, 'revision': revision})
                 if hit:
                     findings.append({'rule': 'learned:' + revision, 'revision': revision, 'at': row['at'],
                         'value': value, 'expected': expected, 'entity': entity, 'feature': spec['feature'], 'active': detector['status'] == 'active'})

@@ -179,6 +179,74 @@ def test_supported_resolved_incidents_refresh_evidence_without_reopening(monkeyp
     assert not list(state.rows('security_deliveries'))
 
 
+def test_previous_hour_late_burst_is_replayed():
+    state, engine = setup()
+    start = NOW-timedelta(hours=1)
+    for n in range(5):
+        event(state, str(n), 'profile_change', at=start+timedelta(minutes=n), origin='audit_logs')
+    assert not engine.detect(NOW+timedelta(minutes=30))
+    engine.evaluate(NOW+timedelta(minutes=30))
+    incidents = [r for _, r in state.rows('security_incidents')]
+    assert any(r['rule'] == 'profile_member' for r in incidents)
+    assert all(r['historical'] and not r['alertable'] for r in incidents)
+    assert not list(state.rows('security_dirty'))
+
+
+@pytest.mark.parametrize('delay,expected', [(timedelta(hours=48), True),
+                                         (timedelta(hours=48, microseconds=1), False)])
+def test_corrected_promotion_replays_unchanged_later_grant(delay, expected):
+    state, engine = setup()
+    first_at = NOW-timedelta(days=4)
+    first = event(state, 'first', 'role_change', member='promoted', at=first_at, origin='audit_logs',
+                  actor_id='admin', grant=False, before_role='member', after_role='member')
+    event(state, 'second', 'role_change', member='target', at=first_at+delay, origin='audit_logs',
+          actor_id='promoted', grant=True, before_role='member', after_role='admin')
+    engine.evaluate(NOW)
+    assert not list(state.rows('security_incidents'))
+    state.security_replace('first', [{**first, 'grant': True, 'after_role': 'admin'}])
+    engine.evaluate(NOW)
+    chains = [r for _, r in state.rows('security_incidents') if r['rule'] == 'privilege_propagation']
+    assert bool(chains) is expected
+    assert not list(state.rows('security_dirty'))
+
+
+def test_correction_replay_resumes_and_restarts_on_new_revision():
+    state, engine = setup()
+    start = NOW-timedelta(days=4)
+    for n in range(55):
+        event(state, str(n), 'profile_change', at=start+timedelta(seconds=n), origin='audit_logs')
+    bucket = start.isoformat()
+    engine.evaluate(NOW)
+    cursor = state.get('security_backfill_cursor', bucket)
+    assert cursor['at'] == (start+timedelta(seconds=49)).isoformat()
+    assert state.get('security_dirty', bucket)
+    restarted = SecurityEngine(state, engine.config)
+    restarted.evaluate(NOW)
+    assert not state.get('security_dirty', bucket)
+    # A saved cursor from an older evidence revision must not skip early windows.
+    state.put('security_backfill_cursor', bucket, cursor)
+    changed = state.security_events(source='0')[0]
+    state.security_replace('0', [{**changed, 'fields': ['email']}])
+    restarted.evaluate(NOW)
+    updated = state.get('security_backfill_cursor', bucket)
+    assert updated['revision'] != cursor['revision']
+    assert updated['at'] == cursor['at']
+
+
+@pytest.mark.parametrize('status', ['open', 'shadow', 'resolved', 'retracted'])
+def test_resolution_only_accepts_reviewable_incidents(status):
+    state, engine = setup()
+    row = {'id': 'incident', 'status': status, 'alertable': False}
+    state.put('security_incidents', 'incident', row)
+    if status in {'open', 'shadow'}:
+        engine.resolve('incident', 'UADMIN')
+        assert state.get('security_incidents', 'incident')['status'] == 'resolved'
+    else:
+        with pytest.raises(ValueError, match='Only open or shadow'):
+            engine.resolve('incident', 'UADMIN')
+        assert state.get('security_incidents', 'incident') == row
+
+
 @pytest.mark.parametrize('kind,count,global_count', [('profile_change',5,20), ('password_change',3,10), ('reset_request',5,20)])
 def test_individual_and_distributed_bursts(kind, count, global_count):
     state, engine = setup()

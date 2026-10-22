@@ -123,6 +123,14 @@ class SecurityState:
                     WHERE snapshot.value->'evidence' ? e.id)
                 """, (months,))
             self.connection.execute("DELETE FROM anomaly_security_rollups WHERE bucket < now() - %s * interval '1 month'", (months,))
+            # Legacy receipts have no revision; their event time still bounds
+            # retention. New receipts can also expire with superseded models.
+            self.connection.execute("""
+                DELETE FROM anomaly_documents r WHERE r.namespace='security_learning_receipts'
+                AND ((r.data->>'at')::timestamptz < now() - %s * interval '1 month'
+                    OR EXISTS (SELECT 1 FROM anomaly_documents d WHERE d.namespace='security_detectors'
+                        AND d.key=r.data->>'revision' AND d.data->>'status'='superseded'))
+                """, (months,))
             self.connection.execute(pending + """
                 DELETE FROM anomaly_documents d WHERE d.namespace='security_incidents'
                 AND d.data->>'status' IN ('resolved','retracted')
