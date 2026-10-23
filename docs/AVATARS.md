@@ -308,3 +308,23 @@ status confirm completion. Acknowledgements run in delivery. The image superviso
 may otherwise be quiet. Logs exclude provider exception messages, prompts,
 credentials and image bytes. Verify this on the host with live Slack/inference;
 local tests cannot establish deployment connectivity.
+
+
+### Image runtime HTTP failures
+
+`AvatarRuntimeHTTPError code=503` means the supervisor reported a failure; it does
+not identify GPU exhaustion by itself. Inspect `ledger-image` logs for
+`avatar_runtime phase=model_load` versus `phase=inference`. Load failures report
+the subprocess exit code before cleanup; inference failures report the upstream
+HTTP status. Neither includes exception messages, prompts, command arguments or
+image data. A signal-like exit code alone is not proof of an OOM event.
+
+Rebuild/recreate both `ledger-image` and `ledger-avatars` to install these
+diagnostics. Preserve the image and avatar spool volumes and existing job IDs;
+pending jobs keep their normal retry behavior. Use
+`docker compose --profile avatars logs --since=15m ledger-image ledger-avatars`
+with the same Compose files/project used at deployment. If loading fails, check
+GPU memory on the host (`nvidia-smi`) and the configured image/command. Do not
+increase the prompt timeout for an image-stage failure: prompt composition has
+already completed. These diagnostics localize a failure; a live retry is still
+needed to establish its cause.

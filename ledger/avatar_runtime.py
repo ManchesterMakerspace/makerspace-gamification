@@ -7,6 +7,8 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import signal
@@ -16,6 +18,28 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
+
+
+log = logging.getLogger(__name__)
+
+
+@contextmanager
+def runtime_phase(runtime, name):
+    started = time.monotonic()
+    try:
+        yield
+    except Exception as exc:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        process = runtime.process
+        exit_code = process.poll() if process is not None else None
+        log.error("avatar_runtime phase=%s outcome=error exception=%s upstream_http_status=%s process_exit_code=%s duration_ms=%.2f",
+                  name, type(exc).__name__, status if type(status) is int else "none",
+                  exit_code if type(exit_code) is int else "none", (time.monotonic() - started) * 1000)
+        raise
+    else:
+        log.info("avatar_runtime phase=%s outcome=success duration_ms=%.2f",
+                 name, (time.monotonic() - started) * 1000)
 
 
 class RuntimeBusy(RuntimeError):
@@ -88,18 +112,19 @@ class Runtime:
             return
         self._unload()
         # Never allow vLLM request logs to print reference images or prompts.
-        self.process = subprocess.Popen(self.command, start_new_session=True,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.monotonic() + 1200
         try:
-            while not self.closed and time.monotonic() < deadline and self.process.poll() is None:
-                try:
-                    if requests.get(self.base_url + "/health", timeout=2).ok:
-                        return
-                except requests.RequestException:
-                    pass
-                time.sleep(1)
-            raise RuntimeError("Image runtime did not become healthy")
+            with runtime_phase(self, "model_load"):
+                self.process = subprocess.Popen(self.command, start_new_session=True,
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                deadline = time.monotonic() + 1200
+                while not self.closed and time.monotonic() < deadline and self.process.poll() is None:
+                    try:
+                        if requests.get(self.base_url + "/health", timeout=2).ok:
+                            return
+                    except requests.RequestException:
+                        pass
+                    time.sleep(1)
+                raise RuntimeError("Image runtime did not become healthy")
         except BaseException:
             self._unload()
             raise
@@ -122,15 +147,16 @@ class Runtime:
             self._load()
             files = [("image", (f"ref-{i}.png", base64.b64decode(ref, validate=True), "image/png"))
                      for i, ref in enumerate(refs)]
-            response = requests.post(self.base_url + "/v1/images/edits", files=files,
-                data={"model": "Qwen/Qwen-Image-2.1", "prompt": request["prompt"], "size": "1280x1280",
-                      "n": "1", "num_inference_steps": "40", "true_cfg_scale": "1.0",
-                      "seed": str(request["seed"]), "output_format": "png"}, timeout=(5, 1200))
-            response.raise_for_status()
-            data = response.json()
-            result = {"status": "done", "fingerprint": fingerprint, "image": data["data"][0]["b64_json"],
-                      "usage": data.get("usage"), "metrics": data.get("metrics", {}),
-                      "encoder_tokens": None, "encoder_tokens_source": "unavailable"}
+            with runtime_phase(self, "inference"):
+                response = requests.post(self.base_url + "/v1/images/edits", files=files,
+                    data={"model": "Qwen/Qwen-Image-2.1", "prompt": request["prompt"], "size": "1280x1280",
+                          "n": "1", "num_inference_steps": "40", "true_cfg_scale": "1.0",
+                          "seed": str(request["seed"]), "output_format": "png"}, timeout=(5, 1200))
+                response.raise_for_status()
+                data = response.json()
+                result = {"status": "done", "fingerprint": fingerprint, "image": data["data"][0]["b64_json"],
+                          "usage": data.get("usage"), "metrics": data.get("metrics", {}),
+                          "encoder_tokens": None, "encoder_tokens_source": "unavailable"}
             # Atomic disk receipt survives a lost HTTP response and worker restart.
             path = self.path(key)
             temporary = path.with_suffix(".tmp")
@@ -200,8 +226,9 @@ def serve():
                 self.wfile.write(encoded)
             except RuntimeBusy:
                 self.send_error(409)
-            except Exception:
-                # Neither provider errors nor input data belong in diagnostics.
+            except Exception as exc:
+                # Never log exception text, request bodies or provider responses.
+                log.error("avatar_runtime phase=request outcome=error exception=%s http_status=503", type(exc).__name__)
                 self.send_error(503)
 
     server = ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("LEDGER_AVATAR_RUNTIME_PORT", "8090"))), Handler)
@@ -230,4 +257,5 @@ def serve():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     serve()

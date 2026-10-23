@@ -371,6 +371,14 @@ def reference_images(worker, member, user, facts):
     return refs[:4]
 
 
+class AvatarRuntimeHTTPError(requests.HTTPError):
+    """Safe status-only error; never expose runtime response bodies or URLs."""
+
+    def __init__(self, status):
+        self.code = status
+        super().__init__(f"Avatar runtime HTTP status {status}")
+
+
 class RuntimeClient:
     def __init__(self):
         self.url = os.environ.get("LEDGER_AVATAR_RUNTIME_URL", "http://ledger-image:8090").rstrip("/")
@@ -387,7 +395,8 @@ class RuntimeClient:
         if response.status_code == 409:
             from .worker import HistoryImportPending
             raise HistoryImportPending()
-        response.raise_for_status()
+        if response.status_code >= 400:
+            raise AvatarRuntimeHTTPError(response.status_code)
         return response.json()
 
     def generate(self, key, prompt, refs, seed):
