@@ -119,7 +119,7 @@ class MongoStore:
         if kinds:
             query["kind"] = {"$in": kinds}
         if exclude:
-            query["kind"] = {"$nin": exclude}
+            query.setdefault("kind", {})["$nin"] = exclude
         return self.db[owned(collection)].find_one_and_update(
             query,
             {"$set": {"status": "working", "lease": str(uuid4()),
