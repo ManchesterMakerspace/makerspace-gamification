@@ -76,15 +76,16 @@ def dependencies():
     return ledger, composer, client
 
 
-def make_app():
+def make_app(*, socket_mode=False):
     ledger, composer, client = dependencies()
     # Modal trigger IDs expire quickly. Ingress never spends the delivery worker's
     # longer timeout budget on Slack lookups or opening a view.
     client.timeout = 1
     # Authentication and database bootstrapping are explicit deployment steps.
-    app = build_app(SlackUI(ledger, composer), os.environ["SLACK_BOT_TOKEN"], os.environ["SLACK_SIGNING_SECRET"],
+    signing_secret = os.environ.get("SLACK_SIGNING_SECRET", "") if socket_mode else os.environ["SLACK_SIGNING_SECRET"]
+    app = build_app(SlackUI(ledger, composer), os.environ["SLACK_BOT_TOKEN"], signing_secret,
                     os.environ["SLACK_TEAM_ID"], os.environ["SLACK_BOT_USER_ID"], client)
-    return HTTPApp(app, ledger.store, ledger.sources)
+    return HTTPApp(app, ledger.store, ledger.sources, callbacks_enabled=not socket_mode)
 
 
 def broker(store, subscribe=True):
@@ -160,6 +161,10 @@ def main():
             raise SystemExit(1)
         return
     if args.action == "serve":
+        from .server import socket_mode_enabled, serve_socket_mode
+        if socket_mode_enabled():
+            serve_socket_mode(args.port)
+            return
         with make_server("0.0.0.0", args.port, make_app()) as server:
             server.serve_forever()
         return
