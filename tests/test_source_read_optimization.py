@@ -443,6 +443,7 @@ def test_explain_output_count_uses_final_stage(plan, expected):
     assert database.command.call_args.args[0]["verbosity"] == "executionStats"
 
 
+@pytest.mark.mongo_integration
 @pytest.mark.skipif(not os.environ.get("LEDGER_TEST_MONGO_URI"), reason="Set LEDGER_TEST_MONGO_URI to a disposable Mongo replica set")
 @pytest.mark.parametrize("style,commands", [("native", 1), ("strings", 3), ("mixed", 3)])
 def test_real_source_pipelines_match_memory_and_legacy(monkeypatch, style, commands):

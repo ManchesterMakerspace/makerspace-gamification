@@ -233,3 +233,78 @@ replacement, reference validation and deletion. Those checks need deployment
 hardware and Slack credentials; automated tests do not claim to perform them.
 
 Administrators and board members who are opted in can use `/ledger-admin avatar @member` to inspect a participant’s current avatar, saved visual prompt, reference manifest, model/settings, token usage, duration, completion time and attempt metrics. Raw conversations, policy snapshots and credentials are excluded. The force-generate/regenerate button invalidates queued or running candidates and reserves an immediate replacement on the sequential avatar queue, keeping the current pair until successful activation. Repeated clicks on the same button reserve only one replacement. Custom-avatar opt-out is honored at inspection, selection, enqueue and delivery. `/ledger-admin avatar` opens a participant picker filtered to eligible opted-in participants with personalized avatars enabled. Submission opens the selected participant’s avatar and saved generation details; only the optional force-generate/regenerate button queues generation. No rank, XP or consent is changed.
+
+
+## Routing repair and recovery
+
+All worker lanes must run the routing fix together: Mongo claims intersect the
+lane's allowed kinds with excluded kinds (including anomaly jobs). Do not leave
+old results or interactive workers running while retrying avatar jobs.
+
+On the deployment host, retain the same Compose project and environment:
+
+```bash
+export COMPOSE_FILE=compose.yaml:compose.anomaly.yaml
+export COMPOSE_PROFILES=avatars
+bash scripts/rebuild.sh
+docker compose ps --all
+```
+
+The rebuild builds and preflights before stopping services, preserves named
+volumes, and recreates all enabled workers. `ledger init` is not a worker-start
+command. Avatar prompt composition uses `LEDGER_AVATAR_PROMPT_TIMEOUT_SECONDS`
+(default 60, finite and positive); ordinary chat deadlines stay unchanged.
+
+Before manually retrying failed jobs, inventory their reserved inputs and
+receipts from the avatar worker's shared spool. This read-only command prints
+identifiers and presence flags, never prompts, reference bytes or credentials:
+
+```bash
+docker compose exec -T ledger-avatars python - <<'PY'
+import hashlib, json, os
+from pathlib import Path
+from ledger.storage import connect
+store = connect(os.environ['LEDGER_URI'], os.environ.get('LEDGER_DATABASE'))
+root = Path(os.environ.get('LEDGER_AVATAR_SPOOL', '/var/lib/ledger-avatars'))
+for job in store.select('ledger_outbox', {'kind': 'avatar_generate',
+                                        'status': {'$in': ['pending', 'working', 'failed']}}):
+    row = store.get('ledger_avatars', 'job:' + job['_id']) or {}
+    prefix = root / hashlib.sha256(job['_id'].encode()).hexdigest()
+    print(json.dumps({'job_id': job['_id'], 'status': job['status'],
+        'last_error': job.get('last_error'), 'activated': row.get('status') == 'activated',
+        'reserved': bool(row.get('selection')), 'prompt_saved': bool(row.get('prompt')),
+        'manifest_present': Path(str(prefix) + '.refs.json').is_file(),
+        'images_present': {n: Path(str(prefix) + '.' + n + '.jpg').is_file()
+                           for n in ('avatar', 'avatar512')},
+        'uploads_confirmed': {n: bool(row.get(n)) for n in ('avatar', 'avatar512')}}))
+PY
+```
+
+Pending jobs with intact reserved inputs retry automatically. Completed uploads
+and activated avatars must remain intact. A missing manifest only blocks a job
+that still needs image generation; confirmed uploads can finish activation
+without the local images. `AvatarReferenceUnavailable` means restore the exact
+original manifest from the original worker/spool or use `/ledger-admin avatar
+@member` and its explicit force-regenerate button. That workflow rechecks current
+consent and staff authorization and reserves a new generation. Do not substitute
+new references into an old reservation or bulk-reset attempts on missing-input
+jobs. Terminal failed jobs do not retry automatically; use the explicit
+regeneration workflow unless an operator has verified and restored all original
+inputs for a controlled retry. Leave runtime acknowledgement jobs on their
+existing durable retry path.
+
+For a live verification, follow the relevant workers, then request one authorized
+regeneration and track its job ID:
+
+```bash
+docker compose logs --follow --since=5m ledger-avatars ledger-results ledger-interactive ledger-delivery ledger-image
+```
+
+Generation must run only in `ledger-avatars`. `avatar_phase` logs identify
+`reference_preparation`, `prompt_composition`, `image_request`, `upload` and
+`acknowledgement`, with outcome, exception class and elapsed milliseconds. An
+`image_request` success confirms a runtime response; upload receipts and activated
+status confirm completion. Acknowledgements run in delivery. The image supervisor
+may otherwise be quiet. Logs exclude provider exception messages, prompts,
+credentials and image bytes. Verify this on the host with live Slack/inference;
+local tests cannot establish deployment connectivity.

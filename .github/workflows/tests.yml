@@ -4,7 +4,7 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,22 +36,31 @@ jobs:
         env:
           LEDGER_LLM_API_KEY: test-only-inference-key
           CLOUDFLARE_TUNNEL_TOKEN: test-only-tunnel-token
+      - name: Run ordinary tests
+        run: python -m pytest -m "not mongo_integration" --strict-markers
+  mongo-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Official 8.0.34-noble manifest verified against Docker Registry.
+      MONGO_TEST_IMAGE: mongo:8.0.34-noble@sha256:c2d54fddfb3738fb27fe117f51692e3f44e640a3e7aeb8da3937ee9cd33a650b
+      LEDGER_TEST_MONGO_URI: mongodb://localhost:27017/?replicaSet=rs0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[test,anomaly]'
       - name: Start disposable Mongo replica set
+        timeout-minutes: 5
+        run: bash scripts/ci/start-mongo.sh
+      - name: Run Mongo integration tests
+        run: python -m pytest -m mongo_integration --strict-markers
+      - name: Mongo diagnostics before cleanup
+        if: failure()
         run: |
-          docker run -d --name ledger-mongo -p 27017:27017 mongo:8.0 --replSet rs0 --bind_ip_all
-          for attempt in $(seq 1 30); do
-            if docker exec ledger-mongo mongosh --quiet --eval 'db.adminCommand({ping:1})'; then break; fi
-            sleep 1
-          done
-          docker exec ledger-mongo mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
-          for attempt in $(seq 1 30); do
-            if docker exec ledger-mongo mongosh --quiet --eval 'if (!db.hello().isWritablePrimary) { quit(1); }'; then exit 0; fi
-            sleep 1
-          done
-          exit 1
-      - run: python -m pytest
-        env:
-          LEDGER_TEST_MONGO_URI: mongodb://localhost:27017/?replicaSet=rs0
+          docker inspect --format '{{json .State}}' ledger-mongo || true
+          docker logs --timestamps --tail=200 ledger-mongo || true
       - name: Remove disposable database server
         if: always()
-        run: docker rm -f ledger-mongo
+        run: docker rm -fv ledger-mongo || true

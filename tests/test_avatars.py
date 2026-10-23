@@ -652,3 +652,104 @@ def test_runtime_timeout_terminates_inference(tmp_path, monkeypatch):
         runtime.generate({"request_id": "one", "prompt": "portrait", "references": ["cmVm"], "seed": 1})
     runtime._unload.assert_called_once()
     assert runtime.active is None
+
+
+@pytest.mark.parametrize("configured,expected", [(None, 60), ("120", 120)])
+def test_avatar_prompt_deadline(setup, monkeypatch, configured, expected):
+    if configured is None:
+        monkeypatch.delenv("LEDGER_AVATAR_PROMPT_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("LEDGER_AVATAR_PROMPT_TIMEOUT_SECONDS", configured)
+    _, _, api, _, _, _, pipeline, job, _ = setup
+    pipeline.generate(job)
+    assert api.complete_with_usage.call_args.kwargs["deadline"] == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "bad"])
+def test_invalid_avatar_prompt_timeout(monkeypatch, value):
+    monkeypatch.setenv("LEDGER_AVATAR_PROMPT_TIMEOUT_SECONDS", value)
+    with pytest.raises(ValueError):
+        avatars.prompt_timeout()
+
+
+def test_missing_reserved_manifest_is_recoverable_without_reselection(setup, caplog):
+    _, store, api, slack, runtime, worker, pipeline, job, _ = setup
+    api.complete_with_usage.side_effect = TimeoutError("private-provider-detail")
+    with pytest.raises(TimeoutError):
+        pipeline.generate(job)
+    manifest = next(pipeline.directory.glob("*.refs.json"))
+    original = manifest.read_bytes()
+    manifest.unlink()
+    reserved = store.get(avatars.COLLECTION, "job:" + job["_id"])
+    api.complete_with_usage.side_effect = None
+    caplog.set_level("INFO", logger="ledger.avatars")
+    with pytest.raises(avatars.AvatarReferenceUnavailable):
+        pipeline.generate(job)
+    assert store.get(avatars.COLLECTION, "job:" + job["_id"])["selection"] == reserved["selection"]
+    assert api.complete_with_usage.call_count == 1
+    runtime.generate.assert_not_called()
+    assert "phase=reference_preparation outcome=error exception=AvatarReferenceUnavailable" in caplog.text
+    assert "private-provider-detail" not in caplog.text
+    manifest.write_bytes(original)
+    pipeline.generate(job)
+    assert runtime.generate.call_count == 1
+    assert slack.files_upload_v2.call_count == 2
+
+
+def test_completed_uploads_survive_missing_spool(setup):
+    _, store, api, slack, runtime, worker, pipeline, job, member = setup
+    slack.files_info.side_effect = [
+        {"file": {"permalink": "https://example.slack.com/full"}}, OSError()]
+    with pytest.raises(OSError):
+        pipeline.generate(job)
+    for path in pipeline.directory.iterdir():
+        path.unlink()
+    slack.files_info.side_effect = lambda file: {"file": {"permalink": "https://example.slack.com/" + file}}
+    pipeline.generate(job)
+    assert avatars.current(store, member)
+    assert runtime.generate.call_count == api.complete_with_usage.call_count == 1
+    assert slack.files_upload_v2.call_count == 2
+
+
+def test_avatar_phase_logs_do_not_include_provider_exception_text(caplog):
+    caplog.set_level("INFO", logger="ledger.avatars")
+    with pytest.raises(RuntimeError):
+        with avatars.phase({"_id": "avatar:test:1"}, "image_request"):
+            raise RuntimeError("secret prompt and credentials")
+    assert "phase=image_request outcome=error exception=RuntimeError" in caplog.text
+    assert "duration_ms=" in caplog.text
+    assert "secret prompt" not in caplog.text
+
+
+def test_acknowledgement_phase_preserves_retry_error(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="ledger.avatars")
+    client = MagicMock()
+    client.ack.side_effect = ConnectionError("private-url")
+    monkeypatch.setattr(avatars, "RuntimeClient", lambda: client)
+    with pytest.raises(ConnectionError):
+        avatars.acknowledge(MagicMock(spec=Worker), {"_id": "ack:1", "payload": {"artifact_job": "avatar:1"}})
+    assert "phase=acknowledgement outcome=error exception=ConnectionError" in caplog.text
+    assert "private-url" not in caplog.text
+
+
+def test_avatar_timeout_reaches_real_transport_without_changing_chat(setup, monkeypatch):
+    from ledger import messages
+    from ledger.messages import ChatAPI
+    _, _, _, _, _, worker, pipeline, job, _ = setup
+    monkeypatch.setenv("LEDGER_AVATAR_PROMPT_TIMEOUT_SECONDS", "60")
+    api = ChatAPI("http://inference.test/v1", "test-model")
+    api.tokenize = lambda messages: 512
+    worker.composer.api = api
+    connection = MagicMock()
+    response = connection.getresponse.return_value
+    response.status = 200
+    response.isclosed.side_effect = [False, True]
+    response.read1.return_value = json.dumps({"choices": [{"finish_reason": "stop",
+        "message": {"content": "A workshop artisan."}}]}).encode()
+    monkeypatch.setattr(messages.http.client, "HTTPConnection", lambda *a, **kw: connection)
+    timer = MagicMock()
+    monkeypatch.setattr(messages, "Timer", timer)
+    pipeline.generate(job)
+    assert 55 < timer.call_args.args[0] <= 60
+    assert api.deadline == 15
+    assert max(call.args[0] for call in connection.sock.settimeout.call_args_list) > 55

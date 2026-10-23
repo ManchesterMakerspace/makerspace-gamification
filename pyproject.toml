@@ -29,3 +29,4 @@ ledger = ["assets/*.png", "assets/*.json", "prompts/*.json", "prompts/*.xml.md",
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q -p no:cacheprovider"
+markers = ["mongo_integration: requires an explicitly configured disposable MongoDB replica set"]

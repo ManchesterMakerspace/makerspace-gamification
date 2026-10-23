@@ -12,6 +12,7 @@ from ledger.messages import Composer
 from ledger.storage import connect
 
 
+@pytest.mark.mongo_integration
 @pytest.mark.skipif(not os.environ.get('LEDGER_TEST_MONGO_URI'), reason='Set LEDGER_TEST_MONGO_URI to a disposable Mongo replica set')
 def test_real_transactions_and_concurrent_exactly_once_kudos(env, monkeypatch):
     _, _, source, _, _, slack = env
