@@ -753,3 +753,50 @@ def test_avatar_timeout_reaches_real_transport_without_changing_chat(setup, monk
     assert 55 < timer.call_args.args[0] <= 60
     assert api.deadline == 15
     assert max(call.args[0] for call in connection.sock.settimeout.call_args_list) > 55
+
+
+@pytest.mark.parametrize("status", [401, 500, 503])
+def test_runtime_client_preserves_only_http_status(monkeypatch, status):
+    monkeypatch.setenv("LEDGER_AVATAR_RUNTIME_KEY", "private-key")
+    response = MagicMock(status_code=status, text="private-provider-body")
+    monkeypatch.setattr(avatars.requests, "post", lambda *a, **kw: response)
+    with pytest.raises(avatars.AvatarRuntimeHTTPError) as failure:
+        avatars.RuntimeClient().generate("job", "private-prompt", ["private-image"], 1)
+    assert failure.value.code == status
+    assert str(status) in str(failure.value)
+    assert "private" not in str(failure.value)
+
+
+def test_runtime_load_failure_logs_exit_before_cleanup(tmp_path, monkeypatch, caplog):
+    from ledger import avatar_runtime
+    caplog.set_level("INFO", logger="ledger.avatar_runtime")
+    runtime = Runtime(tmp_path)
+    process = MagicMock()
+    process.poll.return_value = 137
+    monkeypatch.setattr(avatar_runtime.subprocess, "Popen", lambda *a, **kw: process)
+    def unload():
+        runtime.process = None
+    runtime._unload = MagicMock(side_effect=unload)
+    with pytest.raises(RuntimeError):
+        runtime._load()
+    assert "phase=model_load outcome=error exception=RuntimeError" in caplog.text
+    assert "process_exit_code=137" in caplog.text
+    assert runtime.process is None
+
+
+def test_runtime_inference_failure_logs_status_without_response(tmp_path, monkeypatch, caplog):
+    import requests
+    caplog.set_level("INFO", logger="ledger.avatar_runtime")
+    runtime = Runtime(tmp_path)
+    runtime._load = MagicMock()
+    runtime._unload = MagicMock()
+    response = requests.Response()
+    response.status_code = 500
+    response._content = b"private-image-prompt"
+    failure = requests.HTTPError("private-provider-message", response=response)
+    monkeypatch.setattr("ledger.avatar_runtime.requests.post", MagicMock(side_effect=failure))
+    with pytest.raises(requests.HTTPError):
+        runtime.generate({"request_id": "one", "prompt": "private-prompt", "references": ["cmVm"], "seed": 1})
+    assert "phase=inference outcome=error exception=HTTPError upstream_http_status=500" in caplog.text
+    assert "private" not in caplog.text
+    runtime._unload.assert_called_once()
