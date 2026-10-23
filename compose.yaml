@@ -83,7 +83,10 @@ services:
 
   ledger-web:
     build: .
-    environment: *ledger-environment
+    environment:
+      <<: *ledger-environment
+      SLACK_SOCKET_MODE: ${SLACK_SOCKET_MODE:-false}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
     ports: ["127.0.0.1:${LEDGER_WEB_PORT:-3000}:3000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/health', timeout=2).close()"]

@@ -10,8 +10,10 @@ SLACK_PATHS = ("/slack/events", "/slack/commands", "/slack/interactions")
 
 
 class HTTPApp:
-    def __init__(self, bolt, store, sources=None):
+    def __init__(self, bolt, store, sources=None, *, callbacks_enabled=True):
         self.bolt, self.store, self.sources = bolt, store, sources
+        self.callbacks_enabled = callbacks_enabled
+        self.transport_ready = lambda: True
 
     def __call__(self, env, start_response):
         started = time.monotonic()
@@ -24,9 +26,11 @@ class HTTPApp:
                     self.store.ready()
                     if self.sources is not None:
                         self.sources.ready()
+                    if not self.transport_ready():
+                        status, text = 503, "Slack transport not ready"
                 except Exception:
                     status, text = 503, "Database not ready"
-        elif path in SLACK_PATHS and method == "POST":
+        elif self.callbacks_enabled and path in SLACK_PATHS and method == "POST":
             try:
                 length = int(env.get("CONTENT_LENGTH", "0"))
                 if length < 0 or length > 1024 * 1024:

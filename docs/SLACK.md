@@ -4,7 +4,7 @@
 
 Check `/kudos` availability before installing; slash-command names can collide with other installed apps. Create an app **from a manifest** in the intended workspace, paste the modified JSON, review permissions, and install it. Save the bot OAuth token as `SLACK_BOT_TOKEN`, the Basic Information signing secret as `SLACK_SIGNING_SECRET`, the workspace ID as `SLACK_TEAM_ID`, and the bot's Slack user ID as `SLACK_BOT_USER_ID`. The last value is a `U...` user ID, not an `A...` app ID or `B...` bot ID; the bot token's `auth.test` response provides `team_id` and `user_id`.
 
-Start web ingress and the tunnel using [deployment](DEPLOYMENT.md), then verify the Events API Request URL in Slack. Bolt responds to Slack's challenge. Enable Events and Interactivity as represented in the manifest; leave Socket Mode disabled. If updating an installed app's scopes, reinstall/re-authorize it before testing. The service uses a supplied bot token and does not implement an OAuth installation/refresh endpoint, so automatic token rotation is disabled in this example.
+For default HTTP mode, start web ingress and the tunnel using [deployment](DEPLOYMENT.md), then verify the Events API Request URL in Slack. Bolt responds to Slack's challenge. Enable Events and Interactivity as represented in the manifest; leave Socket Mode disabled unless following the [Socket Mode setup](#optional-socket-mode) below. If updating an installed app's scopes, reinstall/re-authorize it before testing. The service uses a supplied bot token and does not implement an OAuth installation/refresh endpoint, so automatic token rotation is disabled in this example.
 
 ## Bot icon
 
@@ -59,11 +59,48 @@ Accounting logs `Slack event processed ... outcome=reply_queued` when it queues 
 
 Linked human members may chat in DMs without opting in. In any channel the bot has joined, address The Ledger by name or Slack mention, or continue a thread containing a bot reply or a bot-authored root post. The first bot response to a top-level message is broadcast to its parent conversation; later replies remain in the thread. Only registered Ledger channels examine unaddressed messages containing `?` or recognize self-directed progress requests, with one exception: any human user, linked or not and regardless of Ledger participation, can ask supported questions about space usage or new-member totals in a DM or any channel where the bot is currently a member. Generic “how many people” wording must bind an attendance verb and the space, makerspace, or “here”; supported forms include “visited the makerspace,” “came to the space,” “came here,” and “checked in here.” Named destinations must end before the supported time period, punctuation, or question boundary. Destination filtering applies to every attendance form, including “how busy,” visitors, and check-ins, so website, page, class, course, workshop, and station contexts remain outside the physical-attendance path. The count itself comes from a deterministic fixed aggregate. For space-use answers, the interactive worker sends only that count and its approved timeframe to Qwen for varied wording such as “A total of 12 members used the space today.” Python accepts only a bounded affirmative factual grammar; changed, negated, approximate, bounded, or otherwise qualified totals, changed timeframes, identifier/storage wording, and extra numerical claims use the same plain member fallback. The original question and ambient history are never sent or retained. “Right now” means the preceding two hours and must remain a recent-use estimate rather than live occupancy. New-member counts stay deterministic, use `startDate`, and exclude merged duplicate records. Unrelated ambient messages in other channels are neither saved as chat context nor sent to inference; old ambient jobs are rejected before inference, and unrequested stored history is excluded from addressed replies there. Ordinary unaddressed chatter receives no reply. Nonparticipants may ask about The Ledger and XP generally and known shops/tools, with an optional `/ledger join` journey invitation; rules, specific ranks/quests and retained personal progress stay unavailable. Participants receive accurate current/lower rank details and next-rank requirements, with higher-rank names/details and inaccessible quests excluded from conversation facts. Unknown answers, including unavailable shop/tool facts, say "I don't know." Chat narration does not itself execute administrative commands or award XP; use the command/forms for actions. Ensure `message.im` and `app_mention` subscriptions, `message.groups` for private-channel replies and `message.channels` for joined public channels, and the matching manifest scopes are installed. `SLACK_BOT_USER_ID` must be the bot's `U...` user ID.
 
+## Optional Socket Mode
+
+Set `SLACK_SOCKET_MODE=true` and `SLACK_APP_TOKEN=xapp-...` in `.env` to receive
+commands, events, and interactions over an outbound WebSocket instead of the
+tunnel. In the Slack app settings, enable **Socket Mode**, then create an
+**app-level token** under Basic Information with `connections:write`. This is
+separate from the existing `SLACK_BOT_TOKEN`; keep the bot scopes, event
+subscriptions, and interactivity enabled. See [Slack's Socket Mode guide](https://docs.slack.dev/tools/bolt-python/concepts/socket-mode/).
+
+Rebuild/recreate the web service after applying these settings:
+
+```sh
+docker compose up -d --build --no-deps ledger-web
+```
+
+The Docker entrypoint and `ledger serve` honor the flag. Socket Mode starts one
+consumer per web container, with automatic SDK reconnection and graceful shutdown;
+it does not start consumers in Gunicorn workers or accounting/delivery workers.
+Compose passes the app token only to `ledger-web`. Existing queue persistence,
+workspace checks, authorization, and acknowledgement behavior still apply. Socket
+Mode bypasses inbound tunnel routing, but does not fix slow handlers or Mongo errors.
+
+`/health` stays available; `/ready` requires both databases and an active Slack
+socket. HTTP `/slack/*` callbacks return 404 in Socket Mode. The signing secret is
+required only for HTTP mode. Cloudflared may remain running, but is not needed for
+Slack ingress in Socket Mode. Do not put the app token in the manifest or bot scopes.
+
+The checked-in manifest defaults to HTTP (`socket_mode_enabled: false`). If importing
+it for a Socket Mode deployment, change that setting to `true` in the imported copy;
+reimporting the default manifest would disable Socket Mode. To return to HTTP, set
+`SLACK_SOCKET_MODE=false`, disable Socket Mode in Slack, restore the callback URLs
+and signing secret, and recreate `ledger-web`. The normal two-worker Gunicorn
+server and signed HTTP verification are then used again.
+
 ## Troubleshooting "the app did not respond"
 
 Slack needs an HTTP acknowledgment within three seconds of invoking a command ([Slack's command guide](https://docs.slack.dev/interactivity/implementing-slash-commands/)). Healthy `/health` and `/ready` responses do not verify this path: readiness checks Mongo connectivity and Ledger replica-set topology, not collection read/write authorization, callback reachability, or worker delivery.
 
-1. In the Slack app's **Slash Commands**, check each command's Request URL is exactly `https://YOUR_HOST/slack/commands`. Event subscriptions and interactivity have their own URLs above. Leave Socket Mode disabled. Editing the repository manifest alone does not update an installed Slack app.
+For Socket Mode, check `docker compose logs ledger-web` for connection errors and
+check `/ready`; no HTTP command POST is expected. For HTTP mode:
+
+1. In the Slack app's **Slash Commands**, check each command's Request URL is exactly `https://YOUR_HOST/slack/commands`. Event subscriptions and interactivity have their own URLs above. Leave Socket Mode disabled in HTTP mode. Editing the repository manifest alone does not update an installed Slack app.
 2. Send an **unsigned** probe through the public hostname (replace `YOUR_HOST`):
 
    ```sh
@@ -134,7 +171,7 @@ The added `im:read` scope is required by [conversations.info](https://docs.slack
 
 `groups:write` is needed for [private-channel removal](https://docs.slack.dev/reference/methods/conversations.kick/) as well as [invitations](https://docs.slack.dev/reference/methods/conversations.invite/); `channels:manage` covers public-channel removal. Removal silently skips every Slack bot user, including The Ledger's configured bot ID and Slackbot. A failed human `conversations.kick` is logged as a best-effort cleanup failure and is not retried. Slack 429 responses establish a client-wide cooldown from `Retry-After`; later Slack API calls wait until that interval expires. [External file uploads](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) require `files:write`. `views.open`, `views.update`, `views.publish`, and `chat.getPermalink` need an authenticated bot but no extra scopes beyond this set for the supported flows.
 
-No user-token scopes, workspace administration, email lookup, reaction write, incoming webhooks, or app-level Socket Mode token are needed. Custom emoji shortcodes render in Slack without calling `emoji.list`. Ordinary app tokens do not bypass workspace policy on creating private channels or removing members; verify those permissions with workspace administrators during the pilot.
+No user-token scopes, workspace administration, email lookup, reaction write, or incoming webhooks are needed. An app-level token with `connections:write` is needed only when Socket Mode is enabled. Custom emoji shortcodes render in Slack without calling `emoji.list`. Ordinary app tokens do not bypass workspace policy on creating private channels or removing members; verify those permissions with workspace administrators during the pilot.
 
 The bot must be invited to existing private game channels before `ledger bootstrap`. Bootstrap creates new private channels if none are supplied. Test join/leave reconciliation with real members: native manual invitations can briefly expose a private channel before removal, as documented in the accepted design.
 

@@ -14,6 +14,7 @@ Copy `.env.example` to `.env` and supply:
 | --- | --- |
 | `MLAB_URI`, `LEDGER_URI` | Reachable Mongo URIs with separate [restricted database credentials](MONGODB_ACCESS.md) |
 | `SLACK_*` | Bot token, signing secret, workspace ID, and bot user ID from the installed app |
+| `SLACK_SOCKET_MODE`, `SLACK_APP_TOKEN` | Optional outbound Socket Mode: set `true` and an `xapp-` token with `connections:write`; also enable Socket Mode in Slack |
 | `MQTT_*` | Reachable existing broker and its credentials/TLS setting |
 | `LEDGER_WEB_PORT` | Host loopback port for the web service; defaults to `3000`, or choose a free port such as `3001` |
 | `LEDGER_LLM_BASE_URL` | `http://ledger-ai:8000/v1` for this Compose stack |
@@ -32,6 +33,11 @@ Compose requires nonblank inference and tunnel secrets. It does not invent, prin
 If another application uses host port 3000, set `LEDGER_WEB_PORT=3001` in `.env`. Apply a port change with `docker compose up -d --no-deps ledger-web`, then access the service at `http://127.0.0.1:3001`. The container listens on port 3000, so its health check and the Cloudflare Tunnel origin continue to use port 3000.
 
 ## Cloudflare public hostname
+
+For outbound Slack ingress, use [Socket Mode](SLACK.md#optional-socket-mode).
+The standard Compose file still requires the configured tunnel token and starts
+cloudflared; it can remain running, but Slack callbacks do not use it in Socket Mode.
+The following public-hostname setup applies to the default HTTP transport.
 
 Create a remotely managed Cloudflare Tunnel and put its connector token in `CLOUDFLARE_TUNNEL_TOKEN`. Compose passes it via `TUNNEL_TOKEN` to `cloudflare/cloudflared` running `tunnel --no-autoupdate run`. The token identifies the tunnel; hostname routing is configured in Cloudflare, not in the token or Compose. See [tunnel setup](https://developers.cloudflare.com/tunnel/get-started/) and [token environment parameters](https://developers.cloudflare.com/tunnel/reference/run-parameters/).
 
