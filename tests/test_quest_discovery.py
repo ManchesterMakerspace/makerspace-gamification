@@ -210,6 +210,7 @@ def test_discovery_uses_one_total_two_second_database_budget(joined, monkeypatch
     assert calls == [2]
 
 
+@pytest.mark.mongo_integration
 @pytest.mark.skipif(not os.environ.get("LEDGER_TEST_MONGO_URI"),
                     reason="Set LEDGER_TEST_MONGO_URI to a disposable Mongo replica set")
 def test_real_owned_quest_joins_and_keyset_pages(joined):
