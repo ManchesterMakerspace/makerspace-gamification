@@ -4,7 +4,7 @@ import os
 import signal
 from wsgiref.simple_server import make_server
 
-from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_bolt.adapter.socket_mode.websocket_client import SocketModeHandler
 
 HTTP_COMMAND = ["gunicorn", "--bind", "0.0.0.0:3000", "--workers", "2", "--timeout", "30",
                 "--access-logfile", "-", "--access-logformat",
@@ -35,7 +35,7 @@ def serve_socket_mode(port=3000):
         # Bind health before connecting; startup failure closes both resources.
         with make_server("0.0.0.0", port, app) as server:
             handler.connect()
-            logging.info("Slack Socket Mode connected; HTTP serves health/readiness only")
+            logging.info("Slack Socket Mode started (websocket-client); HTTP serves health/readiness only")
             server.serve_forever()
     finally:
         handler.close()

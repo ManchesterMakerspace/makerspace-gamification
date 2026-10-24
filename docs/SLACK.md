@@ -75,7 +75,8 @@ docker compose up -d --build --no-deps ledger-web
 ```
 
 The Docker entrypoint and `ledger serve` honor the flag. Socket Mode starts one
-consumer per web container, with automatic SDK reconnection and graceful shutdown;
+consumer per web container using Bolt's `websocket-client` adapter, with automatic
+SDK reconnection and graceful shutdown;
 it does not start consumers in Gunicorn workers or accounting/delivery workers.
 Compose passes the app token only to `ledger-web`. Existing queue persistence,
 workspace checks, authorization, and acknowledgement behavior still apply. Socket
@@ -85,6 +86,26 @@ Mode bypasses inbound tunnel routing, but does not fix slow handlers or Mongo er
 socket. HTTP `/slack/*` callbacks return 404 in Socket Mode. The signing secret is
 required only for HTTP mode. Cloudflared may remain running, but is not needed for
 Slack ingress in Socket Mode. Do not put the app token in the manifest or bot scopes.
+
+### Repeated broken pipes
+
+Slack periodically refreshes Socket Mode connections, but a new session failing
+within milliseconds with `BrokenPipeError` on every retry is an outage, not normal
+refresh behavior. Ledger uses Slack's supported `websocket-client` adapter in place
+of the built-in socket implementation as a transport mitigation. Rebuild the image
+and recreate `ledger-web` with the command above to install the new dependency;
+restarting an old container does not apply this change. This does not establish the
+cause of a deployed network failure or guarantee recovery through a broken proxy.
+
+After deployment, check `docker compose logs --timestamps --since=10m ledger-web`,
+confirm `/ready` returns 200, and invoke `/ledger` to verify end-to-end handling.
+`/health` returning 200 only confirms the process is alive; Compose uses this
+liveness check, so a healthy container can still have no Slack connection.
+If immediate disconnects persist, investigate the host/container's outbound TLS
+WebSocket path and any configured proxy/firewall. Collect installed versions with
+`docker compose exec ledger-web python -c "from importlib.metadata import version; print({p: version(p) for p in ['slack-bolt', 'slack-sdk', 'websocket-client']})"`.
+Avoid enabling WebSocket frame tracing in production: it can expose URLs and message
+payloads. See [Slack's adapter reference](https://docs.slack.dev/tools/bolt-python/reference/adapter/socket_mode/websocket_client/index.html).
 
 The checked-in manifest defaults to HTTP (`socket_mode_enabled: false`). If importing
 it for a Socket Mode deployment, change that setting to `true` in the imported copy;
