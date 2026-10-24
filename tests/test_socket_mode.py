@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import yaml
-from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_bolt.adapter.socket_mode.websocket_client import SocketModeHandler
 from slack_sdk import WebClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 
@@ -68,6 +68,39 @@ def test_socket_health_disables_http_ingress_and_checks_connection():
     assert get('/ready')[0] == '200 OK'
     assert request(app, {}, path='/slack/commands')[0] == 404
     app.bolt.dispatch.assert_not_called()
+
+
+def test_websocket_transport_reconnects_and_readiness_tracks_new_session():
+    # Exercise the real adapter with network IO and background threads replaced.
+    from slack_sdk.socket_mode import websocket_client
+
+    web_client = Mock(spec=WebClient)
+    web_client.apps_connections_open.side_effect = [
+        {'url': 'wss://example.invalid/first'},
+        {'url': 'wss://example.invalid/second'},
+    ]
+    app = Mock(client=web_client, logger=logging.getLogger('socket-test'))
+    first, second = Mock(sock=None), Mock(sock=None)
+    with patch.object(websocket_client.IntervalRunner, 'start', lambda runner: runner), \
+            patch.object(websocket_client.websocket, 'WebSocketApp', side_effect=[first, second]) as sockets:
+        handler = server.SocketModeHandler(app, 'xapp-test')
+        try:
+            handler.connect()
+            assert not handler.client.is_connected()
+            first.sock = Mock()
+            assert handler.client.is_connected()
+            first.sock = None
+            assert not handler.client.is_connected()
+            sockets.call_args.kwargs['on_close'](first, 1006, None)
+            assert web_client.apps_connections_open.call_count == 2
+            first.close.assert_called_once()
+            assert not handler.client.is_connected()
+            second.sock = Mock()
+            assert handler.client.is_connected()
+        finally:
+            handler.close()
+        second.close.assert_called_once()
+        assert not handler.client.auto_reconnect_enabled
 
 
 def test_default_entrypoint_preserves_gunicorn(monkeypatch):
