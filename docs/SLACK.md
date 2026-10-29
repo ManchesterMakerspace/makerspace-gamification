@@ -1,5 +1,11 @@
 # Slack application manifest and installation
 
+Optional [once-ever introductions](INTRODUCTIONS.md) ask eligible never-joined
+members about RPGs, then offer the existing explicit consent form. Both stages
+allow 14 days; closing the modal does not reset its deadline. Decline/timeout
+deletes only the bot's introduction messages and leaves peer invitations available.
+No additional Slack scopes or callback URLs are required.
+
 [slack-manifest.json](../slack-manifest.json) is the importable example manifest for The Ledger's single-workspace HTTP app. Replace every `LEDGER_HOST` with the public Cloudflare Tunnel hostname, without a scheme or path (for example `ledger.example.org`). It contains no credentials. Slack's [manifest reference](https://docs.slack.dev/reference/app-manifest/) defines the JSON format.
 
 Check `/kudos` availability before installing; slash-command names can collide with other installed apps. Create an app **from a manifest** in the intended workspace, paste the modified JSON, review permissions, and install it. Save the bot OAuth token as `SLACK_BOT_TOKEN`, the Basic Information signing secret as `SLACK_SIGNING_SECRET`, the workspace ID as `SLACK_TEAM_ID`, and the bot's Slack user ID as `SLACK_BOT_USER_ID`. The last value is a `U...` user ID, not an `A...` app ID or `B...` bot ID; the bot token's `auth.test` response provides `team_id` and `user_id`.

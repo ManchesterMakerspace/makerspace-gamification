@@ -25,7 +25,7 @@ from .worker import Worker, ingest_mqtt
 from .anomaly.slack import ANOMALY_KINDS
 
 
-CHANNEL_KINDS = ["remove", "invite", "provision_slot", "review_channel_invite"]
+CHANNEL_KINDS = ["remove", "invite", "provision_slot", "review_channel_invite", "intro_maintain"]
 RESULT_KINDS = ["summary_flush", "summary_delivery"]
 INTERACTIVE_KINDS = ["conversation", "guidance", "community_count_reply", "sponsor_report", "kudos_submit", "kudos_submission_reply"]
 HOME_KINDS = ["home_publish", "home_profile_photo"]

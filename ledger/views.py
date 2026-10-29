@@ -85,12 +85,17 @@ def values(body):
     return out
 
 
-def consent(sponsor=None):
-    return modal("consent", "Join The Ledger", [
+def consent(sponsor=None, *, introduction=None):
+    view = modal("consent", "Join The Ledger", [
         section("The Ledger recognizes learning, mentoring, and community contribution. Joining imports verified makerspace history and invites you to private game channels."),
         section("If you opt out, channel access and game announcements stop. Your skills and XP are retained and eligible makerspace activity continues accruing silently. Peer-addressed kudos may still be delivered, but earns no kudos XP while you are opted out."),
         section("The Ledger customizes messages using relevant game facts. Observation is on by default for eligible members in configured Ledger channels, independently of joining, after an explanatory notice. The System records suggestions for audit only; they do not change XP or ranks or send recognition messages. To opt out, use /ledger preferences and uncheck Allow observation. Joining, observation, and arrival mentions are separate choices. Participation never changes tool safety clearances."),
         checkbox("agree", "I choose to participate")], {"sponsor": sponsor}, "Opt in")
+    if introduction is not None:
+        from .introductions import EXPLANATION
+        view["blocks"].insert(0, section(EXPLANATION))
+        view["private_metadata"] = json.dumps({"introduction": introduction})
+    return view
 
 
 def participation(ledger, member_id, title="Already opted in"):

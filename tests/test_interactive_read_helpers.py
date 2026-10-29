@@ -241,7 +241,7 @@ def test_metrics_grouped_snapshot_matches_legacy_with_mixed_records(joined, monk
     base_groups = [read for read in grouped_reads if "$match" not in read[1][0]]
     result_groups = [read for read in grouped_reads if "$match" in read[1][0]]
     assert len(base_groups) == 4
-    assert len(result_groups) == 3  # Short generation, delivery timings, and summary owner totals.
+    assert len(result_groups) == 4  # Short generation, delivery timings, owners, and introduction states.
     assert all(any("$group" in stage for stage in pipeline) for _, pipeline, _ in grouped_reads)
     assert len(narrow_reads) == 1
     assert narrow_reads[0][1]["projection"] == {"_id": 0, "composed.latency": 1}

@@ -150,6 +150,7 @@ class MongoStore:
         self.db.ledger_awards.create_index([("member_id", 1), ("kind", 1)])
         self.db.ledger_context.create_index("expires_at", expireAfterSeconds=0)
         self.db.ledger_relationships.create_index([("recipient", 1), ("kind", 1)])
+        self.db.ledger_relationships.create_index([("kind", 1), ("slack_id", 1)])
         self.db.ledger_relationships.create_index([("kind", 1), ("giver", 1), ("at", -1), ("_id", 1)])
         self.db.ledger_relationships.create_index([("kind", 1), ("delegate", 1), ("status", 1)])
         self.db.ledger_relationships.create_index([("kind", 1), ("grantor", 1), ("status", 1)])

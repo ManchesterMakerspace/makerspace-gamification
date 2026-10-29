@@ -1,5 +1,10 @@
 # Separate Mongo connections and restricted roles
 
+[Once-ever introductions](INTRODUCTIONS.md) reuse `ledger_relationships`,
+`ledger_catalog`, `ledger_inbox`, and `ledger_outbox`; no collection or role grant
+is added. `ledger init` adds a `(kind, slack_id)` relationship index. Member,
+checkout, tool, shop, and Slack-link reads use the existing read-only source role.
+
 The optional anomaly service uses a separate, manifest-derived
 `ledger_anomaly_source_reader` role with exact per-collection `find` and
 `changeStream` actions, never source writes. It does not alter the normal Ledger
