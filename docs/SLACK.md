@@ -114,6 +114,42 @@ reimporting the default manifest would disable Socket Mode. To return to HTTP, s
 and signing secret, and recreate `ledger-web`. The normal two-worker Gunicorn
 server and signed HTTP verification are then used again.
 
+## Standalone Slack connectivity check
+
+After rebuilding the web image, run the bot-token check inside the deployed container:
+
+```sh
+docker compose exec ledger-web ledger slack-check
+```
+
+This calls `auth.test` and requires the returned bot identity to match
+`SLACK_TEAM_ID` and `SLACK_BOT_USER_ID`. It needs `SLACK_BOT_TOKEN` but no database,
+MQTT, Google Docs, or inference service. JSON output includes dependency versions
+and individual check results. Exit status is 0 for success and 1 for failure.
+Exception messages, tokens, WebSocket URLs and received payloads are not printed.
+
+To test the outbound WebSocket too, stop all normal Socket Mode consumers for this
+app first, then use a temporary container with the same service environment/network:
+
+```sh
+docker compose stop ledger-web
+docker compose run --rm --no-deps ledger-web ledger slack-check --socket
+docker compose up -d --no-deps ledger-web
+```
+
+Run the last command even if the check fails. The socket check additionally requires
+`SLACK_APP_TOKEN` with `connections:write`, opens a connection using `websocket-client`,
+requires Slack's `hello`, and observes 20 seconds of repeated matching ping/pong
+responses. It does not reconnect over failures. Slack can route events to this
+temporary connection; use a maintenance window, avoid commands during the probe,
+and retry commands after restoring ingress. An application envelope fails the check
+and is never acknowledged or saved. Neither mode posts Slack messages.
+
+Passing proves bot authentication/identity and, with `--socket`, sampled transport
+health. It does not verify channel permissions, app-token/bot-token app pairing,
+the running Bolt consumer, database persistence, workers, or end-to-end replies.
+After restoring ingress, invoke `/ledger` manually to verify that complete flow.
+
 ## Troubleshooting "the app did not respond"
 
 Slack needs an HTTP acknowledgment within three seconds of invoking a command ([Slack's command guide](https://docs.slack.dev/interactivity/implementing-slash-commands/)). Healthy `/health` and `/ready` responses do not verify this path: readiness checks Mongo connectivity and Ledger replica-set topology, not collection read/write authorization, callback reachability, or worker delivery.
