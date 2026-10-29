@@ -14,6 +14,48 @@ from ledger.storage import connect
 
 @pytest.mark.mongo_integration
 @pytest.mark.skipif(not os.environ.get('LEDGER_TEST_MONGO_URI'), reason='Set LEDGER_TEST_MONGO_URI to a disposable Mongo replica set')
+def test_concurrent_introduction_reservation_delivery_and_consent(env, monkeypatch):
+    from datetime import timedelta
+    from ledger import introductions as intro
+    from ledger.storage import now
+    from ledger.worker import Worker
+    _, _, source, composer, _, slack = env
+    monkeypatch.setenv('LEDGER_AUTO_INTRODUCTIONS_ENABLED', 'true')
+    database = 'ledger_test_' + uuid4().hex
+    store = connect(os.environ['LEDGER_TEST_MONGO_URI'], database)
+    try:
+        store.ready()
+        store.indexes()
+        ledger = Ledger(store, source)
+        ledger.seed()
+        member_id = str(oid(1))
+        store.put('ledger_catalog', {'_id': intro.CONTROL, 'phase': 'active', 'generation': 'integration',
+            'facilities_id': str(oid(299)), 'activated_at': now() - timedelta(minutes=1)})
+        source.data['tool_checkouts'].append({'_id': oid(501), 'member_id': oid(1),
+            'tool_id': oid(311), 'checked_out_at': now()})
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda _: intro.observe(ledger, member_id), range(8)))
+        assert store.count('ledger_outbox', {'kind': 'intro_send'}) == 1
+        assert store.count('ledger_relationships', {'kind': 'automatic_introduction_identity'}) == 1
+        slack.chat_postMessage.side_effect = lambda **kwargs: {'ts': str(now().timestamp())}
+        def deliver(_):
+            return Worker(ledger, composer, slack, bot_id='UBOT').step('ledger_outbox', kinds=['intro_send'])
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(deliver, range(8)))
+        assert slack.chat_postMessage.call_count == 1
+        intro.respond(ledger, member_id, 'U1', intro.key(member_id), 'yes')
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda _: ledger.join(member_id, introduction=intro.key(member_id)), range(8)))
+        assert store.count('ledger_evidence', {'kind': 'consent', 'member_id': member_id}) == 1
+        assert intro.record(store, member_id)['status'] == 'joined'
+        assert ledger.participant(member_id)['opted_in']
+    finally:
+        store.db.client.drop_database(database)
+        store.db.client.close()
+
+
+@pytest.mark.mongo_integration
+@pytest.mark.skipif(not os.environ.get('LEDGER_TEST_MONGO_URI'), reason='Set LEDGER_TEST_MONGO_URI to a disposable Mongo replica set')
 def test_real_transactions_and_concurrent_exactly_once_kudos(env, monkeypatch):
     _, _, source, _, _, slack = env
     database = 'ledger_test_' + uuid4().hex

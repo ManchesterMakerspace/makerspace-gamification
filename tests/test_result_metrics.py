@@ -116,7 +116,7 @@ def test_optimized_diagnostics_use_bounded_aggregates_and_narrow_existing_latenc
         result = snapshot(store)
     assert result["short_generation"]["attempts"] == 1
     new_groups = [(collection, pipeline, kwargs) for collection, pipeline, kwargs in aggregates if "$match" in pipeline[0]]
-    assert len(new_groups) == 3
+    assert len(new_groups) == 4  # Includes bounded automatic-introduction state counts.
     assert all(kwargs == {"max_time_ms": 2000} for _, _, kwargs in new_groups)
     assert all(pipeline[-1]["$group"]["count"] == {"$sum": 1} for _, pipeline, _ in new_groups)
     assert "$push" not in json.dumps(new_groups)

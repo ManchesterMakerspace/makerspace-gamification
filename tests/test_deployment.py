@@ -82,9 +82,11 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
         'conversations_members': {'groups:read', 'channels:read'}, 'conversations_create': {'groups:write'},
         'conversations_invite': {'groups:write'}, 'conversations_kick': {'groups:write', 'channels:manage'},
         'conversations_open': {'im:write'}, 'conversations_replies': {'groups:history', 'channels:history'},
+        'conversations_history': {'im:history'},  # Introduction receipt recovery reads only the bound DM.
         'files_upload_v2': {'files:write'}, 'files_info': {'files:read'}, 'files_delete': {'files:write'},
         'chat_postMessage': {'chat:write'}, 'chat_getPermalink': set(),
-        'chat_update': {'chat:write'},
+        'chat_update': {'chat:write'}, 'chat_delete': {'chat:write'},
+        'auth_test': set(),  # Existing Slack diagnostic; no additional bot scope.
         'views_open': set(), 'views_push': set(), 'views_update': set(), 'views_publish': set(),
         # The debug WebClient subclass wraps this shared transport boundary;
         # endpoint-specific permissions remain covered by the methods above.
@@ -99,7 +101,9 @@ def test_manifest_event_coverage_interactions_and_bot_permissions():
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'call'
                     and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 'users_list'):
                 calls.add('users_list')
-    assert calls == set(method_scopes)
+    # Existing Socket Mode diagnostic uses a separate app token, not bot scopes.
+    app_token_scopes = {'apps_connections_open': {'connections:write'}}
+    assert calls == set(method_scopes) | set(app_token_scopes)
     assert all(needed <= scopes for needed in method_scopes.values())
 
 

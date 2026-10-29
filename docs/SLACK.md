@@ -1,5 +1,11 @@
 # Slack application manifest and installation
 
+Optional [once-ever introductions](INTRODUCTIONS.md) ask eligible never-joined
+members about RPGs, then offer the existing explicit consent form. Both stages
+allow 14 days; closing the modal does not reset its deadline. Decline/timeout
+deletes only the bot's introduction messages and leaves peer invitations available.
+No additional Slack scopes or callback URLs are required.
+
 [slack-manifest.json](../slack-manifest.json) is the importable example manifest for The Ledger's single-workspace HTTP app. Replace every `LEDGER_HOST` with the public Cloudflare Tunnel hostname, without a scheme or path (for example `ledger.example.org`). It contains no credentials. Slack's [manifest reference](https://docs.slack.dev/reference/app-manifest/) defines the JSON format.
 
 Check `/kudos` availability before installing; slash-command names can collide with other installed apps. Create an app **from a manifest** in the intended workspace, paste the modified JSON, review permissions, and install it. Save the bot OAuth token as `SLACK_BOT_TOKEN`, the Basic Information signing secret as `SLACK_SIGNING_SECRET`, the workspace ID as `SLACK_TEAM_ID`, and the bot's Slack user ID as `SLACK_BOT_USER_ID`. The last value is a `U...` user ID, not an `A...` app ID or `B...` bot ID; the bot token's `auth.test` response provides `team_id` and `user_id`.
@@ -113,6 +119,42 @@ reimporting the default manifest would disable Socket Mode. To return to HTTP, s
 `SLACK_SOCKET_MODE=false`, disable Socket Mode in Slack, restore the callback URLs
 and signing secret, and recreate `ledger-web`. The normal two-worker Gunicorn
 server and signed HTTP verification are then used again.
+
+## Standalone Slack connectivity check
+
+After rebuilding the web image, run the bot-token check inside the deployed container:
+
+```sh
+docker compose exec ledger-web ledger slack-check
+```
+
+This calls `auth.test` and requires the returned bot identity to match
+`SLACK_TEAM_ID` and `SLACK_BOT_USER_ID`. It needs `SLACK_BOT_TOKEN` but no database,
+MQTT, Google Docs, or inference service. JSON output includes dependency versions
+and individual check results. Exit status is 0 for success and 1 for failure.
+Exception messages, tokens, WebSocket URLs and received payloads are not printed.
+
+To test the outbound WebSocket too, stop all normal Socket Mode consumers for this
+app first, then use a temporary container with the same service environment/network:
+
+```sh
+docker compose stop ledger-web
+docker compose run --rm --no-deps ledger-web ledger slack-check --socket
+docker compose up -d --no-deps ledger-web
+```
+
+Run the last command even if the check fails. The socket check additionally requires
+`SLACK_APP_TOKEN` with `connections:write`, opens a connection using `websocket-client`,
+requires Slack's `hello`, and observes 20 seconds of repeated matching ping/pong
+responses. It does not reconnect over failures. Slack can route events to this
+temporary connection; use a maintenance window, avoid commands during the probe,
+and retry commands after restoring ingress. An application envelope fails the check
+and is never acknowledged or saved. Neither mode posts Slack messages.
+
+Passing proves bot authentication/identity and, with `--socket`, sampled transport
+health. It does not verify channel permissions, app-token/bot-token app pairing,
+the running Bolt consumer, database persistence, workers, or end-to-end replies.
+After restoring ingress, invoke `/ledger` manually to verify that complete flow.
 
 ## Troubleshooting "the app did not respond"
 

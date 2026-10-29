@@ -25,7 +25,7 @@ from .worker import Worker, ingest_mqtt
 from .anomaly.slack import ANOMALY_KINDS
 
 
-CHANNEL_KINDS = ["remove", "invite", "provision_slot", "review_channel_invite"]
+CHANNEL_KINDS = ["remove", "invite", "provision_slot", "review_channel_invite", "intro_maintain"]
 RESULT_KINDS = ["summary_flush", "summary_delivery"]
 INTERACTIVE_KINDS = ["conversation", "guidance", "community_count_reply", "sponsor_report", "kudos_submit", "kudos_submission_reply"]
 HOME_KINDS = ["home_publish", "home_profile_photo"]
@@ -147,12 +147,18 @@ def bootstrap(ledger, client):
 
 def main():
     parser = argparse.ArgumentParser(description="The Ledger")
-    parser.add_argument("action", choices=["init", "bootstrap", "serve", "worker", "reconcile", "dry-run", "prompt-matrix", "prepare-reads"])
+    parser.add_argument("action", choices=["init", "bootstrap", "serve", "worker", "reconcile", "dry-run", "prompt-matrix", "prepare-reads", "slack-check"])
+    parser.add_argument("--socket", action="store_true", help="For slack-check: open a temporary Socket Mode connection; stop normal ingress first")
     parser.add_argument("--verify", action="store_true", help="Compare prepared optimized reads with legacy reads without sending messages")
     parser.add_argument("--port", type=int, default=3000)
     parser.add_argument("--queue", choices=["all", "inbox", "outbox", "channels", "engagement", "results", "interactive", "avatars"], default="all")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    if args.action == "slack-check":
+        from .slack_check import run
+        result = run(socket=args.socket)
+        print(json.dumps(result))
+        raise SystemExit(0 if result['ok'] else 1)
     if args.action == "prompt-matrix":
         matrix = PromptMatrix.from_env()
         status = matrix.refresh()

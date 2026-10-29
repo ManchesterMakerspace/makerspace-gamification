@@ -310,7 +310,7 @@ class SlackUI:
             if not data.get("agree"):
                 raise ValueError("Explicitly choose to participate to continue.")
             self.confirm_human(actor, client)
-            self.ledger.join(actor, meta.get("sponsor"))
+            self.ledger.join(actor, meta.get("sponsor"), introduction=meta.get("introduction"))
             return {"response_action": "update", "view": views.participation(self.ledger, actor, "Opt-in saved")}
         if callback == "leave_confirm":
             self.ledger.leave(actor)
@@ -524,6 +524,9 @@ class SlackUI:
             return
         actor = self.actor(body)
         name, value = action["action_id"], action.get("value", "")
+        if name in ("intro_yes", "intro_no", "intro_open"):
+            from .introductions import action as introduction_action
+            return introduction_action(self, body, client, actor)
         if name == "admin_avatar_generate":
             from . import admin_avatars
             selection = json.loads(value)
@@ -750,6 +753,9 @@ def build_app(ui, token, signing_secret, team_id, bot_id, client=None):
             ack()
         except (ValueError, KeyError, TypeError) as error:
             ack()
+            if body.get("actions", [{}])[0].get("action_id") in ("intro_yes", "intro_no", "intro_open"):
+                # Stale introduction controls must not create an untracked game DM.
+                return
             actor = ui.actor(body)
             ui.ledger.notify(actor, "status", {"summary": str(error)}, str(uuid4()), exception=True)
 

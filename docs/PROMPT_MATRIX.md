@@ -1,6 +1,12 @@
 # Prompt Matrix Template: design and operation
 
-Version 52 adds security monitoring policy for admins, board members and anomaly
+Version 53 adds [once-ever introductions](INTRODUCTIONS.md) for never-joined active
+members: future first non-Facilities checkout or observed expiry renewal, with no
+checkout requirement for renewal. Python handles replies, explicit consent,
+14-day deadlines and deletion. Decline never blocks peer invitations. Existing
+prose is compressed without relaxing authority or privacy to preserve the size limit.
+
+Version 52 added security monitoring policy for admins, board members and anomaly
 readers. Alerts go only to configured, currently authorized staff DMs; readers
 receive suppressed aggregates. Python enforces identity, evidence and approval
 independently of inference and game participation. Expired staff remain eligible;
@@ -8,7 +14,7 @@ suspended, revoked, merged and unknown memberships do not.
 
 The 32-KiB limit and 512-byte CRLF headroom remain. `anomaly_explain` and
 `anomaly_propose` version 2 retain separate paired prompt variations. Google Doc
-overrides require the complete version-52 policy and an explicit reload; reserved
+overrides require the complete version-53 policy and an explicit reload; reserved
 jobs retain saved policy/text. No external document is published automatically.
 See [security analytics](ANOMALY_SECURITY.md) and [Slack access](ANOMALY_SLACK.md).
 

@@ -29,7 +29,7 @@ Production ingress uses Gunicorn in the supplied Linux image. `ledger serve` is 
 
 ## Staff-reviewed pilot
 
-Start with staff volunteers and a few willing members. No bulk invitation is sent by startup. Use explicit sponsorship or let members DM the bot and accept consent.
+Start with staff volunteers and a few willing members. No bulk invitation is sent by startup. Use explicit sponsorship or let members DM the bot and accept consent. Optional [once-ever introductions](INTRODUCTIONS.md) default off, baseline without messaging, and react only to future first checkouts or observed renewals. Pilot before broad enablement with `LEDGER_AUTO_INTRODUCTIONS_ENABLED=true`; inspect `automatic_introductions` in `/ledger-admin metrics` for uncertain delivery and pending cleanup.
 
 Verify in the real workspace:
 

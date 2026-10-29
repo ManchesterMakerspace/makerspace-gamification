@@ -37,7 +37,7 @@ def fake_connection(raw, *, status=200, content_type='text/plain; charset=utf-8'
 
 def test_bundled_matrix_codifies_roles_and_seed_economy():
     matrix = bundled_matrix()
-    assert matrix['version'] == '52'
+    assert matrix['version'] == '53'
     root = ElementTree.fromstring(matrix['text'])
     kudos = root.find('kudos').text
     assert 'activeMember/pending/inactive/nonMember/expired' in kudos
@@ -72,6 +72,13 @@ def test_bundled_matrix_codifies_roles_and_seed_economy():
     assert 'never completion finalization time' in root.find('economy').text
     assert 'quest_revision matches the disabled revision' in root.find('community').text
     consent = root.find('consent').text
+    assert 'Once-ever RPG introduction' in consent
+    assert 'no renewal checkout requirement/backfill' in consent
+    assert 'Fourteen days/stage from delivery' in consent
+    assert 'closing/reopening/clarification never extends' in consent
+    assert 'uncertain posts never blindly repeat' in consent
+    assert 'Intro decline/timeout does not block invitations' in root.find("roles/role[@id='sponsor']").text
+    assert 'Introduction replies never enter inference/context' in root.find('privacy').text
     assert 'first 150 characters' in consent and 'literal first/last-name tokens in any order' in consent
     assert 'valid Slack ID' in consent and '500 candidates/100 choices' in consent
     assert 'invalid/ambiguous links & known bots/deactivated identities' in consent

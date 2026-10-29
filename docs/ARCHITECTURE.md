@@ -27,6 +27,12 @@ flowchart LR
 
 ## Durable processing
 
+[Once-ever introductions](INTRODUCTIONS.md) observe nonparticipant source status
+and checkout changes through bounded inbox scans. Permanent relationship records
+serialize eligibility, delivery, and joins; they confer no consent. Fixed Python
+text supplies the messages. The independent channel worker handles expiry,
+uncertain receipt recovery, and deletion. Existing collections are reused.
+
 By default, `POST /slack/events`, `/slack/commands`, and `/slack/interactions` use Bolt's signing-secret and timestamp verification plus a single-workspace check. With `SLACK_SOCKET_MODE=true`, one outbound Socket Mode consumer uses the same handlers and workspace checks, authenticated by an app-level token; HTTP callbacks are disabled. Accepted event/command work is persisted before acknowledgement. Modal actions validate and commit their short state transitions synchronously; generation and message delivery are asynchronous. Ingress has no LLM calls. `/health` checks the process; `/ready` checks both Mongo connections and replica-set/sharded topology on the Ledger connection, plus the socket connection when enabled, not collection permissions or worker health. See [Socket Mode configuration](SLACK.md#optional-socket-mode).
 
 Mongo transactions use snapshot reads and majority writes. Award/source identities, Slack event IDs, submission keys, consent revisions, and destination IDs are deterministic `_id` uniqueness boundaries. Participant writes serialize concurrent XP/cap decisions. Corrections append journal deltas against per-source balances. The memory store is exclusively a transactional test double, never a production option.

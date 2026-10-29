@@ -1,5 +1,6 @@
 """Aggregate pilot measurements without logging member bodies or source records."""
 from collections import Counter
+from .introductions import diagnostics as introduction_diagnostics
 
 SHORT_PROFILES = ("receipt", "summary", "guidance")
 FALLBACK_REASONS = ("transport_failure", "invalid_output", "circuit_open")
@@ -91,6 +92,7 @@ def _legacy_snapshot(store):
         'delegation_revocations': sum(e.get('kind') == 'delegation_audit' and e.get('action') == 'revoked' for e in evidence),
         'delegation_failures': sum(j.get('last_error') == 'Denied' for j in store.select('ledger_inbox')),
         'arrival_outcomes': dict(Counter(e['status'] for e in evidence if e.get('kind') == 'arrival')),
+        'automatic_introductions': introduction_diagnostics(store),
         **_legacy_diagnostics(evidence, jobs),
     }
 
@@ -172,5 +174,6 @@ def snapshot(store):
         "delegation_revocations": total(lambda d: d.get("kind") == "delegation_audit" and d.get("action") == "revoked"),
         "delegation_failures": sum(j["denied"] for j in inbox),
         "arrival_outcomes": counter(evidence, "status", lambda d: d.get("kind") == "arrival"),
+        "automatic_introductions": introduction_diagnostics(store),
         **_diagnostics(short, delivered, owners),
     }

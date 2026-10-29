@@ -92,7 +92,13 @@ class Worker:
 
     def inbox(self, job):
         payload = job["payload"]
-        if job["kind"] == "avatar_backfill":
+        if job["kind"] == "intro_scan":
+            from .introductions import scan
+            scan(self.ledger, job)
+        elif job["kind"] == "intro_observe":
+            from .introductions import observe
+            observe(self.ledger, payload["member_id"])
+        elif job["kind"] == "avatar_backfill":
             from .avatars import backfill_page
             backfill_page(self, job)
         elif job["kind"] == "catalog_refresh":
@@ -103,9 +109,13 @@ class Worker:
                                   action_id=f"{job['_id']}:{payload['member_id']}")
         elif job["kind"] == "reconcile_targets":
             for member_id in payload["members"]:
+                from .introductions import observe
+                observe(self.ledger, member_id)
                 if self.ledger.participant(member_id):
                     self.ledger.reconcile(member_id, action_id=f"{job['_id']}:{member_id}")
         elif job["kind"] == "reconcile":
+            from .introductions import schedule_scan
+            schedule_scan(self.ledger, job.get("_id") or f"direct:{now().isoformat()}")
             from .catalog_cache import schedule_refresh
             schedule_refresh(self.store)
             from .review_notifications import reconcile
@@ -682,6 +692,9 @@ class Worker:
 
     def event(self, event, key, attempts=1):
         kind = event.get("type")
+        from .introductions import event as introduction_event
+        if introduction_event(self, event):
+            return "introduction_handled"
         if kind in ("message", "app_mention"):
             from .anomaly.slack import route_anomaly_event
             if event.get("user") != self.bot_id and route_anomaly_event(self.ledger, self.slack, event):
@@ -1706,6 +1719,9 @@ class Worker:
     def outbox(self, job):
         p = job["payload"]
         kind = job["kind"]
+        if kind in ("intro_send", "intro_maintain"):
+            from .introductions import maintain, send
+            return send(self, job) if kind == "intro_send" else maintain(self, p["member_id"])
         if kind in ("kudos_submit", "kudos_submission_reply"):
             from .kudos_submission import process, reply
             return process(self, job) if kind == "kudos_submit" else reply(self, job)
@@ -2327,6 +2343,12 @@ def ingest_mqtt(store, topic, payload, retained=False):
         store.atomic(lambda s: enqueue(s, "ledger_inbox", "checkin:" + checkin_id, "arrival", {"checkin_id": checkin_id}))
         return True
     key = "mqtt:" + hashlib.sha256(topic.encode() + payload).hexdigest()
+    if collection in ("members", "slack_users") and isinstance(doc, dict) and not retained:
+        member_id = sid(doc.get("_id") if collection == "members" else doc.get("member_id"))
+        if member_id:
+            from .introductions import enabled
+            if enabled():
+                store.atomic(lambda s: enqueue(s, "ledger_inbox", "intro:" + key, "intro_observe", {"member_id": member_id}))
     # Delivery order is only a hint. The worker rereads canonical Mongo records.
     targets = set()
     if isinstance(doc, dict) and collection == "members" and doc.get("status") in ("revoked", "suspended"):

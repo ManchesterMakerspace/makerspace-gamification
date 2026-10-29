@@ -131,10 +131,13 @@ class Ledger:
         ranks = self.store.get("ledger_catalog", "rank_display")["ranks"]
         return deepcopy(ranks[slot - 1]) if slot else {"slot": 0, "name": "Participant", "emoji": ""}
 
-    def join(self, member_id, sponsor=None):
-        return self.tx("_join", member_id, sponsor)
+    def join(self, member_id, sponsor=None, *, introduction=None):
+        return self.tx("_join", member_id, sponsor, introduction)
 
-    def _join(self, member_id, sponsor):
+    def _join(self, member_id, sponsor, introduction=None):
+        from .introductions import joined, validate_consent
+        if introduction is not None:
+            validate_consent(self, member_id, introduction)
         if (self.store.get("ledger_catalog", "control") or {}).get("paused"):
             raise Denied("The Ledger is paused for maintenance. Please try joining later.")
         if not self.sources.permitted(member_id):
@@ -146,6 +149,7 @@ class Ledger:
             raise Denied("Your Slack identity is deactivated.")
         p = self.participant(member_id)
         if p and p["opted_in"]:
+            joined(self, member_id)
             return p
         first = not p
         if first:
@@ -164,6 +168,7 @@ class Ledger:
                  consent_generation=p.get("consent_generation", 0) + 1)
         p.setdefault("preferences", {"observation": True, "arrival_mentions": True})
         self.store.put("ledger_participants", p)
+        joined(self, member_id)
         self.store.put("ledger_evidence", {"_id": f"consent:{member_id}:{p['revision']}", "kind": "consent",
                        "member_id": member_id, "opted_in": True, "at": now(), "silent_accrual": True})
         if sponsor:
