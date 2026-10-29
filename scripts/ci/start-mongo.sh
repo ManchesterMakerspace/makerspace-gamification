@@ -33,6 +33,8 @@ wait_for() {
     return 1
 }
 
+# Containers share the Docker host kernel, regardless of the image's distro.
+docker info --format 'Mongo Docker host: {{.OperatingSystem}}; kernel {{.KernelVersion}}; architecture {{.Architecture}}'
 docker run -d --name ledger-mongo -p 127.0.0.1:27017:27017 \
     "$MONGO_TEST_IMAGE" --replSet rs0 --bind_ip_all
 wait_for ping 'if (db.adminCommand({ping:1}).ok !== 1) { quit(1); }'

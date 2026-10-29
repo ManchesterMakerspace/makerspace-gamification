@@ -24,6 +24,7 @@ def test_mongo_startup_lifecycle(tmp_path, mode):
     hook.write_text(r'''docker() {
     printf '%s\n' "$*" >> "$CALLS"
     case "$1" in
+        info) printf 'Mongo Docker host: Ubuntu 22.04; kernel 6.8.0-test; architecture x86_64\n' ;;
         run) [[ "$MODE" != run_failure ]] || return 17 ;;
         inspect)
             if [[ "$3" == '{{.State.Running}}' ]]; then
@@ -46,6 +47,9 @@ sleep() { :; }
                  MONGO_TEST_IMAGE="mongo:test@sha256:test"),
         capture_output=True, text=True, timeout=20)
     trace = calls.read_text()
+    # Kernel diagnostics must survive even an immediate container startup failure.
+    assert "kernel 6.8.0-test" in result.stdout
+    assert trace.index("info --format") < trace.index("run -d")
     if mode == "success":
         assert result.returncode == 0
         assert "rs.initiate" in trace and "isWritablePrimary" in trace
@@ -68,7 +72,9 @@ sleep() { :; }
 def test_ci_lanes_are_independent_and_cleanup_follows_diagnostics():
     jobs = yaml.safe_load((ROOT / ".github/workflows/tests.yml").read_text())["jobs"]
     ordinary, mongo = jobs["test"], jobs["mongo-integration"]
-    assert ordinary["runs-on"] == mongo["runs-on"] == "ubuntu-24.04"
+    assert ordinary["runs-on"] == "ubuntu-24.04"
+    # Keep the pinned Mongo image on the compatible 6.8-kernel runner.
+    assert mongo["runs-on"] == "ubuntu-22.04"
     assert "needs" not in ordinary and "needs" not in mongo
     assert any('pytest -m "not mongo_integration"' in s.get("run", "") for s in ordinary["steps"])
     assert all("start-mongo" not in s.get("run", "") for s in ordinary["steps"])

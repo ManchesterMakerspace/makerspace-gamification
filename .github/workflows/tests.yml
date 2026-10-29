@@ -39,7 +39,9 @@ jobs:
       - name: Run ordinary tests
         run: python -m pytest -m "not mongo_integration" --strict-markers
   mongo-integration:
-    runs-on: ubuntu-24.04
+    # Ubuntu 24.04 runners now use a 7.0 Azure kernel rejected by this Mongo pin.
+    # Ubuntu 22.04 uses 6.8; revisit after SERVER-121912 / SERVER-131779 validation.
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     env:
       # Official 8.0.34-noble manifest verified against Docker Registry.
